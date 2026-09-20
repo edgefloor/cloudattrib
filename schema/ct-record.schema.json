@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloudattrib.local/schema/ct-record.schema.json",
+  "title": "Certificate Transparency record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "certificate_hash", "logged_at", "source_id", "provenance", "verification"],
+  "properties": {
+    "name": {"type": "string"},
+    "wildcard": {"type": "boolean"},
+    "certificate_hash": {"type": "string"},
+    "log_id": {"type": "string"},
+    "entry_index": {"type": "integer", "minimum": 0},
+    "logged_at": {"type": "string", "format": "date-time"},
+    "not_before": {"type": "string", "format": "date-time"},
+    "not_after": {"type": "string", "format": "date-time"},
+    "source_id": {"type": "string"},
+    "provenance": {"enum": ["verified_log", "log_unverified", "imported_unverified"]},
+    "verification": {
+      "type": "object",
+      "required": ["checkpoint_signature", "continuity", "entry_inclusion"],
+      "properties": {
+        "checkpoint_signature": {"$ref": "#/$defs/check"},
+        "continuity": {"$ref": "#/$defs/check"},
+        "entry_inclusion": {"$ref": "#/$defs/check"}
+      }
+    }
+  },
+  "$defs": {
+    "check": {
+      "type": "object",
+      "required": ["status", "procedure", "procedure_version"],
+      "properties": {
+        "status": {"enum": ["passed", "failed", "not_performed"]},
+        "procedure": {"type": "string"},
+        "procedure_version": {"type": "string"},
+        "tree_identity": {"type": "string"},
+        "key_identity": {"type": "string"},
+        "reason": {"type": "string"}
+      }
+    }
+  }
+}

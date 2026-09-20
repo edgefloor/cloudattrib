@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloudattrib.local/schema/finding.schema.json",
+  "title": "Finding",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "subject", "provider_id", "relation", "strength", "evidence_ids"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "subject": {"type": "string", "minLength": 1},
+    "provider_id": {"type": "string", "minLength": 1},
+    "product_id": {"type": "string"},
+    "category": {"type": "string"},
+    "relation": {"type": "string"},
+    "strength": {"enum": ["strong", "moderate", "weak"]},
+    "activity": {"type": "string"},
+    "scope": {"type": "string"},
+    "evidence_ids": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+    "conflict_ids": {"type": "array", "items": {"type": "string"}},
+    "limitations": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloudattrib.local/schema/evidence.schema.json",
+  "title": "Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "observation_ids", "dataset_records", "classified_at", "detector_id", "subject", "relation", "strength"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "observation_ids": {"type": "array", "items": {"type": "string"}},
+    "dataset_records": {"type": "array", "items": {"$ref": "#/$defs/datasetRecord"}},
+    "classified_at": {"type": "string", "format": "date-time"},
+    "detector_id": {"type": "string", "minLength": 1},
+    "rule_id": {"type": "string"},
+    "subject": {"type": "string", "minLength": 1},
+    "provider_id": {"type": "string"},
+    "product_id": {"type": "string"},
+    "category": {"type": "string"},
+    "relation": {"enum": ["web_delivery", "authoritative_dns", "mail_routing", "sending_authorization", "web_integration", "domain_verification", "network_provider", "network_origin", "service_range"]},
+    "strength": {"enum": ["strong", "moderate", "weak"]},
+    "activity": {"enum": ["configured", "responding", "verification_only", "historical", "unknown"]},
+    "scope": {"type": "string"},
+    "explanation": {"type": "string"}
+  },
+  "$defs": {
+    "datasetRecord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "revision", "digest", "record_ref", "fields"],
+      "properties": {
+        "source_id": {"type": "string"},
+        "revision": {"type": "string"},
+        "digest": {"type": "string"},
+        "record_ref": {"type": "string"},
+        "fields": {},
+        "published_at": {"type": "string", "format": "date-time"},
+        "effective_at": {"type": "string", "format": "date-time"}
+      }
+    }
+  }
+}

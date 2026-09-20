@@ -1,0 +1,8 @@
+logs: []
+budgets:
+  maximum_entries: 256
+  maximum_response_bytes: 8388608
+  maximum_requests: 24
+  maximum_elapsed: 1m
+  request_timeout: 10s
+  concurrency: 1

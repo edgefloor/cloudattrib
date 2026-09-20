@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloudattrib.local/schema/rule-bundle.schema.json",
+  "title": "Rule bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "rules"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "rules": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "signal", "field", "match", "emit", "source_refs", "reviewed_at"],
+        "properties": {
+          "id": {"type": "string"},
+          "signal": {"enum": ["dns", "http", "technology"]},
+          "field": {"type": "string"},
+          "match": {"type": "object"},
+          "emit": {"type": "object"},
+          "source_refs": {"type": "array", "items": {"type": "string"}},
+          "reviewed_at": {"type": "string", "format": "date"}
+        }
+      }
+    }
+  }
+}

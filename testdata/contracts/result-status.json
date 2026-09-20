@@ -1,0 +1,22 @@
+[
+  {
+    "name": "partial IP lookup with zero associations",
+    "summary": {"usable_path": true, "useful_evidence": false, "completed_search": true, "requested_incomplete": true},
+    "want": {"status": "partial", "http_status": 200, "cli_exit": 3}
+  },
+  {
+    "name": "wholly unavailable IP lookup",
+    "summary": {"usable_path": false},
+    "want": {"error_code": "capability_unavailable", "http_status": 503, "cli_exit": 4}
+  },
+  {
+    "name": "partial replay",
+    "summary": {"usable_path": true, "useful_evidence": true, "requested_incomplete": true},
+    "want": {"status": "partial", "http_status": 200, "cli_exit": 3}
+  },
+  {
+    "name": "complete no match",
+    "summary": {"usable_path": true, "useful_evidence": false, "completed_search": true},
+    "want": {"status": "complete", "http_status": 200, "cli_exit": 0}
+  }
+]

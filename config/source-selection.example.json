@@ -1,0 +1,7 @@
+{
+  "cloud_ip_ranges_revision": "0c4c204e650a47a6f57d3709893a9dc96f942ed9",
+  "providers": [],
+  "include_misc": false,
+  "official_sources": ["aws", "gcp", "azure", "iptoasn"],
+  "cdncheck_revision": "a06260a272dc92cec0747f2f369b697088899bc7"
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloudattrib.local/schema/data-manifest.schema.json",
+  "title": "Data bundle manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "bundle_id", "sources", "artifacts", "compatible_detector_builds"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "bundle_id": {"type": "string"},
+    "sources": {"type": "array", "items": {"type": "object"}},
+    "artifacts": {"type": "array", "items": {"type": "object"}},
+    "compatible_detector_builds": {"type": "array", "items": {"type": "string"}}
+  }
+}
