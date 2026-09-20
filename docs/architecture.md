@@ -84,7 +84,7 @@ Cancellation stops new scheduling and propagates through collection, leases, and
 
 ## Product relationships
 
-Use the relationship named by the signal. SPF produces `sending_authorization`. MX records produce `mail_routing`. A generic cloud range produces a provider finding, while a product-specific CNAME can name the product.
+Use the relationship named by the signal. SPF produces `sending_authorization`. MX records produce `mail_routing`. A generic cloud range produces a provider finding, while a product-specific CNAME can name the product. Technology-only findings omit `provider_id`. They require a product ID, the `web_technology` category, and the `web_integration` relation.
 
 Every supported matrix row needs a dated source, canonical mapping, positive and negative fixtures, subject, scope, relation, and evidence reference. Unsupported cases must explain the missing or insufficient signal. See [rule coverage](../rules/coverage-matrix.md) and [SPEC section 8.5](../SPEC.md#85-product-and-relationship-acceptance-matrix).
 

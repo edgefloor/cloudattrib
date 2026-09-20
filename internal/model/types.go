@@ -239,7 +239,7 @@ type Evidence struct {
 type Finding struct {
 	ID          string   `json:"id"`
 	Subject     string   `json:"subject"`
-	ProviderID  string   `json:"provider_id"`
+	ProviderID  string   `json:"provider_id,omitempty"`
 	ProductID   string   `json:"product_id,omitempty"`
 	Category    string   `json:"category,omitempty"`
 	Relation    Relation `json:"relation"`

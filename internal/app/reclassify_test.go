@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/netip"
@@ -88,6 +89,16 @@ func TestReclassifyReusesRetainedRawTechnologyLabel(t *testing.T) {
 	if len(replayed.Evidence) != 1 || replayed.Evidence[0].ProductID != "webtech.vue-js" || replayed.Evidence[0].ObservationIDs[0] != "tech-1" {
 		t.Fatalf("replayed evidence = %#v", replayed.Evidence)
 	}
+	if len(replayed.Findings) != 1 || replayed.Findings[0].ProviderID != "" || replayed.Findings[0].ProductID != "webtech.vue-js" {
+		t.Fatalf("replayed findings = %#v", replayed.Findings)
+	}
+	encoded, err := replayed.CanonicalJSON()
+	if err != nil {
+		t.Fatalf("CanonicalJSON() error = %v", err)
+	}
+	if bytes.Contains(encoded, []byte(`"provider_id":""`)) {
+		t.Fatalf("replayed report contains an empty provider ID: %s", encoded)
+	}
 }
 
 func TestReclassifyEnrichesHTTPRedirectPeerWithNewPrefixAndASNData(t *testing.T) {
@@ -150,7 +161,7 @@ type fixtureReplayDetector struct{}
 func (fixtureReplayDetector) Detect(_ context.Context, observations []model.Observation, _ model.AttributionView) ([]model.Evidence, []model.Coverage) {
 	return []model.Evidence{{
 		ID: "replayed-evidence", ObservationIDs: []string{observations[0].ID}, DetectorID: "fixture-v2", Subject: observations[0].Subject,
-		ProductID: "fixture.product", Relation: model.RelationDomainVerification, Strength: model.StrengthWeak, Activity: model.ActivityVerificationOnly,
+		ProviderID: "fixture", ProductID: "fixture.product", Relation: model.RelationDomainVerification, Strength: model.StrengthWeak, Activity: model.ActivityVerificationOnly,
 		DatasetRecords: []model.DatasetRecord{{SourceID: "fixture", Revision: "new-revision", Digest: "sha256:new", RecordRef: "fixture#/1"}},
 	}}, []model.Coverage{{Capability: "fixture-replay", Status: model.CoverageComplete, Attempted: 1, Completed: 1}}
 }

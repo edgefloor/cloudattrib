@@ -39,6 +39,41 @@ func TestRunAnalyzeRendersOnlyJSONOnStdout(t *testing.T) {
 		t.Fatalf("stderr = %q", errOut.String())
 	}
 }
+
+func TestRenderReportPreservesPartialTechnologyFinding(t *testing.T) {
+	t.Parallel()
+
+	report := model.Report{
+		Status: model.StatusPartial,
+		Evidence: []model.Evidence{{
+			ID: "evidence-1", ProductID: "webtech.react", Category: "web_technology", Relation: model.RelationWebIntegration,
+		}},
+		Findings: []model.Finding{{
+			ID: "finding-1", ProductID: "webtech.react", Category: "web_technology", Relation: model.RelationWebIntegration,
+			EvidenceIDs: []string{"evidence-1"},
+		}},
+	}
+	encoded, exit, err := RenderReport(report)
+	if err != nil {
+		t.Fatalf("RenderReport() error = %v", err)
+	}
+	if exit != 3 {
+		t.Fatalf("RenderReport() exit = %d, want 3", exit)
+	}
+	var output struct {
+		Evidence []model.Evidence             `json:"evidence"`
+		Findings []map[string]json.RawMessage `json:"findings"`
+	}
+	if err := json.Unmarshal(encoded, &output); err != nil {
+		t.Fatalf("decode CLI output: %v", err)
+	}
+	if len(output.Evidence) != 1 || len(output.Findings) != 1 {
+		t.Fatalf("CLI output dropped partial result data: %s", encoded)
+	}
+	if _, exists := output.Findings[0]["provider_id"]; exists {
+		t.Fatalf("technology-only finding contains provider_id: %s", encoded)
+	}
+}
 func TestRunLookupIPRejectsInvalidAddress(t *testing.T) {
 	var out, errOut bytes.Buffer
 	exit := Run(context.Background(), []string{"lookup-ip", "not-an-ip"}, Dependencies{Analyzer: analyzerStub{}, Stdout: &out, Stderr: &errOut})

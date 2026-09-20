@@ -319,6 +319,42 @@ func TestStoredResultAndObservationPagination(t *testing.T) {
 	}
 }
 
+func TestStoredPartialResultPreservesTechnologyEvidence(t *testing.T) {
+	t.Parallel()
+
+	report := fixtureReport(model.StatusPartial)
+	report.Evidence = []model.Evidence{{
+		ID: "evidence-1", ProductID: "webtech.react", Category: "web_technology", Relation: model.RelationWebIntegration,
+	}}
+	report.Findings = []model.Finding{{
+		ID: "finding-1", ProductID: "webtech.react", Category: "web_technology", Relation: model.RelationWebIntegration,
+		EvidenceIDs: []string{"evidence-1"},
+	}}
+	results := newFixtureResultStore()
+	if err := results.SaveReport(t.Context(), report); err != nil {
+		t.Fatalf("save fixture report: %v", err)
+	}
+	handler := mustHandler(t, Config{Results: results})
+	response := serve(handler, http.MethodGet, "/v1/results/report-1", "", "127.0.0.1:1000", nil)
+	if response.Code != http.StatusOK {
+		t.Fatalf("result status = %d, want %d: %s", response.Code, http.StatusOK, response.Body.String())
+	}
+	var output struct {
+		Status   model.ReportStatus           `json:"status"`
+		Evidence []model.Evidence             `json:"evidence"`
+		Findings []map[string]json.RawMessage `json:"findings"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &output); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if output.Status != model.StatusPartial || len(output.Evidence) != 1 || len(output.Findings) != 1 {
+		t.Fatalf("stored partial result dropped report data: %s", response.Body.String())
+	}
+	if _, exists := output.Findings[0]["provider_id"]; exists {
+		t.Fatalf("technology-only finding contains provider_id: %s", response.Body.String())
+	}
+}
+
 func TestReclassifyCreatesPinnedReplayJob(t *testing.T) {
 	t.Parallel()
 

@@ -495,11 +495,11 @@ Use explicit relations: `web_delivery`, `authoritative_dns`, `mail_routing`, `se
 | Observation | ID, type, subject, relation/context, observed time, collector version, status, sanitized typed payload, content hash where applicable |
 | Dataset record | Source ID, revision/digest, record reference, consulted normalized fields, publication time and effective time when known |
 | Evidence | ID, observation IDs, dataset-record references, classification time, detector ID, rule ID if applicable, source revision/digest, subject, provider/product IDs when known, relation, strength, activity, explanation |
-| Finding | ID, subject, provider ID, optional product ID, category, relation, strength, activity, evidence IDs, conflict IDs, limitations |
+| Finding | ID, subject, provider ID unless the finding is technology-only, optional product ID, category, relation, strength, activity, evidence IDs, conflict IDs, limitations |
 | Report | Schema version, report ID, normalized target, mode, start/end times, collection times, classification time, bundle/build identity, status, findings, evidence, dataset-record provenance, coverage, warnings |
 | Coverage entry | Capability, status, attempted/completed counts, error codes, truncation/omission counts, relevant data age |
 
-Provider-only evidence has a null product. Unknown fields, including source publication/effective times, remain unknown rather than receiving fabricated defaults. All references must resolve within the report or its retained supporting records. Retain the consulted dataset fields and provenance needed to explain findings even after a bundle's large indexes are pruned.
+Provider-only evidence has a null product. A technology-only finding omits `provider_id`. It has a nonempty `product_id`, `category=web_technology`, and `relation=web_integration`. If `provider_id` is present, it is a nonempty string. Unknown fields, including source publication/effective times, remain unknown rather than receiving fabricated defaults. All references must resolve within the report or its retained supporting records. Retain the consulted dataset fields and provenance needed to explain findings even after a bundle's large indexes are pruned.
 
 ### 9.3 Strength is not a probability
 

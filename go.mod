@@ -8,9 +8,11 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/miekg/dns v1.1.73
 	github.com/projectdiscovery/wappalyzergo v0.3.2
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/transparency-dev/merkle v0.0.2
 	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/net v0.58.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
@@ -19,7 +21,6 @@ require (
 	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	golang.org/x/crypto v0.55.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 )
