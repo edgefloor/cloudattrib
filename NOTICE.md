@@ -1,6 +1,6 @@
 # Third-party notices
 
-This inventory covers the modules linked into the `cloudattrib` executable and the reference deployment images. It is not legal advice, and it does not grant rights to redistribute imported datasets.
+This inventory lists the Go modules linked into `cloudattrib` and the reference deployment images. License texts remain with their source distributions. This inventory does not grant rights to redistribute imported data.
 
 ## Linked Go modules
 
@@ -16,12 +16,12 @@ This inventory covers the modules linked into the `cloudattrib` executable and t
 | `golang.org/x/crypto`, `x/net`, `x/sync`, `x/sys`, `x/text` | versions in `go.mod`/SBOM | BSD-3-Clause style Go project terms |
 | `google.golang.org/protobuf` | v1.36.11 | BSD-3-Clause |
 
-The authoritative license texts remain in each module version in the Go module cache or source distribution. `docs/dependency-audit.md` records the reviewed runtime behavior and unresolved data questions.
+For full license texts, use the exact module version in the Go module cache or source distribution. The [dependency audit](docs/dependency-audit.md) records reviewed network behavior and unresolved data rights.
 
 ## Reference deployment images
 
-The pinned Go, Alpine, PostgreSQL, and Unbound image identities are recorded in `sbom/cloudattrib.cdx.json` and `compose.yaml`. Each image contains packages under its own notices. Operators should retain the image filesystem notices and scan the exact digest they deploy.
+The [SBOM](sbom/cloudattrib.cdx.json) and [Compose file](compose.yaml) pin the Go, Alpine, PostgreSQL, and Unbound images. Each image contains packages with their own notices. Retain those notices and scan the exact image digest you deploy.
 
 ## Imported datasets
 
-`cloudattrib` does not ship production cloud ranges, ASN data, CDN data, or Certificate Transparency records. Operators import those artifacts locally. Public availability is not evidence of unrestricted redistribution. Review and preserve the terms, provenance, revision, and digest for each imported artifact before sharing a bundle.
+Production cloud ranges, ASN data, CDN data, and Certificate Transparency records are operator-supplied local inputs. They are not included in this repository. Public access to a file does not establish unrestricted redistribution rights. Before sharing a bundle, review its source terms and retain each artifact's provenance, revision, and digest.

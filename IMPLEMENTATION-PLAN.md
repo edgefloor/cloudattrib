@@ -1,16 +1,43 @@
 # Implementation plan: self-hosted cloud and SaaS attribution
 
-**Project:** `cloudattrib` (working name)  
-**Version:** 2.2\
-**Date:** 2026-09-20  
-**Status:** Execution plan for the complete system  
-**Contract:** [SPEC.md](SPEC.md)
+Project: `cloudattrib`
 
-**Execution workflow:** [Wave assignments, agent roles, and validation gates](docs/execution-plan.md). This workflow is prepared; implementation has not started. Start work only after an explicit implementation instruction. P0–P11 remain the deliverable and acceptance checklist; waves 0–7 control sequencing, delegation, model/effort selection, and validation ownership. Keep those execution settings out of `AGENTS.md`.
+Plan version: 2.2, dated 2026-09-20
+
+Behavior contract: [SPEC.md](SPEC.md)
+
+Execution rules: [Wave assignments, roles, and validation](docs/execution-plan.md)
+
+This is the delivery and acceptance checklist used for implementation. The application now exists. The unchecked items below are retained acceptance requirements, not a current task-status ledger. Use the [qualification report](docs/qualification.md) for recorded evidence and known test limits.
+
+P0 through P11 define deliverables. Waves 0 through 7 define execution order and ownership. Those workflow settings belong in the execution plan, not `AGENTS.md`. New work still requires an implementation instruction.
+
+## Find a phase
+
+- [Delivery scope and E1](#1-delivery-scope)
+- [Repository structure](#2-repository-structure)
+- [P0: source and dependency audit](#3-p0-verify-contracts-and-build-the-test-foundation)
+- [P1: shared contracts](#4-p1-shared-model-scope-and-contracts)
+- [P2: importers](#5-p2-cloud-provider-and-service-range-importers)
+- [P3: indexes and bundles](#6-p3-local-indexes-asn-cdn-and-bundle-construction)
+- [P4: DNS](#7-p4-dns-collection-and-local-recursion)
+- [P5: HTTP and fingerprints](#8-p5-httptls-collection-and-local-web-fingerprints)
+- [P6: rules and aggregation](#9-p6-product-rules-taxonomy-and-evidence-aggregation)
+- [P7: analyzer and CLI](#10-p7-complete-analyzer-and-cli)
+- [P8: persistence, jobs, and API](#11-p8-persistence-durable-jobs-and-http-api)
+- [P9: CT](#12-p9-optional-ct-import-log-collection-and-discovery)
+- [P10: operations](#13-p10-operational-updates-visibility-and-deployment)
+- [P11: qualification](#14-p11-complete-system-qualification)
+- [Cross-module tests](#15-cross-module-test-matrix)
+- [Traceability](#16-requirement-traceability)
+- [Fixed decisions](#17-decisions-that-must-not-drift-during-implementation)
+- [Final checklist](#18-final-delivery-checklist)
 
 ## 1. Delivery scope
 
-The system collects attribution evidence for lead enrichment by a cloud optimization business. Downstream operators use that evidence for qualification. Lead qualification, scoring, spend estimates, and savings estimates are not application outputs. All specified capabilities remain required deliverables, while runtime source failures follow SPEC section 14.2 and preserve useful evidence.
+The application supplies attribution evidence for lead enrichment. Downstream users make qualification decisions. Qualification, scoring, spend estimates, and savings estimates remain outside scope.
+
+Every specified capability is required for delivery. Runtime source failures follow SPEC section 14.2, which preserves useful evidence with explicit coverage limits.
 
 Implement the complete pipeline agreed in the specification:
 
@@ -23,11 +50,11 @@ domain / hostname / URL
     -> persisted infrastructure and SaaS report
 ```
 
-Local IP lookup is a reusable component and an exposed operation. It is **not** the product's completion boundary. DNS, HTTP fingerprints, service/region enrichment, local ASN, rule management, aggregation, persistence, and batch processing must not be postponed as unspecified “future extensions.”
+Local IP lookup is one exposed component. Delivery also requires DNS, HTTP fingerprints, service and region enrichment, local ASN, rules, aggregation, persistence, and batch processing. These capabilities must not be deferred as unspecified extensions.
 
-CT is the explicitly optional capability: implement its local import, supported log collector, and discovery integration, but leave it disabled in the default deployment. Full ordinary attribution must work without it.
+Implement CT import, the supported log collector, and discovery integration. Keep CT disabled in the default deployment. Ordinary full analysis must work without CT.
 
-Every phase below has implementation tasks and acceptance evidence. A phase is an ordering unit, not a reduced release specification. Do not call the project complete after the index or IP API phases.
+Each phase lists tasks and acceptance evidence. Phases set the work order; they do not reduce the release requirements.
 
 ### 1.1 Work sequence and dependency graph
 
@@ -47,9 +74,11 @@ Every phase below has implementation tasks and acceptance evidence. A phase is a
 | P10 | Update/reload operations, observability, and deployment | P3, P8; CT integration from P9 |
 | P11 | Full-system qualification and release evidence | P0–P10 |
 
-These dependencies describe which contracts a package needs, not permission to start parallel agents. Follow the wave dispatch limits in [the execution workflow](docs/execution-plan.md). P1 contracts may be drafted alongside the P0 read-only audit in wave 1, but must not be frozen until relevant audit findings are resolved. E1 proves a minimal path in wave 2 before wave 3 expands data/collection and wave 4 completes rules/CLI. Storage and API work follow wave 5. Integration gates still apply.
+The dependency table identifies required contracts. It does not authorize parallel agents; use the limits in the [execution workflow](docs/execution-plan.md).
 
-Schedule E1 as soon as one working collection/classification path is available, before completing the full importer and rule inventory. It is an integration checkpoint within P3–P6, not a new service, reduced release, or substitute for P7/P11.
+Draft P1 contracts alongside the P0 audit in wave 1, then freeze them after resolving relevant findings. E1 proves a minimal path in wave 2. Wave 3 expands data and collection; wave 4 completes rules and CLI. Wave 5 adds storage and API work. Validate each integration before proceeding.
+
+Run E1 as soon as one collection and classification path works, before completing every importer and rule. E1 checks integration within P3 through P6. It does not replace P7 or P11.
 
 No time or staffing estimate is implied by this sequence.
 
@@ -61,9 +90,11 @@ No time or staffing estimate is implied by this sequence.
 - [ ] Run variants with a missing enrichment source, mixed approved/prohibited addresses, and delayed or failed AAAA. HTTP must start through an approved public address without waiting for AAAA; prohibited addresses must never be dialed.
 - [ ] Validate the resulting complete/partial report and CLI exit contract without relying on live third-party services or requiring PostgreSQL.
 
-The exit evidence is a passing in-process integrated fixture using controlled DNS/HTTP services and real code for the selected path. Deferred adapters remain explicit P2–P6 work. Final delivery still requires every R01–R23 capability and the complete P7/P11 scenarios.
+E1 passes when an in-process fixture uses controlled DNS and HTTP services with real code for the chosen path. Remaining adapters stay in P2 through P6. Final delivery still requires R01 through R23 and the complete P7 and P11 scenarios.
 
 ## 2. Repository structure
+
+This is the original responsibility map. It includes proposed paths and artifacts, not a current file inventory. The [internal package map](internal/README.md) lists the implementation paths. Acceptance requires the behavior below even where the implementation groups it differently.
 
 ```text
 cmd/cloudattrib/
@@ -183,11 +214,11 @@ Keep BART, DNS-library, fingerprint-library, and PostgreSQL types out of the sha
 
 `docs/source-contracts.md` inventories the full selected source revision, not just a README or one provider. `docs/dependency-audit.md` identifies the chosen versions, licenses/notices, expected network behavior, and adapter boundaries.
 
-A startup/offline probe must record **attempted** connections, not merely successful traffic. A silently failed public-DNS connectivity check is still an audit finding.
+Record attempted connections in startup and offline probes, including failed attempts. A hidden public-DNS check is still an audit finding if the connection fails.
 
 ### Exit gate
 
-The selected library APIs compile. Source shapes and provenance requirements are documented. No unsupported shape is quietly treated as an empty dataset. The test environment can run without third-party web services.
+The selected APIs compile, source formats and provenance requirements are documented, and fixtures run without third-party web services. Unsupported source shapes fail explicitly instead of becoming empty datasets.
 
 **References:** SPEC sections 2, 6, 7, 17. Sources S01–S14.
 
@@ -223,7 +254,7 @@ Add schema/contract fixtures for partial IP results with zero associations, whol
 
 ### Exit gate
 
-Every module can work against stable shared types and fixtures. API/schema tests distinguish invalid input, no match, partial evidence, and system failure. Scope is enforced before any live connection.
+Modules share stable types and fixtures. API and schema tests distinguish invalid input, no match, partial evidence, and system failure. Scope checks run before live connections.
 
 **References:** SPEC sections 3, 8, 9, 11.
 
@@ -248,15 +279,15 @@ Every module can work against stable shared types and fixtures. API/schema tests
 
 ### Required tests
 
-Use fixtures for published-list and BGP-derived records, IPv4-only and dual-stack sources, base-array prefixes marked retired in detail records, identical CIDRs across providers, identical CIDRs with multiple service tags, and absent service/region metadata.
+Importer fixtures cover published lists and BGP-derived records, IPv4-only and dual-stack sources, and retirement joined from detail records. Include identical CIDRs across providers, multiple service tags on one CIDR, and absent service or region metadata.
 
 Test malformed JSON, duplicate keys, trailing documents, conflicting retirement, invalid timestamp shapes, excessive files, decompression bounds, source disappearance, and moved/changed schema fields. Distinguish a legitimate empty family from an accidentally empty entire required source.
 
-Run one full pinned upstream import and publish its validation report. This is where whole-dataset compatibility is demonstrated, not assumed.
+Run one import of the complete pinned upstream revision and publish its validation report. Sample fixtures alone do not establish whole-dataset compatibility.
 
 ### Exit gate
 
-The importer can produce provider breadth **and** official service/region evidence. Retired records do not become active by accident. A failed source cannot partially replace a previously valid source snapshot.
+Importers produce broad provider coverage and official service and region evidence. Retirement is preserved. A failed source cannot partially replace a valid snapshot.
 
 **References:** SPEC section 6. Sources S01, S02, S11–S14.
 
@@ -293,7 +324,7 @@ Remove ASN, CDN, and individual provider/service sources in availability fixture
 
 ### Exit gate
 
-Local provider, service-range, ASN, and CDN enrichment work without network access. Overlaps remain explainable. No caller can mutate shared state. This phase is complete only as a component, not as the overall product.
+Provider, service-range, ASN, and CDN lookups work locally. Results preserve overlap provenance, and callers cannot mutate shared indexes. This completes the lookup component.
 
 **References:** SPEC sections 2, 6, 7, 13. Sources S03, S05–S07.
 
@@ -317,7 +348,7 @@ Local provider, service-range, ASN, and CDN enrichment work without network acce
 
 ### Required tests
 
-Use a controlled DNS server to exercise alias chains across provider domains, CNAME loops, IPv6-only hosts, delegated subzones, null MX, no-mail versus failed-mail lookup, split TXT chunks, multiple distinct TXT records, TTL expiry, cached negative answers, and UDP/TCP fallback.
+Use a controlled DNS server to test alias chains across provider domains, loops, IPv6-only hosts, and delegated subzones. Include null MX, explicit no-mail configuration versus failed lookup, split TXT chunks, and distinct TXT records. Test TTL expiry, cached negative answers, and UDP-to-TCP fallback.
 
 Test out-of-scope dependencies and cap exhaustion. Confirm no HTTP work is created from MX/NS hosts. Deny all external network access and confirm only the configured fixture resolver is contacted.
 
@@ -325,7 +356,7 @@ Use explicit synchronization for a public A result followed by private AAAA or A
 
 ### Exit gate
 
-A domain produces complete typed DNS observations and contextual dependency edges, not just a list of terminal IPs. Every failed or omitted question is visible in coverage.
+DNS output includes typed records, complete chains, and dependency context. Coverage identifies every failed or omitted question.
 
 **References:** SPEC sections 3, 4, 14. Sources S08, S09, S19.
 
@@ -349,7 +380,9 @@ A domain produces complete typed DNS observations and contextual dependency edge
 
 ### Required tests
 
-Exercise same-host and cross-domain redirects, a redirect to metadata/private addresses, DNS changes between validation and dial, mixed address sets, expired/wrong-host TLS certificates, 403 responses, slow headers/body, oversized headers, decompression bombs, truncated bodies, malformed HTML, and unsupported content types.
+Test same-host and cross-domain redirects, metadata or private destinations, DNS changes between validation and dial, and mixed address sets.
+
+Test expired or wrong-host certificates, useful 403 responses, slow headers and bodies, oversized headers, decompression bombs, truncated bodies, malformed HTML, and unsupported content types.
 
 For mixed answers, assert successful collection through the approved public address, correct Host/SNI, zero prohibited dial attempts, and partial coverage with address-policy reasons. Assert HTTP starts before a deliberately delayed AAAA completion. Repeat for private AAAA, AAAA timeout, redirect targets, and reused connections. Use the controlled test transport/policy rather than real public destinations.
 
@@ -359,7 +392,7 @@ Use a separate test-only network policy for local fixture servers. Callers must 
 
 ### Exit gate
 
-A target can produce HTTP/TLS observations and raw local technology detections under explicit bounds. Private destinations remain blocked, and classifiers make no hidden network calls.
+The collector produces bounded HTTP and TLS observations for local technology detection. It blocks private destinations, and classifiers make no additional network calls.
 
 **References:** SPEC section 5. Sources S04, S05, S10.
 
@@ -402,7 +435,9 @@ Replay the same capture against bundles with different IP associations. Verify u
 
 ### Exit gate
 
-The rule coverage matrix satisfies SPEC section 8.5 for every required product family, including asserted product/relation outputs and the absence of unsupported conclusions. Multi-vendor evidence produces separate explainable relationships without inflated confidence or lead qualification claims. The E1 integrated fixture has passed by the end of P3–P6.
+The matrix passes SPEC section 8.5 for every required product family. Tests assert the expected product and relation and reject unsupported conclusions.
+
+Multi-vendor evidence produces separate relationships with supporting evidence, without inflated confidence or lead qualification claims. E1 must have passed before P3 through P6 are complete.
 
 **References:** SPEC sections 8, 9. Sources S11–S15 for range/product limitations and examples.
 
@@ -444,7 +479,7 @@ Run the missing-ASN, missing-CDN, missing-provider, mixed-address, and failed-AA
 
 ### Exit gate
 
-The CLI can generate the complete report described in R01 with no proprietary enrichment service. All requested normal modes work. Offline operations perform no collection. A local-IP-only demonstration is not sufficient for this gate.
+The CLI produces the R01 domain report without proprietary enrichment services. Full, DNS, IP, and reclassification operations work. Offline operations perform no collection.
 
 **References:** SPEC sections 3–9, 11, 14, 16.
 
@@ -460,15 +495,15 @@ The CLI can generate the complete report described in R01 with no proprietary en
 - [ ] Implement short queue-claim transactions using row locks, bounded leases, attempt tokens, renewal, retry limits, and abandoned-work recovery.
 - [ ] Keep network operations outside transactions. Require the current attempt token for final commits so an expired worker cannot overwrite a later attempt.
 - [ ] Implement cancellation, per-target result states, per-job terminal aggregation, idempotent submission, and caller-scoped idempotency conflicts.
-- [ ] At pinned-batch admission, coordinate with pruning, validate bundle availability/integrity/compatibility, and durably commit its reference with the job before acceptance. Protect queued targets and pending retries across restart. Reject unavailable/incompatible pins explicitly without inserting a job or substituting a bundle.
+- [ ] Coordinate pinned admission with pruning. Validate bundle availability, integrity, and compatibility, then commit the reference with the job before acceptance. Protect queued work and retries across restarts. Reject unavailable or incompatible pins without inserting a job or substituting a bundle.
 - [ ] Release the durable pin only after every target becomes terminal, including on cancellation. A cancellation request alone must not release it. Restore/check durable references before pruning after restart; fail pruning closed when the reference store is unavailable.
-- [ ] Bound total nonterminal target reservations globally, default 10,000 and operator-configurable. Reserve capacity atomically with insertion, keep reservations through running/retry states, and release them on terminal transitions. Reject excess new submissions before any insertion with HTTP 429 and `queue_capacity_exceeded`. Idempotent resubmission consumes no new capacity.
+- [ ] Limit nonterminal target reservations globally to an operator-configurable default of 10,000. Reserve capacity atomically with insertion. Keep reservations through running and retry states; release them on terminal transitions. Reject excess submissions before insertion with HTTP 429 and `queue_capacity_exceeded`. Idempotent resubmission consumes no new capacity.
 - [ ] Implement all routes from SPEC section 11 and generate an OpenAPI document from the tested contracts.
 - [ ] Add stable validation/error envelopes, request body limits, synchronous admission limits, and bounded cursor pagination.
 - [ ] Preserve the local-IP endpoint's no-PostgreSQL path. Do not hide storage failures behind a successful durable-job response.
 - [ ] Add provider/product alias search and structured finding filters using ordinary indexes, not semantic vectors.
 - [ ] Implement retention and reclassification links. Keep observations and consulted dataset provenance while any retained report references them. Compare history only across sufficiently comparable collection outcomes and distinguish source/rule changes from target changes.
-- [ ] Add loopback-by-default binding and the shared trusted-operator authentication contract. All authenticated operators share results and may cancel any job; caller identity scopes idempotency and audit attribution, not tenant isolation. Map credentials to stable operator IDs or accept identity only from a configured trusted proxy that strips untrusted identity headers. Use `local-operator` in explicit unauthenticated loopback mode. Keep dataset activation off the public API.
+- [ ] Bind to loopback by default and implement shared trusted-operator access. Authenticated operators share results and may cancel any job. Identity scopes idempotency and audit attribution, without tenant isolation. Map credentials to stable IDs or trust only a configured proxy that strips untrusted identity headers. Explicit unauthenticated loopback mode uses `local-operator`. Keep dataset activation off the public API.
 - [ ] Implement operation-level readiness and source degradation from SPEC section 14.2, including persistence-dependent operations unavailable while local-IP lookup remains usable. Keep storage failures explicit rather than returning an unstored success.
 
 ### Required tests
@@ -479,15 +514,19 @@ Kill a worker after claim, during collection, and before/after result commit. Ve
 
 Test database unavailability before admission and during persistence. Confirm the local-IP endpoint still works when its bundle is valid. Test pagination stability, large request rejection, redacted data, and history after an incomplete follow-up analysis.
 
-Accept a pinned batch, keep targets queued through multiple activations, attempt pruning, then restart and resume. Repeat with expired leases and pending retries. Require every attempt to use the pinned bundle and retain pruning protection until all targets are terminal. Race admission against pruning and prove the only outcomes are accepted-with-protection or explicit rejection. Test unavailable/incompatible pin rejection and a crash before/after reference commit.
+Accept a pinned batch and leave its targets queued through multiple activations. Attempt pruning, then restart and resume. Repeat with expired leases and pending retries. Every attempt must use the pin, which remains protected until all targets are terminal.
+
+Race admission against pruning. The result must be either protected acceptance or explicit rejection. Test unavailable and incompatible pins, plus crashes before and after reference commit.
 
 Test completed and cancelled batches releasing pins only after terminal target state commits; verify a cancellation request alone cannot release protection. After release, prune only if active, reader, other-job, and last-known-good protections no longer apply. Block pruning when durable references cannot be checked.
 
-Race submissions near global backlog capacity, verify no partial insertion or limit overrun, and recover reservations after restart. Delayed retries retain their existing reservation. Repeated idempotency keys at capacity return the original job. Test two operators sharing result visibility and cancelling each other's jobs while maintaining separate idempotency namespaces; reject spoofed identity headers.
+Race submissions near backlog capacity. Verify no partial insertion or limit overrun, and recover reservations after restart. Delayed retries keep their reservations. Repeated idempotency keys at capacity return the original job.
+
+Test two operators reading shared results and cancelling each other's jobs while keeping separate idempotency namespaces. Reject spoofed identity headers.
 
 ### Exit gate
 
-Single-target and batch API workflows are durable and retrieve the complete evidence-backed report. Crashes and partial collection are represented honestly. Product discovery is usable through the API, not only a CLI prototype.
+Single-target and batch API workflows persist and retrieve complete evidence-backed reports. Job state and coverage expose crashes and partial collection. The API supports the same product discovery as the CLI.
 
 **References:** SPEC sections 11, 12, 14. Source S18.
 
@@ -521,7 +560,7 @@ Run with CT off and assert zero log-service traffic. Run analysis with CT on and
 
 ### Exit gate
 
-CT is a functioning optional module, not an unimplemented future hook. The default full pipeline remains independent of it. No crt.sh or proprietary search API is needed.
+CT import, supported log collection, and local discovery work when configured. Default full analysis works with CT disabled. No crt.sh or proprietary search API is required.
 
 **References:** SPEC section 10. Sources S16, S17.
 
@@ -546,7 +585,9 @@ CT is a functioning optional module, not an unimplemented future hook. The defau
 
 ### Required tests
 
-Attempt malformed, incompatible, truncated, stale, and extreme-delta updates. Activate during concurrent analyses and verify no report mixes views. Restart after publication but before reload, and after reload but before audit persistence. Test rollback to a compatible previous bundle.
+Test malformed, incompatible, truncated, stale, and extreme-delta updates. Activate during concurrent analyses and verify that reports never mix views.
+
+Restart after publication but before reload, and after reload but before audit persistence. Test rollback to a compatible previous bundle.
 
 Simulate disk-full, file corruption, writer contention, missing source files, PostgreSQL outage, and abrupt termination. Check that health endpoints report the actual available capabilities.
 
@@ -554,7 +595,7 @@ Deploy the complete Compose stack in a clean environment with no enrichment cred
 
 ### Exit gate
 
-An operator can install, populate, run, monitor, update, recover, and back up the complete system using documented commands. Successful activation is observable, not assumed from a file write.
+An operator can install, populate, run, monitor, update, recover, and back up the system using the written commands. Status distinguishes publication from successful process loading.
 
 **References:** SPEC sections 12–15.
 
@@ -581,7 +622,7 @@ An operator can install, populate, run, monitor, update, recover, and back up th
 
 ### Exit gate
 
-Every required capability in SPEC section 1 has a passing test or a documented, accepted operational limit consistent with the spec. The complete-system acceptance gate in SPEC section 16 passes. A missing core collector, missing service/region adapter, or missing persistence/job workflow is not an acceptable “future extension.”
+Every SPEC section 1 capability has passing evidence or a documented, accepted operational limit consistent with the specification. Section 16's complete-system gate passes. Missing collectors, service or region adapters, persistence, or job workflows cannot be accepted as future extensions.
 
 Optional CT may be disabled at runtime, but its supported ingestion/discovery implementation and tests must ship.
 
@@ -685,8 +726,8 @@ The following are fixed architectural constraints unless the specification is de
 - [ ] Update/reload/rollback, crash recovery, resource bounds, and retention pass tests.
 - [ ] OpenAPI, schemas, configuration, deployment, operations, notices, SBOM, and measured evaluation reports are complete.
 
-**Completion means the full attribution system described in SPEC.md, not a finished first component.**
+Completion requires the full attribution system defined in SPEC.md.
 
 ### Source use
 
-External source references are defined in [SPEC.md, section 17](SPEC.md#17-sources-and-verification-notes). They establish starting contracts, not proof that this implementation already exists or that full-dataset compatibility has already been tested. P0, P2, and P11 require those implementation-time checks and preserve their evidence.
+External references are listed in [SPEC section 17](SPEC.md#17-sources-and-verification-notes). They establish source contracts. P0, P2, and P11 still require implementation and full-dataset compatibility checks with recorded evidence.

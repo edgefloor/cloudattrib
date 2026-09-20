@@ -1,8 +1,10 @@
 # Dependency audit
 
-Status: wave 1 audit at repository revision `4b7a5030976f397aaab2a180a466d1e8e2c3bb0a`, with a release-candidate linked-dependency recheck on 2026-09-20.
+Audit baseline: `4b7a5030976f397aaab2a180a466d1e8e2c3bb0a`. Linked dependencies were checked again for the release candidate on 2026-09-20.
 
-This reference records the selected dependency revisions and their runtime boundaries. It does not grant rights to redistribute third-party datasets. Dataset terms remain separate from Go module licenses.
+This reference records version choices, network behavior, and adapter boundaries. The [SBOM](../sbom/cloudattrib.cdx.json) records artifact identities. [Third-party notices](../NOTICE.md) summarize licenses; data rights require separate review.
+
+Read the [open release questions](#open-release-questions) before redistributing source data or fingerprint assets.
 
 ## Selected Go modules
 
@@ -19,7 +21,7 @@ This reference records the selected dependency revisions and their runtime bound
 
 The linked executable also contains `pgpassfile v1.0.0`, `pgservicefile` at `5a60cdf6a761`, `puddle/v2 v2.2.2`, `golang.org/x/crypto v0.55.0`, `x/sync v0.22.0`, `x/sys v0.47.0`, `x/text v0.41.0`, and `google.golang.org/protobuf v1.36.11`. These versions are pinned by `go.mod` and `go.sum`, listed in the CycloneDX SBOM, and checked against `go list -deps` by `scripts/verify-sbom.py`. None is an attribution data source or an independent enrichment client.
 
-The selected `miekg/dns` GitHub v1 line receives only specific fixes while v2 development occurs on Codeberg. The narrow `DNSClient` adapter contains this maintenance risk. A later migration assessment can replace the implementation without changing the application contract.
+At the audit date, the `miekg/dns` GitHub v1 line received selected fixes while v2 development continued on Codeberg. The application uses a small `DNSClient` adapter so a later migration can preserve the collection contract.
 
 ## Fingerprint data
 
@@ -28,13 +30,17 @@ The selected `wappalyzergo` revision embeds these assets:
 - `fingerprints_data.json`: SHA-256 `c662ae9244c255b35ccc6d5e92c05aa0f9ca95af5f6cd552217524e6f7e464e5`
 - `categories_data.json`: SHA-256 `195f9a946c5b3a855839882cb8365a4d9758e8054fbec77f8bfd662f2211ddf3`
 
-The passive API returns technology results, not a stable per-regular-expression proof contract. Reports use `explanation_granularity=detector_result`, preserve raw technology names, and reference the HTTP observation. Review the embedded fingerprint data's provenance before redistributing it independently from the binary.
+The passive API returns technology labels. It does not promise a stable explanation for each matching regular expression. Reports use `explanation_granularity=detector_result`, retain the raw names, and reference the HTTP observation.
+
+Review the embedded data's provenance before redistributing it independently from the binary.
 
 ## `cdncheck` is data-only
 
 Do not import `github.com/projectdiscovery/cdncheck` into the worker. At revision `a06260a272dc92cec0747f2f369b697088899bc7`, `cdncheck.go` blob `2c8e268bc24ade402afbe7eceef88517ffda3812` performs an initialization-time UDP dial to Google's IPv6 DNS service with a three-second timeout. The package also contains default Cloudflare and Google resolver addresses. `other.go` blob `946954e2d6bf2807629af9bb2f3852de8c39499f` adds a separate public-suffix dependency.
 
-The updater converts pinned `sources_data.json` content into application-owned normalized records. The source file groups CIDR and suffix data under `cdn`, `waf`, `cloud`, and `common`. Each converted record keeps the upstream revision, source-file digest, raw category, provider key, and notice. The code license is MIT. Rights for every generated-data source remain unresolved and block redistribution of a bundled converted dataset until reviewed.
+The updater converts pinned `sources_data.json` content into normalized local records. The file groups CIDRs and suffixes under `cdn`, `waf`, `cloud`, and `common`. Each converted record retains the revision, file digest, raw category, provider key, and notice.
+
+The code license is MIT. Rights for the generated-data sources remain unresolved. Do not redistribute a converted dataset until those rights have been reviewed.
 
 ## Network and proxy behavior
 
@@ -52,7 +58,21 @@ The collector evaluates three checks independently:
 
 `GetRawEntries` supplies indexed entry bytes. `GetEntryAndProof` supplies the audit path for a selected entry and tree size. `GetSTHConsistency` supplies a consistency proof. Successful parsing or transport proves none of these properties.
 
-A bounded live feasibility probe still needs an operator-approved log URL, pinned public key, and starting checkpoint. The prepared probe budget is 256 entries in four batches, at most 16 deterministic inclusion proofs, one tree-head request, at most one consistency request, 24 total HTTP requests, 8 MiB of response bytes, 60 seconds elapsed, a 10-second request deadline, and concurrency one. Record throughput, response bytes, retained bytes, observed ingestion lag, and backlog trend. The probe does not establish exhaustive or domain-filtered retrieval.
+A live probe requires an operator-approved log URL, pinned key, and starting checkpoint. The planned limits are:
+
+| Limit | Value |
+| --- | --- |
+| Entries | 256 in four batches |
+| Inclusion proofs | At most 16, selected deterministically |
+| Tree-head requests | 1 |
+| Consistency requests | At most 1 |
+| Total HTTP requests | 24 |
+| Response bytes | 8 MiB |
+| Elapsed time | 60 seconds |
+| Request deadline | 10 seconds |
+| Concurrency | 1 |
+
+Record throughput, response bytes, retained bytes, ingestion lag, and backlog trend. These measurements cannot establish exhaustive or domain-filtered retrieval. [CT operations](ct-operations.md#retention-and-operating-envelope) records the synthetic measurements already collected.
 
 ## Open release questions
 
@@ -62,4 +82,4 @@ A bounded live feasibility probe still needs an operator-approved log URL, pinne
 - Record the source-specific terms for downloaded AWS, GCP, and Azure artifacts before bundling them.
 - Run the bounded CT probe only after an operator supplies or approves the log identity, key, and starting checkpoint.
 
-These questions do not prevent local import and testing. They prevent unsupported redistribution claims.
+Local import and testing remain available. Redistribution claims depend on resolving the relevant data rights; live CT measurement depends on approved log configuration.

@@ -1,83 +1,99 @@
 # Architecture contracts
 
-Status: wave 0 contract record for SPEC 2.1.
-
-This reference records the package-facing contracts that implementation must preserve. [SPEC.md](../SPEC.md) remains authoritative when this record and the specification differ.
+This reference defines package responsibilities and the contracts shared by collection, classification, jobs, and storage. It records the decisions made for SPEC 2.1. The [specification](../SPEC.md) is authoritative; the [qualification report](qualification.md) records what has been tested.
 
 ## Package boundaries
 
-`internal/model` owns normalized values and immutable report types. It does not expose DNS-library, HTTP-transport, BART, PostgreSQL, or fingerprint-library types.
+| Package | Owns | Does not own |
+| --- | --- | --- |
+| `model` | Normalized values and report types | Types from DNS, HTTP, BART, PostgreSQL, or fingerprint libraries |
+| `target` | Input normalization and root scope | Permission to connect to a destination |
+| `policy` | Address and port validation, collection budgets | Product attribution |
+| `collect/dns`, `collect/http` | Typed collection observations and outcomes | Product inference or relaxed scope rules |
+| `datasets` | Immutable bundle construction and publication | Changes to a view already captured by an attempt |
+| `app`, detectors, and enrichment adapters | Evidence from observations and consulted records | Lead qualification or spend estimates |
+| `aggregate` | Findings grouped from evidence | New network collection |
+| `jobs` | Admission, reservations, leases, retries, cancellation, and pins | Database-specific transaction implementation |
+| `store/postgres` | Durable records and job transaction boundaries | Per-address prefix matching |
+| `api`, `cli` | Input and output contracts | Alternate collection or attribution rules |
 
-`internal/target` parses and normalizes caller input before collection. `internal/policy` decides whether a concrete address and port may be dialed. Collection packages do not infer target scope or relax policy.
-
-`internal/collect/dns` publishes typed observations and address candidates as answers arrive. `internal/collect/http` consumes approved candidates and dials the selected address exactly. Both packages use caller-owned budgets and contexts.
-
-`internal/datasets` builds and publishes immutable `AttributionView` values. A target attempt captures one view. Classification and enrichment read only that captured view.
-
-`internal/aggregate` creates evidence and findings from observations and consulted dataset records. It does not collect new data or decide lead qualification.
-
-`internal/jobs` owns durable admission, reservations, leases, retries, cancellation, and bundle pins. `internal/store/postgres` implements its transaction boundaries. `internal/api` maps the settled application and access contracts to HTTP.
+See the [package map](../internal/README.md) for paths. Updaters and CT collectors run separately from target analysis.
 
 ## Destination validation
 
-The DNS collector validates each address independently. It publishes approved public addresses without waiting for another address family or unrelated DNS questions. The HTTP collector dials one approved address exactly and preserves the requested hostname for HTTP Host and TLS SNI.
+The DNS collector validates each candidate address and publishes approved public addresses as they arrive. HTTP can start before another address family or unrelated DNS questions finish.
 
-Mixed answers remain mixed evidence. A prohibited address produces an observation and a policy decision, but it does not block an approved address. A failed or delayed AAAA query does not delay HTTP through an approved IPv4 address. Redirects, retries, and alternate-address attempts repeat resolution and per-address validation. No transport path may resolve and dial a different address after validation.
+The HTTP collector dials the selected address exactly. It preserves the requested hostname for HTTP Host and TLS SNI. Redirects, retries, and alternate-address attempts repeat resolution and validation. The transport must never resolve and dial a different address after approval.
 
-Package tests must instrument dial attempts and prove that prohibited addresses receive zero attempts. See [SPEC sections 3.4, 4.2, and 5.2](../SPEC.md#34-execution-order-and-consistency).
+Mixed answers remain evidence. A prohibited address retains its observation and policy reason. It does not block an approved address. Record failed or delayed AAAA queries even when HTTP succeeds through IPv4.
 
-## Source availability and result status
+Tests instrument dial attempts and require zero attempts to prohibited addresses. See SPEC sections [3.4](../SPEC.md#34-execution-order-and-consistency), [4.2](../SPEC.md#42-dns-result-semantics), and [5.2](../SPEC.md#52-request-destination-policy).
 
-Collectors and classifiers return useful observations and supported results together with per-capability coverage. An unavailable source never becomes an empty successful search.
+## Availability and report status
 
-If another requested path produces useful results, the report status is `partial`, HTTP returns 200, and the CLI exits with 3. If no necessary requested path can run, the operation returns `capability_unavailable`, HTTP returns 503, and the CLI exits with 4. A complete no-match requires every requested applicable source to be usable and searched.
+Collectors and classifiers return useful results with per-capability coverage. An unavailable source never becomes an empty successful search.
 
-Application errors carry stable external codes. Adapters report source failures to the application layer instead of choosing an HTTP status or CLI exit code. See [SPEC sections 7.4 and 14.2](../SPEC.md#74-unknowns-and-bounds).
+| Available work | Result | HTTP | CLI |
+| --- | --- | --- | --- |
+| All requested applicable work completed | Complete report, including complete no-match | 200 | 0 |
+| Useful observations or results remain, but requested coverage is incomplete | Partial report with affected capabilities | 200 | 3 |
+| No necessary requested execution path can run | `capability_unavailable` | 503 | 4 |
+
+Useful evidence can include a completed negative DNS answer or an empty search of a usable source. A failed query cannot establish absence. Request validation and persistence failures remain explicit errors.
+
+Application errors carry stable codes. Adapters report failures to the application layer, which applies [SPEC section 14.2](../SPEC.md#142-result-status). HTTP and CLI adapters map that result to their interface contracts.
 
 ## Bundle capture, pins, and pruning
 
-Each unpinned target attempt captures the active immutable bundle when that attempt starts. A retry may capture a newer bundle. A pinned batch uses one requested compatible bundle for every target attempt.
+An unpinned target attempt captures the active bundle when it starts. A retry may capture a newer bundle. A pinned batch uses its requested compatible bundle for every attempt.
 
-Pinned-batch admission and pruning share one store-level coordination boundary. Admission validates the bundle and commits both the job and its durable bundle reference before returning success. Pruning checks durable references under the same coordination and fails closed when it cannot check them.
+Pinned admission and pruning share one coordination boundary:
 
-A pin protects queued, running, and retrying targets across process restarts. The job releases the pin only in the transaction that makes every target terminal. A cancellation request alone does not release the pin. Active views, in-flight readers, other jobs, and last-known-good retention can continue to protect a bundle after the batch releases its pin. See [SPEC sections 3.4, 12.2, and 13.2](../SPEC.md#34-execution-order-and-consistency).
+1. Admission validates the requested bundle while pruning is excluded.
+2. Admission commits the job and its durable bundle reference before returning success.
+3. Pruning checks durable references under the same coordination. If it cannot check them, it stops.
+4. The job releases its pin only in the transaction that makes every target terminal.
+
+Pins cover queued work, running attempts, and pending retries across restarts. A cancellation request alone does not release a pin. Active views, in-flight readers, other jobs, and last-known-good retention can keep a bundle protected after the batch finishes.
+
+See SPEC sections [3.4](../SPEC.md#34-execution-order-and-consistency), [12.2](../SPEC.md#122-durable-job-execution), and [13.2](../SPEC.md#132-update-transaction).
 
 ## Reclassification time and provenance
 
-Reclassification creates a new report from immutable collected observations and reusable detector outputs. It captures a selected compatible bundle and records a new classification time. It never changes collection times and never performs collection.
+Reclassification creates a new report from retained observations and reusable detector outputs. It selects a compatible bundle and records a new classification time. Collection times and original collection coverage remain unchanged. Reclassification performs no collection.
 
-Evidence distinguishes observation references from consulted dataset-record references. Each consulted record keeps its source identity, revision or digest, record reference, publication time, and effective time when known. Unknown times remain unknown. A newly consulted ownership record does not claim that the ownership existed at the original collection time.
+Evidence references both observations and consulted dataset records. Each dataset record retains its source, revision or digest, record reference, and known publication and effective times. Unknown times stay unknown. A new ownership association does not imply that it existed when the observations were collected.
 
-If one replay path lacks retained inputs but another path works, the report remains useful and is `partial`. If no requested replay path can run, admission returns `capability_unavailable`. See [SPEC sections 9.1 through 9.5 and 12.3](../SPEC.md#91-collected-observations-source-records-and-conclusions).
+If one replay path lacks inputs but another works, return a partial report. If none works, return `capability_unavailable`. See SPEC sections [9.1 through 9.5](../SPEC.md#91-collected-observations-source-records-and-conclusions) and [12.3](../SPEC.md#123-history-and-retention).
 
 ## CT verification
 
-CT records store `checkpoint_signature`, `continuity`, and `entry_inclusion` as independent checks. Each check records `passed`, `failed`, or `not_performed`, plus its procedure version, authenticated tree or key identity, and a reason when the check did not run.
+CT records keep three checks separate: `checkpoint_signature`, `continuity`, and `entry_inclusion`. Each check records `passed`, `failed`, or `not_performed`, its procedure version, tree or key identity, and a reason when it did not run.
 
-`verified_log` requires an authenticated tree and proof that the exact entry bytes are included in that tree. A valid checkpoint signature or continuity proof alone is insufficient. Failed verification does not advance the verified checkpoint or publish verified entries. Imports without equivalent proof use `imported_unverified`; fetched entries without inclusion proof use `log_unverified`. See [SPEC section 10.1](../SPEC.md#101-supported-ingestion-paths).
+`verified_log` requires an authenticated tree and proof that the exact entry bytes belong to it. A valid signature or continuity proof alone is insufficient. Failed verification cannot advance a verified checkpoint or publish a verified entry.
+
+Imports without equivalent proof use `imported_unverified`. Fetched entries without inclusion proof use `log_unverified`. CT ships as an optional module and remains disabled by default. See [SPEC section 10.1](../SPEC.md#101-supported-ingestion-paths) and [CT operations](ct-operations.md).
 
 ## Access, identity, and cancellation
 
-The service uses one shared trusted-operator access model. Every authenticated operator can read results and cancel any job. Stable operator identity scopes idempotency keys and audit attribution only. It does not create tenant ownership or tenant isolation.
+All authenticated operators share result visibility and may cancel any job. Operator identity scopes idempotency keys and audit attribution. There is no tenant isolation or caller-specific result ownership.
 
-The server derives identity from configured credentials or from a trusted proxy that strips client identity headers. An explicit unauthenticated loopback deployment uses `local-operator`. Request bodies and arbitrary client headers cannot select an identity.
+The service derives identity from configured credentials or a trusted proxy. The proxy must strip client identity headers before adding its verified identity. Request bodies and arbitrary headers cannot select an operator. Explicit unauthenticated loopback mode uses `local-operator`.
 
-Cancellation stops new scheduling and propagates through collection, leases, and database calls. It is best effort for work already in progress. Job and result visibility remain shared after cancellation. See [SPEC sections 11.3, 11.4, and 12.2](../SPEC.md#113-required-http-routes).
+Cancellation stops new scheduling and propagates through collection, leases, and database calls. Already-started work may finish. Shared visibility remains unchanged. See SPEC sections [11.3](../SPEC.md#113-required-http-routes), [11.4](../SPEC.md#114-shared-trusted-operator-access), and [12.2](../SPEC.md#122-durable-job-execution).
 
-## Minimum product and relationship coverage
+## Product and relationship coverage
 
-Findings describe attribution evidence for lead enrichment. The application does not decide qualification and does not estimate spend or savings.
+Findings supply evidence for lead enrichment. They do not qualify leads or estimate spend and savings.
 
-Rules preserve the relationship established by the signal. SPF evidence uses `sending_authorization`; it does not become mail routing or paid adoption. Provider-only output is valid when the signal supports only provider ownership, such as a generic cloud range. Provider-only output cannot replace a supported product-specific result.
+The relationship must match the signal. SPF uses `sending_authorization`; it does not establish inbound mail routing or paid adoption. Generic cloud ranges can support provider-only findings. A provider-only result cannot replace product detection when the supported signal identifies a product.
 
-Every supported row in the product-and-relationship matrix needs a dated source, canonical mapping, positive fixture, negative fixture, subject, scope, relationship, and evidence reference. An unsupported case must name the missing or insufficient signal. See [SPEC sections 8.5 and 9.1](../SPEC.md#85-product-and-relationship-acceptance-matrix).
+Every supported matrix row needs a dated source, canonical mapping, positive and negative fixtures, subject, scope, relation, and evidence reference. Unsupported cases must explain the missing or insufficient signal. See [rule coverage](../rules/coverage-matrix.md) and [SPEC section 8.5](../SPEC.md#85-product-and-relationship-acceptance-matrix).
 
-## Stable implementation rules
+## Shared invariants
 
-- Scope validation finishes before any live connection.
-- Mutable slices and maps do not cross immutable-view or report ownership boundaries without copying.
-- Observations, dataset records, evidence, and findings remain separate types.
-- Coverage records unavailable, skipped, completed, truncated, and omitted work explicitly.
-- Deterministic ordering never implies a winning provider when evidence conflicts.
-- Dataset updaters and CT collectors run separately from target-request collection.
-- CT remains disabled by default, but its import, collection, verification, and discovery paths ship with the system.
+- Validate scope before any live connection.
+- Copy mutable slices and maps when ownership crosses a view or report boundary.
+- Keep observations, dataset records, evidence, and findings as separate types.
+- Record unavailable, skipped, completed, truncated, and omitted work in coverage.
+- Use deterministic ordering without implying a winning provider where evidence conflicts.

@@ -1,62 +1,100 @@
 # Source contracts
 
-Status: wave 1 source inventory, checked 2026-09-20.
+This reference records the source formats reviewed on 2026-09-20. Importers read local files. Acquisition happens separately, through an operator-controlled download or mirror.
 
-This reference defines updater inputs. Every fetched artifact keeps its exact bytes, retrieval URL, HTTP metadata, SHA-256 digest, source publication time when supplied, retrieval time, adapter version, and local activation time.
+For each fetched artifact, retain the exact bytes, URL, HTTP metadata, SHA-256 digest, retrieval time, known publication time, adapter version, and activation time. File identity does not establish source trust or redistribution rights.
+
+## Local file layout
+
+Paths are relative to `data.source_directory`, which defaults to `./data/sources`.
+
+| File or directory | Source |
+| --- | --- |
+| `cloudranges/json/` | Primary provider files from one `disposable/cloud-ip-ranges` revision |
+| `aws-ip-ranges.json` | Official AWS service ranges |
+| `gcp-cloud.json` | Official GCP cloud ranges |
+| `azure-service-tags.json` | Azure Service Tags download |
+| `cdncheck-sources-data.json` | Pinned `cdncheck` generated data |
+| `iptoasn-v4.tsv` | Decompressed IPtoASN IPv4 data with integer endpoints |
+| `iptoasn-v6.tsv` | Decompressed IPtoASN IPv6 data with textual endpoints |
+
+Missing sources reduce runtime coverage. A malformed selected source fails candidate validation. See [operations](operations.md#import-and-activate-data) for staging and activation.
 
 ## Broad cloud ranges
 
-Pin `disposable/cloud-ip-ranges` at revision `0c4c204e650a47a6f57d3709893a9dc96f942ed9`. The inspected A2Hosting provider file has Git blob `1bc51f7e3f2a8a8f8b9106cdb5ed60d0b35d42cd`.
+The reviewed `disposable/cloud-ip-ranges` revision is `0c4c204e650a47a6f57d3709893a9dc96f942ed9`. The inspected A2Hosting file has Git blob `1bc51f7e3f2a8a8f8b9106cdb5ed60d0b35d42cd`.
 
-The adapter discovers selected regular `json/*.json` provider files. It excludes `json/all-providers.json`, every `*-details.json` file, and `misc/` from primary discovery. Detail files use a separate validated join. A selected missing or malformed provider fails the candidate instead of becoming an empty source.
+Primary discovery reads selected regular `json/*.json` files. It excludes `json/all-providers.json`, `*-details.json`, and `misc/`. Detail files use a separate validated join. A selected missing or malformed provider fails the candidate; it does not become an empty source.
 
-Known top-level fields include `provider`, `provider_id`, `method`, `coverage_notes`, `generated_at`, `source_updated_at`, `source`, `last_update`, `ipv4`, `ipv6`, `source_http`, and lifecycle detail arrays. The adapter archives unknown fields, rejects invalid known-field types, and joins retirement by provider ID and canonical prefix. The upstream README states that retired ranges remain for four weeks with `retired_at` metadata.
+Known fields include `provider`, `provider_id`, `method`, `coverage_notes`, `generated_at`, `source_updated_at`, `source`, `last_update`, `ipv4`, `ipv6`, `source_http`, and lifecycle detail arrays. Archive unknown fields and reject invalid types for known fields.
 
-The pinned tree has no top-level license or notice file. Its many provider inputs and history database need separate terms review before redistribution.
+Join retirement information by provider ID and canonical prefix. The reviewed upstream README describes four weeks of retained retired ranges with `retired_at` metadata. A base-array prefix must not become active merely because it still appears in the list.
+
+The pinned tree has no top-level license or notice file. Review the provider inputs and history database terms before redistributing their data.
 
 ## AWS service ranges
 
-Input URL: `https://ip-ranges.amazonaws.com/ip-ranges.json`.
+Input: [AWS IP ranges](https://ip-ranges.amazonaws.com/ip-ranges.json).
 
-Preserve root `syncToken` and `createDate`. Preserve each IPv4 `ip_prefix` and IPv6 `ipv6_prefix` with `region`, `service`, and `network_border_group`. Identical prefixes can have several service rows and must remain separate records. An EC2 service tag establishes range membership, not a customer deployment.
+Preserve root `syncToken` and `createDate`. Each IPv4 `ip_prefix` or IPv6 `ipv6_prefix` retains its `region`, `service`, and `network_border_group`.
+
+Identical prefixes can have several service rows. Preserve each row. An EC2 tag proves membership in a published range, not that the analyzed organization owns an EC2 deployment.
 
 ## GCP service ranges
 
-Input URL: `https://www.gstatic.com/ipranges/cloud.json`.
+Input: [Google Cloud ranges](https://www.gstatic.com/ipranges/cloud.json).
 
-Preserve root `syncToken` and `creationTime`. Each row contains either `ipv4Prefix` or `ipv6Prefix`, plus `service` and `scope`. Generic `Google Cloud` rows remain provider or service-range evidence. They do not identify BigQuery, GKE, or Cloud Run.
+Preserve root `syncToken` and `creationTime`. Each row has either `ipv4Prefix` or `ipv6Prefix`, plus `service` and `scope`.
+
+Generic `Google Cloud` rows support provider or service-range evidence. They do not identify BigQuery, GKE, or Cloud Run.
 
 ## Azure service tags
 
-Discover the current artifact from Microsoft Download Center item `56519`. Store the discovered dated URL in the fetch receipt. Do not hard-code a dated URL as permanent.
+Find the current artifact through Microsoft Download Center item `56519`. Record the discovered dated URL in the fetch receipt. A dated URL must not be treated as permanently current.
 
-The inspected shape has root `changeNumber`, `cloud`, and `values`. Each value has `name`, `id`, and `properties` containing `changeNumber`, `region`, `systemService`, `platform`, and `addressPrefixes`. Preserve direction and purpose through reviewed mappings. The page currently describes weekly updates and an IPv4-only artifact. Recheck that limitation for every fetched revision.
+The reviewed format has root `changeNumber`, `cloud`, and `values`. Each value has `name`, `id`, and `properties`. Properties include `changeNumber`, `region`, `systemService`, `platform`, and `addressPrefixes`.
+
+Reviewed mappings preserve direction and purpose. At the audit date, the download page described weekly updates and an IPv4-only artifact. Check that limitation for each new revision.
 
 ## IPtoASN
 
-Input URLs:
+Download inputs:
 
-- `https://iptoasn.com/data/ip2asn-v4-u32.tsv.gz`
-- `https://iptoasn.com/data/ip2asn-v6.tsv.gz`
+- [IPv4 integer intervals](https://iptoasn.com/data/ip2asn-v4-u32.tsv.gz)
+- [IPv6 textual intervals](https://iptoasn.com/data/ip2asn-v6.tsv.gz)
 
-Each row contains inclusive start and end addresses, ASN, country code, and description. IPv4 uses integer endpoints. IPv6 uses textual endpoints. Validate ordering, family consistency, disjoint intervals, and bounds without expanding ranges into addresses. ASN zero or unknown does not become a provider. The publisher states PDDL v1.0 for the database; retain the publisher notice with each local artifact.
+The importer consumes decompressed TSV, not gzip files. Each row contains five fields:
+
+| Field | Meaning |
+| --- | --- |
+| Start | Inclusive start address; unsigned integer for IPv4, text for IPv6 |
+| End | Inclusive end address in the same family |
+| ASN | Unsigned autonomous system number |
+| Country | Source country code |
+| Description | Source organization description |
+
+Intervals must be ordered, disjoint, and within family bounds. The index stores intervals without expanding them into individual addresses. ASN zero or unknown does not become a provider.
+
+The publisher states PDDL v1.0 for the database. Retain the publisher notice with each artifact. Country and description are source metadata, not proof of server location or product use.
 
 ## Converted CDN data
 
-Use `sources_data.json` from `projectdiscovery/cdncheck` revision `a06260a272dc92cec0747f2f369b697088899bc7`. Convert only data. Do not import the runtime package.
+The reviewed input is `sources_data.json` from `projectdiscovery/cdncheck` revision `a06260a272dc92cec0747f2f369b697088899bc7`. The adapter converts data only; it does not import the upstream runtime package.
 
-Preserve the top-level category, provider key, CIDR or suffix, source revision, source-file digest, and provenance group. Validate CIDRs and DNS suffixes before publication. Matching both this data and a mirrored cloud-range source does not create independent corroboration unless their provenance groups differ.
+Preserve the top-level category, provider key, CIDR or suffix, source revision, file digest, and provenance group. Validate CIDRs and DNS suffixes before publication.
+
+A match in both this data and a mirrored cloud-range source is not independent corroboration unless the provenance groups differ.
 
 ## Normalized manifests
 
-Every normalized source manifest records:
+Each source manifest retains:
 
-- the source ID, input revision, input digest, adapter version, and record count;
-- selected files and explicit exclusions;
-- source URLs and HTTP metadata when fetched;
-- publication, retrieval, and activation times as separate values;
-- supported address families, roles, methods, lifecycle states, and raw labels;
-- validation warnings, rejected records, and coverage changes;
-- the terms or notice reference and any unresolved redistribution question.
+- Source ID, revision, digest, adapter version, and record count.
+- Selected files and explicit exclusions.
+- Acquisition URL and HTTP metadata when fetched.
+- Publication, retrieval, and activation times as separate values.
+- Supported families, roles, methods, lifecycle states, and raw labels.
+- Validation warnings, rejected records, and coverage changes.
+- Terms or notice reference and unresolved redistribution questions.
 
-An unchanged re-fetch keeps the original source publication time. A timestamp without a timezone remains timezone-unknown. A failed candidate never partially replaces the previous valid source snapshot.
+Re-fetching unchanged bytes does not change publication time. A timestamp without a timezone remains timezone-unknown. A failed candidate never partially replaces the previous valid snapshot.

@@ -1,12 +1,85 @@
 # cloudattrib
 
-`cloudattrib` is a self-hosted Go application for collecting public evidence about cloud infrastructure and SaaS products associated with a domain, hostname, URL, or IP address.
+`cloudattrib` collects public evidence about the cloud infrastructure and SaaS products associated with a domain. It combines DNS records, bounded HTTP responses, local fingerprints, and IP datasets into a report with findings, supporting evidence, and coverage limits.
 
-The behavior and delivery boundaries live in [SPEC.md](SPEC.md). The staged repository structure and implementation gates live in [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md).
+The reports support lead enrichment. They do not establish who pays for a service, qualify a lead, or estimate spend and savings.
+
+## Run your first analysis
+
+Install Go 1.25 or later and Make, then build from the repository root:
+
+```sh
+make build
+./bin/cloudattrib analyze example.com
+```
+
+Domain analysis needs a recursive DNS resolver. The default is `127.0.0.1:53`. If your resolver listens elsewhere, set its address before running the command:
+
+```sh
+export CLOUDATTRIB_RESOLVER=192.168.1.1:53
+./bin/cloudattrib analyze example.com
+```
+
+Replace that example address with your resolver. There is no automatic public-DNS fallback. The standalone CLI does not require PostgreSQL unless you enable CT discovery.
+
+The command writes JSON to stdout and diagnostics to stderr. Missing local datasets allow DNS and HTTP evidence to survive in a partial report.
+
+| Exit | Meaning |
+| --- | --- |
+| `0` | Requested work completed, including a complete no-match result. |
+| `2` | Invalid command, configuration, input, or admission request. |
+| `3` | At least one target was partial, failed collection, or was cancelled. |
+| `4` | A necessary capability, requested bundle, or persistent store was unavailable, or startup failed. |
+
+Read `coverage` alongside `findings`. An empty result from incomplete sources does not establish that a service is absent.
+
+## Choose an operation
+
+```sh
+# DNS evidence and local enrichment, without website requests
+./bin/cloudattrib analyze example.com --mode dns
+
+# One output envelope per input row
+./bin/cloudattrib batch --input domains.txt --format jsonl
+
+# Offline IP lookup using local datasets
+./bin/cloudattrib lookup-ip 198.51.100.7 --match all
+
+# Reinterpret retained observations without collection
+./bin/cloudattrib reclassify --report report.json --bundle builtin-rules-v1
+
+# Start the API and durable job workers
+./bin/cloudattrib serve --config config/example.yaml
+```
+
+`full` is the default analysis mode. It adds HTTP, TLS, and local web fingerprints to DNS and network enrichment. `lookup-ip` and `reclassify` make no collection requests. The IP above is a documentation address for offline examples.
+
+## Add local data
+
+The CLI loads an active bundle when one exists. Otherwise, it reads supported files from `./data/sources`. Set `data.source_directory` and `data.bundle_directory` in a configuration file to use other paths.
+
+For ASN enrichment, place the decompressed IPtoASN files at:
+
+```text
+data/sources/iptoasn-v4.tsv
+data/sources/iptoasn-v6.tsv
+```
+
+IPv4 files use unsigned integer interval endpoints; IPv6 files use textual addresses. Both use five tab-separated fields: start, end, ASN, country code, and description. The [source contracts](docs/source-contracts.md) list all supported inputs and their provenance requirements.
+
+The application does not download or refresh data during startup or analysis. If some applicable sources are missing, lookup returns available results with partial coverage. If none is usable, it returns `capability_unavailable`.
+
+For managed updates, follow [import, activation, rollback, and pruning](docs/operations.md#import-and-activate-data). An active bundle takes precedence over loose source files.
+
+## Configure the application
+
+`CLOUDATTRIB_CONFIG` selects one strict YAML or JSON configuration for CLI operations. The `--config` flags on `serve` and `datasets` override that path for the command.
+
+`CLOUDATTRIB_RESOLVER` overrides the resolver address loaded at CLI startup. A command-specific configuration supplies its own resolver. See [config/example.yaml](config/example.yaml) for the complete configuration shape.
+
+Certificate Transparency is optional and disabled by default. Analysis reads a local PostgreSQL CT index; it does not search public logs. See [CT operations](docs/ct-operations.md) to enable discovery, import records, or run bounded log collection.
 
 ## How attribution works
-
-Domain analysis combines live observations with local rules and datasets to produce evidence for lead enrichment.
 
 ```mermaid
 flowchart TB
@@ -51,87 +124,34 @@ flowchart TB
 	style local fill:#f6f8fa,stroke:#a8b4c0,color:#24292f
 ```
 
-HTTP starts when an approved public address becomes available while remaining DNS queries continue.
-Connections use that exact address with the original Host and TLS SNI; redirects receive the same destination checks.
-Missing sources remain visible in coverage, and useful evidence survives in a partial report.
+HTTP starts when a public address passes destination validation, while remaining DNS queries continue. The connection uses that exact address and preserves HTTP Host and TLS SNI. Redirects receive the same destination checks.
 
-`lookup-ip` uses local indexes without collection. `reclassify` interprets retained observations with a selected bundle without making network requests.
-Dataset updates and optional CT ingestion run separately from analysis. See the [architecture contracts](docs/architecture.md) for lifecycle and provenance details.
+Local rules interpret observations, and local datasets enrich DNS addresses and actual HTTP peers. Aggregation keeps relationships such as authoritative DNS, web delivery, mail routing, and sending authorization separate. Missing sources remain visible in coverage.
 
-## Development
+Reclassification preserves collection times and records a new classification time and bundle identity. It reinterprets retained evidence; it does not reconstruct historical ownership.
 
-Install Go 1.25 or later and Make. Run the full local check with:
+## Find the right document
+
+| You need to… | Read |
+| --- | --- |
+| Install, update, back up, or recover the service | [Operations guide](docs/operations.md) |
+| Configure optional CT ingestion and discovery | [CT operations](docs/ct-operations.md) |
+| Understand package and lifecycle contracts | [Architecture](docs/architecture.md), [package map](internal/README.md) |
+| Prepare datasets or check source formats | [Source contracts](docs/source-contracts.md) |
+| Check supported products and signal limits | [Rule coverage](rules/coverage-matrix.md) |
+| Find required behavior and acceptance cases | [Specification](SPEC.md), [implementation plan](IMPLEMENTATION-PLAN.md) |
+| Assign implementation work and validation | [Execution workflow](docs/execution-plan.md), [repository rules](AGENTS.md) |
+| Review test evidence and untested cases | [Qualification report](docs/qualification.md) |
+| Check dependency identities and notices | [Dependency audit](docs/dependency-audit.md), [notices](NOTICE.md), [SBOM](sbom/cloudattrib.cdx.json) |
+
+## Develop
+
+Run focused package tests while making changes. Run the full repository check before completing a code change:
 
 ```sh
 make check
 ```
 
-Useful individual targets are `make build`, `make test`, `make race`, `make lint`, and `make fmt`.
+The gate checks formatting, vet, tests, lint, skill integrity, the SBOM, race tests, and the build. PostgreSQL integration tests require `CLOUDATTRIB_POSTGRES_TEST_DSN` to point to a disposable database; they skip when it is unset. These tests reset database contents.
 
-The executable is written to `bin/cloudattrib`. Domain analysis uses the explicit resolver at
-`127.0.0.1:53` by default. Set `CLOUDATTRIB_RESOLVER` to another `host:port` when the operator
-has configured a different recursive resolver. Target HTTP connections use only concrete
-addresses returned by that resolver and apply the public-destination policy.
-
-```sh
-cloudattrib analyze example.com --mode dns
-cloudattrib analyze example.com
-cloudattrib batch --input domains.txt --format jsonl
-cloudattrib lookup-ip 198.51.100.7 --match all
-cloudattrib reclassify --report report.json --bundle builtin-rules-v1
-cloudattrib ct import --input ct-records.jsonl --scope example.com
-cloudattrib ct collect --config ct-log.json
-cloudattrib serve --config config/example.yaml
-cloudattrib datasets import --config config/example.yaml --source-dir data/sources
-cloudattrib datasets status --config config/example.yaml
-```
-
-The built-in execution view supports DNS, bounded HTTP, reviewed product rules, passive web
-fingerprints, and offline reinterpretation of a standalone report. Local prefix and ASN lookup
-loads the active bundle when one is present. Without an active bundle, it loads the configured
-`data.source_directory` (default `./data/sources`) directly. Reclassification preserves the
-original observations and collection coverage while recording a new classification time and
-bundle identity. It re-evaluates retained DNS addresses and actual HTTP peers, including external
-redirect peers, against the selected prefix and ASN data without making network requests.
-
-## CLI setup
-
-The CLI reads `./data/sources` by default. Set `CLOUDATTRIB_CONFIG` to use a YAML or JSON config
-file, or pass `--config` to `datasets` commands. Set `CLOUDATTRIB_RESOLVER` to override the
-configured resolver address. The default is `127.0.0.1:53`.
-
-Place supported source files in the configured source directory. For local ASN lookup, provide
-`iptoasn-v4.tsv` and `iptoasn-v6.tsv`. Each file must contain five tab-separated fields per line:
-the inclusive start address, inclusive end address, unsigned decimal ASN, country code, and
-description. IPv4 uses unsigned integer start and end values. IPv6 uses literal IPv6 addresses.
-Intervals must be ordered and must not overlap.
-
-Run a local lookup or analysis with the configured sources and resolver:
-
-```sh
-cloudattrib lookup-ip 8.8.8.8 --match all
-CLOUDATTRIB_RESOLVER=127.0.0.1:53 cloudattrib analyze example.com --mode dns
-```
-
-An active bundle takes precedence over the configured source directory. The application does not
-download or refresh source data during startup or request processing. Missing source files reduce
-coverage. A lookup can return available associations with partial coverage; if no applicable source
-is usable, it returns `capability_unavailable`.
-
-Command-specific `--config` flags on `serve` and `datasets` override `CLOUDATTRIB_CONFIG` for that
-operation.
-
-Certificate Transparency support is optional and disabled by default. It uses a local PostgreSQL
-index and never performs request-time CT searches. See [CT operations](docs/ct-operations.md) for
-the import schema, pinned-log collector, verification boundary, and measured operating envelope.
-
-The [operations guide](docs/operations.md) covers the pinned Compose and systemd deployments,
-dataset staging/activation/rollback, monitoring, backup/restore, network separation, and offline
-build/update procedures. Third-party identities and unresolved data-redistribution questions are
-recorded in [the SBOM](sbom/cloudattrib.cdx.json), [notices](NOTICE.md), and
-[dependency audit](docs/dependency-audit.md). Measured compatibility, latency, release checks, and
-R01–R23 evidence are recorded in the [qualification report](docs/qualification.md).
-
-## Agent skills
-
-Go development guidance lives in `.agents/skills`. Run `make skills-check` to verify the package inventory and recorded content hashes.
+Individual targets include `make build`, `make test`, `make race`, `make lint`, and `make fmt`. Go engineering skills live in `.agents/skills`; `make skills-check` verifies their inventory and hashes.

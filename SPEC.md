@@ -1,10 +1,26 @@
 # Specification: self-hosted cloud and SaaS attribution
 
-**Project:** `cloudattrib` (working name)  
-**Version:** 2.1\
-**Date:** 2026-09-20  
-**Status:** Implementation contract  
-**Companion:** [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md)
+Project: `cloudattrib`
+
+Contract version: 2.1, dated 2026-09-20
+
+Delivery checklist: [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md)
+
+This document defines required behavior. It is not a claim that every requirement has passed acceptance. The [qualification report](docs/qualification.md) records test evidence and known limits. The [README](README.md) covers current setup and usage.
+
+Requirements use direct instructions or "must." Rationale and dated source observations explain those requirements without changing them. Editorial changes preserve section numbers and the R01 through R23 identifiers.
+
+## Navigate the contract
+
+| Topic | Sections |
+| --- | --- |
+| Purpose, required capabilities, and network access | [1](#1-purpose-and-complete-scope), [2](#2-architecture-and-engineering-choices) |
+| Targets, collection, and destination safety | [3](#3-targets-modes-and-scope), [4](#4-dns-collection), [5](#5-http-tls-and-local-fingerprinting) |
+| Data inputs, IP lookup, and product rules | [6](#6-dataset-ingestion-and-source-semantics), [7](#7-local-ip-matching), [8](#8-product-taxonomy-and-fingerprint-rules) |
+| Evidence, replay, and optional CT | [9](#9-evidence-and-aggregation), [10](#10-optional-certificate-transparency-discovery) |
+| CLI, API, jobs, and bundle lifecycle | [11](#11-application-cli-and-http-contracts), [12](#12-persistence-jobs-and-history), [13](#13-immutable-bundles-and-update-lifecycle) |
+| Limits, result status, and readiness | [14](#14-bounds-failure-behavior-and-observability), especially the [decision table](#142-result-status) |
+| Testing, acceptance, and sources | [15](#15-testing-evaluation-and-deployment), [16](#16-complete-system-acceptance-gate), [17](#17-sources-and-verification-notes) |
 
 ## 1. Purpose and complete scope
 
@@ -12,9 +28,13 @@ Build a self-hosted Go application that answers:
 
 > Given a domain, hostname, URL, or IP address, which cloud infrastructure and SaaS products are publicly associated with it, and what evidence supports each association?
 
-The primary use case is evidence collection for lead enrichment by a cloud optimization business. The system supplies attribution evidence to support downstream lead qualification. Qualification decisions, lead scoring, spend estimates, and savings estimates are outside scope. Preserve useful evidence when individual collection or enrichment capabilities are unavailable, and expose the resulting limits.
+The system collects attribution evidence for lead enrichment by a cloud optimization business. Downstream users decide whether a lead qualifies. Qualification, lead scoring, spend estimates, and savings estimates are outside scope.
 
-This specification covers the **complete domain-to-product system**, not an initial IP-lookup component. A complete implementation includes DNS collection, CNAME classification, bounded HTTP collection, local web-technology fingerprinting, cloud and CDN attribution, local ASN enrichment, provider service/region metadata, evidence aggregation, persistent results, batch processing, and operational tooling. Certificate Transparency (CT) is an implemented, optional discovery module that is disabled by default.
+Preserve useful evidence when a collector or enrichment source is unavailable. Report the resulting coverage limits.
+
+Delivery includes DNS collection, CNAME classification, bounded HTTP collection, local web fingerprints, cloud and CDN attribution, and local ASN enrichment. It also includes provider service and region metadata, evidence aggregation, persistent results, batch processing, and operations tooling.
+
+Certificate Transparency (CT) is a required discovery module with runtime use disabled by default. Local IP lookup alone does not satisfy the delivery scope.
 
 The system reports observed associations. It must not turn an AWS-hosted endpoint into a claim that the domain owner buys AWS directly, or turn a verification token into proof of a paid SaaS subscription.
 
@@ -46,13 +66,13 @@ The system reports observed associations. It must not turn an AWS-hosted endpoin
 | R22 | Deterministic search | Use CIDR, suffix, alias, and structured database indexes. No embeddings or vector database. |
 | R23 | Dependency and data governance | Pin dependencies and source revisions, retain notices, and audit network side effects. |
 
-Implementation phases order the work. They do not reduce these requirements to a smaller release.
+All listed capabilities are required for delivery. Phases set the work order without reducing scope.
 
-Every listed capability is required for delivery. Runtime availability is a separate contract: section 14.2 defines which unavailable capabilities allow partial results and which prevent an operation from executing. Missing enrichment data must never be reported as a successful no-match.
+Runtime availability is separate. Section 14.2 defines when missing capabilities allow partial results and when they prevent execution. Unavailable data must never appear as a successful no-match.
 
 ### 1.2 Network policy: no enrichment APIs does not mean no collection
 
-Live domain analysis necessarily contacts a configured DNS resolver and the target's public website. All attribution and fingerprint matching happen locally.
+Live domain analysis contacts the configured resolver and, in full mode, the target's public website. Attribution and fingerprint matching happen locally.
 
 | Process or action | Permitted network access |
 | --- | --- |
@@ -74,43 +94,20 @@ No embedding model, vector index, distributed message broker, graph database, or
 
 ## 2. Architecture and engineering choices
 
-The component selections and boundaries in this section are requirements. Explanatory notes identify their rationale; external library observations remain subject to the P0 dependency audit.
+The component choices and boundaries below are requirements. Rationale explains the choices. P0 verifies the dated observations about external libraries.
+
+The main flow is:
 
 ```text
-                                       PUBLIC DATA UPDATES
-                              Git mirror / static files / local imports
-                                                |
-                                    normalize, validate, version
-                                                |
-                                      immutable data bundle
-                                                |
-INPUT                                           v
- domain / hostname / URL / IP ---> capture AttributionView once
-            |
-     normalize and scope
-            |
-     plan seed hostnames <---- optional local CT index
-            |
-       DNS collector --------> A / AAAA / full CNAME chains / MX / NS / TXT
-            |                                      |
-            |                               DNS product rules
-            |
-       HTTP collector -------> headers / redirects / HTML / TLS / peer IP
-            |                                      |
-            |                                  wappalyzergo
-            |
-       observed IPs ----------> BART cloud and service ranges
-            |                  local ASN interval index
-            |                  local cdncheck-derived classifications
-            |
-       observations + detector evidence
-            |
-       relation-aware aggregation
-            |
-       normalized findings + coverage + provenance
-            |
-       JSON / JSONL / API / PostgreSQL
+domain, hostname, or URL
+    -> normalize and scope
+    -> collect DNS and approved HTTP responses
+    -> interpret observations with local rules and datasets
+    -> aggregate evidence into findings
+    -> return a report with provenance and coverage
 ```
+
+Each attempt uses one captured immutable view. Dataset updates build that view separately. Optional CT supplies seed names from a local index. IP lookup queries local indexes directly; reclassification interprets retained inputs without collection. The [README diagram](README.md#how-attribution-works) shows the domain-analysis path.
 
 ### 2.1 Selected components
 
@@ -142,7 +139,9 @@ BART supports prefix lookup and covering-prefix iteration. The application must 
 
 The inspected `cdncheck.go` includes default public resolvers and an initialization-time IPv6 connectivity check. Merely avoiding its domain-lookup method does not establish that importing the package has no network side effects. [S05]
 
-The reference implementation therefore **imports the pinned generated data during the build/update process and evaluates it through a small local adapter**. Preserve its notices, category labels, source revision, and data hash. Do not import the unmodified runtime package into the default worker binary. A later audited package or maintained patch may replace this adapter only after passing the same no-egress tests.
+Import pinned generated `cdncheck` data during build or update, then evaluate it through a local adapter. Preserve notices, category labels, revision, and hash. Do not import the unmodified runtime package into the default worker binary.
+
+A later audited package or maintained patch may replace the adapter only after passing the same no-egress tests.
 
 This retains the agreed CDN/cloud classification capability. It does not require running another scanner or duplicating network collection. `cdncheck` data and the upstream cloud dataset may derive from the same sources, so matching both is not automatically independent corroboration.
 
@@ -156,7 +155,7 @@ The CLI can analyze a target without PostgreSQL and emit JSON directly. Producti
 
 ### 3.1 Request model
 
-Each request includes `target`, `kind` (`domain`, `url`, or `ip`), optional additional hostnames, and explicit analysis options. A caller may provide an `organization_label` for grouping. This label is caller-supplied, not a verified company identity.
+Each request includes `target`, `kind`, and explicit analysis options. `kind` is `domain`, `url`, or `ip`. Additional hostnames are optional. A caller may supply `organization_label` for grouping, but the label is not a verified company identity.
 
 Normalize DNS names to lowercase IDNA ASCII, preserve the original input, and remove one terminal DNS root dot. Reject invalid labels, embedded credentials, control characters, unsupported schemes, URL zones, and excessive input lengths. Store the IDNA/public-suffix data version used.
 
@@ -191,7 +190,12 @@ Continue the remaining DNS queries within the target's deadline and budgets. Rec
 
 Use one in-job resolver cache and one collection result per equivalent request. Detectors consume observations. They must not independently re-resolve or re-fetch the target.
 
-An unpinned batch can span multiple data activations. Each target captures the active view when that target attempt starts and records its bundle; a retry may capture a newer view. A caller may instead pin an available compatible bundle for the entire batch. Before accepting a pinned batch, persist its bundle reference and protect it against pruning. Protection covers queued targets and pending retries, survives restarts, and lasts until every target is terminal. Admission and pruning must coordinate as specified in section 12.2. Reject an unavailable or incompatible requested bundle explicitly; never substitute the active bundle.
+Batches choose a bundle in one of two ways:
+
+- Unpinned: each attempt captures the active view when it starts and records the bundle ID. A batch can span activations, and retries may use newer views.
+- Pinned: every attempt uses the requested available, compatible bundle. Persist its reference and pruning protection before accepting the batch.
+
+Pin protection covers queued targets and pending retries across restarts until every target is terminal. Coordinate admission and pruning under section 12.2. Reject unavailable or incompatible pins explicitly. Never substitute the active bundle.
 
 ## 4. DNS collection
 
@@ -209,7 +213,9 @@ When a hostname has no NS records, discover its applicable DNS zone through boun
 
 Distinguish `answered`, `nodata`, `nxdomain`, `timeout`, `servfail`, `refused`, `policy_blocked`, and `budget_exhausted`. DNS absence and DNS failure are not interchangeable.
 
-Keep query outcomes separate from address-policy decisions. A successful DNS answer containing a private address remains an observed answer; record that address as prohibited for live connections with its policy reason. Record address-family timeouts and omitted queries even when HTTP succeeds through another address. Blocked connection candidates and incomplete requested queries contribute coverage limitations and a partial report when useful observations remain. Do not replace the whole hostname's outcome with `policy_blocked` merely because one address is prohibited.
+Keep query outcomes separate from connection policy decisions. A DNS answer containing a private address remains an observed answer. Record the address as prohibited for live connections and include the policy reason.
+
+Record address-family timeouts and omitted queries even when HTTP succeeds through another address. Blocked candidates and incomplete requested queries limit coverage and produce a partial report when useful observations remain. One prohibited address must not turn the whole hostname's outcome into `policy_blocked`.
 
 Cache positive records no longer than their remaining TTL. Record original observation time on cache hits. Honor negative-cache semantics from the response where available. Cache keys include resolver identity, class, normalized name, and type. TTL zero is not reusable across jobs.
 
@@ -239,9 +245,19 @@ An HTTP 403, 404, or 500 can still contain useful public technology evidence. Tr
 
 ### 5.2 Request destination policy
 
-For every connection and redirect, resolve through the configured resolver and validate each candidate address independently. Start a connection when an approved public address is available, dial that exact address directly, and preserve the requested hostname for HTTP Host and TLS SNI. Never connect to a prohibited address. Do not validate one resolution and then allow the transport to perform a different one. Any connection retry or alternate-address attempt must use an independently approved address.
+For every connection and redirect:
 
-The default live policy rejects loopback, private, link-local, unspecified, multicast, documentation, benchmark, and other non-public destination addresses, including IPv4-mapped forms and cloud metadata destinations. A mixed public/private answer does not block the hostname: discard prohibited addresses from connection candidates, retain their observations and policy reasons, and continue with approved addresses. A failed AAAA query does not block an approved public IPv4 address. If no approved address becomes available within the resolution budget, omit that HTTP request and record why. Continue collecting other usable evidence.
+1. Resolve through the configured resolver and validate each candidate independently.
+2. Start when an approved public address is available.
+3. Dial that exact address and preserve the hostname for HTTP Host and TLS SNI.
+
+Never connect to a prohibited address or let the transport perform a different resolution after validation. Approve each retry or alternate-address attempt independently.
+
+The default policy rejects loopback, private, link-local, unspecified, multicast, documentation, benchmark, and other non-public destinations. This includes IPv4-mapped forms and cloud metadata addresses.
+
+For mixed answers, remove prohibited connection candidates but retain their observations and policy reasons. Continue with approved addresses. A failed AAAA query must not block an approved public IPv4 address.
+
+If no approved address becomes available within the resolution budget, omit that HTTP request and record why. Continue collecting other usable evidence.
 
 Connection reuse must preserve destination enforcement: record the actual peer address and reuse only a connection admitted under a compatible policy. Disable environment-derived proxy behavior unless an explicit operator-controlled proxy is configured and provides equivalent destination enforcement.
 
@@ -279,7 +295,7 @@ The adapter must:
 6. Treat the base-array/detail relationship as an adapter contract verified across the complete selected revision, not as an assumption inferred from one sample.
 7. Retain source paths, record references, file hashes, adapter version, and Git revision.
 
-Base lists and any richer `*-details.json` files are different input contracts. Rich details may be imported only by an explicit tested adapter; do not assume every provider has them. The required product-depth path uses the official feeds below, so service/region support does not depend on unverified detail formats.
+Base lists and `*-details.json` files have different contracts. Import richer details only through a tested adapter; providers need not all have detail files. Required service and region enrichment uses the official feeds below and must not depend on unverified detail formats.
 
 A selected provider file disappearing, an empty required family, or a large coverage change must be surfaced in the update report. An empty family is not itself invalid when that provider legitimately publishes only the other family.
 
@@ -293,7 +309,7 @@ Implement all three adapters as part of the complete system. They run in the upd
 | GCP `cloud.json` | Prefix, `service`, `scope`, creation metadata | Generic Google Cloud ranges do not distinguish every GCP product. Do not infer BigQuery, GKE, or Cloud Run from generic ownership. |
 | Azure downloadable Service Tags JSON | Tag name, prefix list, region, system service, change metadata | Preserve the tag's direction and purpose where mapped. A control-plane or egress range is not automatically a customer-facing deployment. |
 
-AWS documents overlapping service sets, incomplete coverage, and exclusions such as BYOIP. Google distinguishes its customer-cloud range file from broader Google-owned ranges. Azure service tags describe groups of addresses with service-specific purposes. These are reasons to preserve source meaning, not to discard useful metadata. [S11, S12, S13, S14]
+Preserve each feed's meaning and limits. AWS documents overlapping sets, incomplete coverage, and exclusions such as BYOIP. Google separates customer-cloud ranges from broader Google-owned ranges. Azure tags group addresses by service-specific purpose. [S11, S12, S13, S14]
 
 For Azure, configure a vetted public download URL or local mirror and implement explicit download-page discovery only if tested. Do not require an Azure subscription, SDK authentication, or the Service Tag Discovery API. Never hard-code a dated download URL as permanently current.
 
@@ -317,7 +333,9 @@ Every importer must enforce file-size, decompression, nesting, record-count, and
 
 Preserve source publication time, last successful retrieval time, and local activation time separately. Re-fetching an unchanged file does not change when that source last published data. A timestamp without a timezone remains explicitly timezone-unknown rather than silently being labeled UTC.
 
-Network/range sources receive a freshness warning after seven days without a successful check by default. Freshness settings are per source. A warning does not automatically remove all results or turn an old record into a retired one. An operator may configure a hard maximum age. Required data that exceeds a hard age limit must make the relevant capability unavailable explicitly.
+By default, warn when a network or range source has not been checked successfully for seven days. Configure freshness per source. A warning alone must not remove results or mark an old record retired.
+
+An operator may set a hard maximum age. When required data exceeds that age, mark the affected capability unavailable.
 
 ### 6.5 Provider categories and direction
 
@@ -360,7 +378,15 @@ These are invented associations using documentation addresses. They are index fi
 
 ### 7.4 Unknowns and bounds
 
-No match means “not found in these datasets,” not “not in the cloud.” A successful complete no-match requires all requested applicable lookup sources to be usable and searched. With some sources unavailable, return available associations and `status=partial`, even if the searched sources found none. With no applicable usable source, return `capability_unavailable`, HTTP 503 and CLI exit 4. Never collapse unavailable sources into an empty successful result. Malformed input is a validation error. A valid private address can be queried locally, but live fetching that address is blocked by the separate collection policy.
+No match means "not found in the searched datasets." It does not establish that a target is outside the cloud.
+
+| Source coverage | Result |
+| --- | --- |
+| All requested applicable sources were usable and searched | A complete no-match is valid. |
+| Some sources were unavailable | Return available associations and `status=partial`, including when surviving searches found none. |
+| No applicable source was usable | Return `capability_unavailable`, HTTP 503, and CLI exit 4. |
+
+Malformed input remains a validation error. Valid private addresses can be queried locally; the separate collection policy blocks live connections to them.
 
 Bound associations returned per address. If the limit is exceeded, return an explicit error or a marked truncated evidence set with `coverage=partial`; never silently pick a provider. On association-limit overflow, the default local lookup API returns an explicit limit error. This overflow rule does not change the partial-result behavior for unavailable sources.
 
@@ -374,7 +400,7 @@ A provider has a stable application ID, display name, aliases, and reviewed cate
 
 Initial release coverage must satisfy the product-and-relationship acceptance matrix in section 8.5 for AWS CloudFront, ELB, S3 and Route 53; Azure App Service, Blob Storage and Azure DNS; GCP infrastructure; Cloudflare, Fastly, Vercel and Netlify; Google-hosted mail, Microsoft-hosted mail, Proofpoint and Mimecast; and visible HubSpot, Segment and Atlassian associations. Provider-only results are appropriate when a signal cannot establish a product. They must not replace product detection where the agreed signal supports it.
 
-This is a rule-development and validation requirement, not a claim that every one of these products is detectable from every domain. The implementation must maintain a coverage matrix identifying signal types and known blind spots. Do not create a broad false-positive rule merely to fill a coverage cell.
+Maintain a coverage matrix of supported signals and known blind spots. These are rule and validation requirements, not a promise that every domain exposes every product. Do not add broad rules that create false positives to fill a matrix cell.
 
 ### 8.2 Supported matching operations
 
@@ -382,7 +408,7 @@ Support exact DNS-name matching, label-boundary suffix matching, anchored Go-com
 
 For suffix matching, normalize both names and require equality or a `.` boundary, subject to the rule's `include_apex` flag. `cloudfront.net.evil.example` and `notcloudfront.net` must never match `cloudfront.net`.
 
-Prefer exact documented MX patterns over broad rules such as “every name ending in google.com.” Prefer constrained NS label patterns over an unbounded substring such as “awsdns.” Use vendor documentation and captured positive/negative fixtures for each rule.
+Prefer exact documented MX patterns over broad rules such as "every name ending in google.com." Prefer constrained NS label patterns over an unbounded substring such as "awsdns." Use vendor documentation and captured positive/negative fixtures for each rule.
 
 Rule bundles contain stable IDs, version, signal and field, matching condition, provider/product mapping, relationship, evidence strength, source references, review date, and tests. Rules do not execute code or make network requests. Compile all matchers before activation.
 
@@ -427,7 +453,11 @@ A generic AWS, Azure, or Google-owned IP yields provider-level network evidence.
 
 ### 8.5 Product-and-relationship acceptance matrix
 
-Each named product in a grouped row requires its own dated signal reference, canonical mapping, positive fixture, and negative fixture in `rules/coverage-matrix.md`. These are required test contracts, not claims that every target exposes the signal. Validate exact vendor patterns during P0/P6 before authoring rules. Unsupported cases must identify the missing or insufficient signal and its reason; they cannot waive detection where the agreed signal is available. Every positive fixture must assert subject, product/provider specificity, relation, evidence references, and scope. Every negative fixture must assert the unsupported conclusion is absent.
+For each named product, including products grouped in one row, record a dated signal reference, canonical mapping, and positive and negative fixtures in `rules/coverage-matrix.md`. Validate exact vendor patterns during P0 and P6 before writing rules.
+
+Positive fixtures assert subject, provider or product specificity, relation, evidence references, and scope. Negative fixtures assert that the unsupported conclusion is absent.
+
+Unsupported cases must explain the missing or insufficient signal. They cannot waive detection when an agreed signal is available. The matrix defines test contracts; individual targets need not expose every signal.
 
 | Product or family | Required signal and relationship | Positive fixture | Negative fixture and justified limit |
 | --- | --- | --- | --- |
@@ -451,13 +481,14 @@ Release acceptance requires every supported positive and negative fixture above 
 
 ### 9.1 Collected observations, source records, and conclusions
 
-**Observation:** An immutable collected fact, such as a DNS record, an HTTP response, or a connected peer address, with its original collection time.
+| Term | Meaning |
+| --- | --- |
+| Observation | An immutable collected fact, such as a DNS record, HTTP response, or peer address, with its original collection time. |
+| Dataset record | Versioned source data consulted during classification, such as a prefix association or ASN interval. It retains source identity, record reference, and known publication and effective times. |
+| Evidence | A detector's interpretation of observations, with references to those observations, consulted records, and exact rule and data versions. |
+| Finding | A grouped conclusion about a subject, provider or product, and relationship, with supporting and conflicting evidence. |
 
-**Dataset record:** Versioned source data consulted during classification, such as a prefix association or ASN interval. Keep its source identity, record reference, publication time, and effective time when supplied. Dataset records supply provenance to evidence. They are distinct from collected observations and are not assigned the target's collection time.
-
-**Evidence:** A detector's interpretation of observations, such as “this CNAME matches rule `aws.cloudfront.cname.v1`.” Evidence references its input observations, any consulted dataset records, and the exact rule/data versions used.
-
-**Finding:** A grouped conclusion about a subject, provider/product, and relationship, with supporting and conflicting evidence.
+Dataset records are not collected observations. Never assign them the target's collection time. An evidence item may state that a CNAME matched `aws.cloudfront.cname.v1`; the finding groups that interpretation with other evidence for the same relationship.
 
 Use explicit relations: `web_delivery`, `authoritative_dns`, `mail_routing`, `sending_authorization`, `web_integration`, `domain_verification`, `network_provider`, `network_origin`, and `service_range`. Appropriate parsed SPF evidence yields `sending_authorization`, distinct from inbound mail routing and paid-product adoption. Infrastructure and SaaS summaries are projections of findings, not unrelated free-text lists.
 
@@ -488,17 +519,21 @@ Preserve conflicts and ambiguity. Never resolve a same-prefix provider tie by in
 
 Use activity labels `configured`, `responding`, `verification_only`, `historical`, and `unknown`. DNS is configuration evidence at its observation time. A successful HTTP connection is responding-endpoint evidence. A retired range or old CT record is historical context.
 
-A complete analysis with no findings is different from an incomplete analysis. “Not detected” never means “not used.” A failed or partial follow-up run must not remove an earlier finding from history as though it had been disproved.
+A complete analysis with no findings is different from an incomplete analysis. "Not detected" never means "not used." A failed or partial follow-up run must not remove an earlier finding from history as though it had been disproved.
 
 ### 9.5 Reclassification
 
-Reclassification means reinterpretation of existing collected observations using a selected compatible bundle. It does not reconstruct historical ownership. Create a new report linked to the original report and immutable collected observations. Preserve their original collection times and collection coverage. Record a new classification time, the selected bundle, and the versioned dataset records consulted by the new classification.
+Reclassification reinterprets retained observations using a selected compatible bundle. It does not reconstruct historical ownership.
+
+Create a new report linked to the original report and immutable observations. Preserve collection times and collection coverage. Record the new classification time, selected bundle, and consulted dataset records.
 
 Record source publication and effective times separately when supplied, and leave unknown times unknown. A new association must not imply that it was valid at the original collection time. A difference between reports may reflect changed source data or rules rather than a change in the target's infrastructure. Keep original detector outputs with their original detector identity when reusing them as replay inputs.
 
 When a new detector requires bytes that were not retained, mark that detector `unavailable_for_replay`. Do not silently fetch the website or claim full replay. Replaying `wappalyzergo` requires an explicitly retained suitable response capture; applying new canonical mappings to stored raw technology names does not.
 
-Preserve all supported replay results. If a requested detector or source cannot replay but another applicable path can, return partial classification coverage under section 14.2. If no requested replay path is usable, return `capability_unavailable`. A standalone report export must include its normalized replay inputs or identify missing inputs explicitly; a report containing findings alone does not promise replay support. Retention must preserve shared observations while a retained reclassification report references them.
+Preserve supported replay results. If one requested path cannot replay but another can, return partial classification coverage under section 14.2. If none is usable, return `capability_unavailable`.
+
+Standalone exports must include normalized replay inputs or identify missing inputs explicitly. Findings alone do not promise replay support. Retain shared observations while any retained reclassification report references them.
 
 ## 10. Optional Certificate Transparency discovery
 
@@ -512,9 +547,15 @@ Also implement a bounded background `ct collect` command for explicitly configur
 
 Verify configured log identity. Record `checkpoint_signature`, `continuity`, and `entry_inclusion` verification separately, each with `passed`, `failed`, or `not_performed`, the procedure/version, and a reason when not performed. Retain the log key identity and authenticated tree size/root used by a check. A valid checkpoint signature or continuity proof alone does not establish inclusion of fetched entry bytes.
 
-Use `verified_log` only when a documented procedure authenticates the tree and establishes that the exact entry is included, through an inclusion proof or equivalent verified tree reconstruction. Continuity must pass when extending an existing checkpoint; at an initial trusted checkpoint, record why continuity was not performed. Data fetched without inclusion verification remains `log_unverified`; local imports remain `imported_unverified` unless their supplied proof material passes the same procedure. Never infer verification from successful parsing or transport. Failed verification must not advance the verified checkpoint or publish verified entries. Unsupported protocols are explicit errors. [S16]
+Use `verified_log` only when a documented procedure authenticates the tree and proves inclusion of the exact entry. An inclusion proof or equivalent verified tree reconstruction must establish that fact.
 
-Measure collector throughput, downloaded bytes, retained storage, and ingestion lag during P0 under explicit entry, byte, request, and elapsed-time budgets. Record the configured logs, starting checkpoint, observation window, hardware, and backlog trend. Root-scope filtering reduces retained data but does not provide domain-filtered retrieval from RFC 6962 logs: entries are fetched by index and inspected locally. Document the measured operating envelope and limits without claiming exhaustive discovery. Repeat the measurements for the shipping collector in P9.
+Continuity must pass when extending an existing checkpoint. At an initial trusted checkpoint, record why continuity was not performed. Fetched data without inclusion verification remains `log_unverified`. Local imports remain `imported_unverified` unless supplied proof material passes the same procedure.
+
+Successful parsing or transport does not imply verification. Failed verification must not advance a verified checkpoint or publish verified entries. Reject unsupported protocols explicitly. [S16]
+
+During P0, measure throughput, downloaded bytes, retained storage, and ingestion lag under explicit entry, byte, request, and time budgets. Record log identities, starting checkpoint, observation window, hardware, and backlog trend. Repeat these measurements for the shipping collector in P9.
+
+Root-scope filtering reduces retained data, not retrieval traffic. RFC 6962 entries are fetched by index and inspected locally. Document measured costs and limits without claiming exhaustive discovery.
 
 Newer log protocols can be added through this adapter boundary. Supporting every log protocol is not a condition for the scoped local-import capability, and documentation must identify exactly which collector protocols ship.
 
@@ -574,8 +615,8 @@ cloudattrib serve --config config.yaml
 cloudattrib datasets sync --config config.yaml
 cloudattrib datasets import --source-dir ./upstream --config config.yaml
 cloudattrib datasets validate --candidate <candidate-id>
-cloudattrib datasets activate --candidate <candidate-id>
-cloudattrib datasets rollback --bundle <bundle-id>
+cloudattrib datasets activate --candidate <candidate-id> --approval-hash <candidate-hash>
+cloudattrib datasets rollback --bundle <bundle-id> --approval-hash <bundle-hash>
 cloudattrib datasets status
 
 cloudattrib ct import --input ct-records.jsonl --scope example.com
@@ -586,7 +627,14 @@ Angle-bracket values are operator-supplied identifiers, not literal arguments. T
 
 JSONL emits one envelope per input row, including failures, and carries `input_index`. Bound memory while streaming large CLI inputs. Preserve input order by default using a bounded reorder buffer that applies backpressure. An explicit unordered option may emit completed rows immediately.
 
-Exit codes: 0 means all requested results completed, including complete no-match results. 2 means command/configuration/input-envelope error, idempotency conflict, or capacity rejection. 3 means at least one accepted target was partial, failed collection, or cancelled. 4 means unavailable necessary execution capability, unavailable/incompatible requested bundle, startup failure, or persistent-store failure. For mixed CLI batch outcomes, 4 takes precedence over 3; retain every per-row outcome. Do not use exit 4 merely because an enrichment source is missing when useful results remain. Diagnostics go to stderr, never into the JSON stream.
+| Exit code | Meaning |
+| --- | --- |
+| 0 | All requested results completed, including complete no-match. |
+| 2 | Command, configuration, or input-envelope error; idempotency conflict; or capacity rejection. |
+| 3 | At least one accepted target was partial, failed collection, or was cancelled. |
+| 4 | Unavailable necessary capability; unavailable or incompatible requested bundle; startup failure; or persistent-store failure. |
+
+For mixed batch outcomes, 4 takes precedence over 3. Retain each row's outcome. A missing enrichment source does not justify exit 4 when useful results remain. Send diagnostics to stderr, never into the JSON stream.
 
 ### 11.3 Required HTTP routes
 
@@ -614,13 +662,21 @@ For a batch, reject a malformed envelope before insertion. Syntactically valid e
 
 Support client-supplied idempotency keys on job creation. The key is scoped to the local caller identity and a canonical request digest. The same key with a different request returns 409. It is not a guarantee of exactly-once network collection.
 
-Bound the total accepted nonterminal target backlog across jobs, including queued targets, running targets that may retry, and delayed retries. Default to 10,000 target reservations, configurable by the operator. A reservation lasts until the target is terminal, so retries do not bypass or compete again for admission. Validate and reserve capacity atomically with job insertion. Reject a submission that exceeds the limit before inserting any of its rows, with HTTP 429, `queue_capacity_exceeded`, and CLI exit 2 where applicable. Concurrent submissions must not overrun the limit. Replays of an existing idempotent submission consume no new reservations; check them before rejecting for capacity. This limit is separate from the 1,000-row per-batch limit and the active-worker limits.
+Bound the total nonterminal target backlog across jobs. The default is 10,000 operator-configurable reservations, covering queued targets, running targets that may retry, and delayed retries. A reservation lasts until its target is terminal; retries do not seek admission again.
+
+Validate and reserve capacity atomically with insertion. Reject an over-limit submission before inserting any rows, with HTTP 429, `queue_capacity_exceeded`, and CLI exit 2 where applicable. Concurrent submissions must not exceed the limit.
+
+Check existing idempotent submissions before rejecting for capacity. Returning an existing job consumes no new reservations. This global limit is separate from the 1,000-row batch limit and active-worker limits.
 
 ### 11.4 Shared trusted-operator access
 
 The initial service has one shared trusted-operator model. Authenticated operators share visibility of all results and may cancel any job. Do not introduce tenant isolation or caller-specific result ownership. Caller identity scopes idempotency and supplies audit attribution only.
 
-The application derives a stable operator ID from an operator-configured credential mapping, or from an authenticated reverse proxy's trusted identity assertion. Never accept identity from request bodies or arbitrary client-supplied headers. In proxy mode, restrict direct backend access and require the proxy to strip incoming identity headers before setting its verified identity. An explicitly unauthenticated loopback-only deployment uses one configured `local-operator` identity. Reject unauthenticated requests with HTTP 401 when authentication is enabled. Document credential rotation and stable identity mapping without logging credentials.
+Derive a stable operator ID from configured credentials or a trusted authenticated proxy. Never accept identity from request bodies or arbitrary client headers.
+
+In proxy mode, restrict direct backend access. Require the proxy to strip incoming identity headers before setting its verified identity. Explicit unauthenticated loopback mode uses one configured `local-operator` identity.
+
+When authentication is enabled, reject unauthenticated requests with HTTP 401. Document credential rotation and stable identity mapping without logging credentials.
 
 ### 11.5 Example domain request
 
@@ -713,9 +769,17 @@ Accepted batch jobs are durable. Whole-target execution is at-least-once after c
 
 States are `queued`, `running`, `completed`, `partial`, `failed`, and `cancelled`, with per-target equivalents. A job is complete only when every target is terminal. Persist counts by state rather than concealing failed rows.
 
-For a pinned batch, persist the bundle ID and durable pruning protection before returning acceptance. Admission must validate availability, integrity, and detector/schema compatibility while holding the same store-level coordination used by pruning, and keep that protection until the job and reference commit. Pruning acquires the same coordination, checks durable job references, and deletes only unreferenced eligible bundles. Use a consistent lock order. A crash must leave either a committed protected job or no accepted job; a temporary protective reservation may be reclaimed only after proving no committed job references it. If the reference store cannot be checked, pruning must fail closed.
+For pinned admission, hold the coordination shared with pruning while validating bundle availability, integrity, and detector and schema compatibility. Keep protection until the job and bundle reference commit. Persist both before returning acceptance.
 
-Return HTTP 503 and CLI exit 4 with `bundle_unavailable` or `bundle_incompatible` when the requested pin cannot be honored. Do not insert the job or silently choose another bundle. Preserve protection through queue waits, lease expiry, retries, and process restarts. Release it only after the transaction that makes every target terminal. A cancellation request alone does not release the pin; cancellation must reach terminal target states. Completed or cancelled batches may release their pins, but active-view, in-flight-reader, and last-known-good protections still apply. Restore durable references before enabling pruning after restart.
+Pruning uses the same coordination and consistent lock order. It checks durable references and removes only eligible, unreferenced bundles. If the reference store cannot be checked, pruning must stop.
+
+After a crash, either the job is committed and protected or it was never accepted. Reclaim a temporary protective reservation only after proving no committed job references it.
+
+If a requested pin cannot be honored, return `bundle_unavailable` or `bundle_incompatible`, HTTP 503, and CLI exit 4. Do not insert the job or substitute a bundle.
+
+Preserve protection through queue waits, lease expiry, retries, and restarts. Release the pin only after the transaction that makes every target terminal. A cancellation request alone is insufficient.
+
+After pin release, active-view, in-flight-reader, and last-known-good protections still apply. Restore durable references before enabling pruning after restart.
 
 ### 12.3 History and retention
 
@@ -723,7 +787,7 @@ Keep observations and findings for 30 days by default, configurable by the opera
 
 Raw HTTP captures are disabled by default. When enabled, store them in restricted artifact storage, protect them at rest, and expire them after 24 hours by default. Do not place arbitrary response bodies or secrets in general-purpose logs.
 
-A history diff may say a previously observed finding was not observed in a later comparable complete run. It must not label a product “removed” after an HTTP timeout, CT index outage, rule removal, or incomplete DNS collection. Record whether a change came from new observations, new rules, or new upstream data.
+A history diff may say a previously observed finding was not observed in a later comparable complete run. It must not label a product "removed" after an HTTP timeout, CT index outage, rule removal, or incomplete DNS collection. Record whether a change came from new observations, new rules, or new upstream data.
 
 ## 13. Immutable bundles and update lifecycle
 
@@ -731,7 +795,9 @@ A history diff may say a previously observed finding was not observed in a later
 
 The full reference bundle contains normalized provider and service associations, ASN intervals, CDN metadata, product taxonomy, rule definitions, source manifests, validation reports, and artifact hashes. Every bundle declares its source/capability inventory, compatible detector builds, and schema versions. BART tables are reconstructed from canonical records rather than serialized through private library memory layouts.
 
-The immutable execution view also records which sources and detectors are usable, disabled, missing, incompatible, or beyond their configured hard age limits. Load available validated components without treating an absent component as an empty successful source. A valid policy/schema view may support collection with enrichment components unavailable. If no valid execution view can be constructed, the operation is unavailable. Do not partially activate a malformed update or mix records from failed and successful revisions of one source; retain the last-known-good view on update failure.
+The view records whether each source and detector is usable, disabled, missing, incompatible, or past its hard age limit. Load validated components without treating absent components as empty successful sources.
+
+A valid policy and schema can support collection while enrichment is unavailable. If no valid execution view can be built, the operation is unavailable. Never partially activate a malformed update or mix failed and successful revisions of one source. Keep the last-known-good view on failure.
 
 Canonical bundle identity includes content hashes, selected upstream revisions, adapter versions, provider selection, rule/taxonomy versions, and required detector identity. Fetch/build timestamps are receipts, not inputs that create a different identity for identical content.
 
@@ -748,7 +814,9 @@ Record the `wappalyzergo` engine and embedded fingerprint digest in the detector
 7. Activate a complete compatible `AttributionView` through an atomic pointer swap. Persist activation history separately.
 8. Leave old views alive while in-flight jobs reference them. Keep on-disk bundles protected by durable batch pins, including queued targets and pending retries. Reclaim only after all applicable protections are released.
 
-The separate updater atomically writes a durable `current.json` pointer naming the desired bundle. A service-side loader watches or polls that pointer, builds and verifies the replacement view off the request path, and only then swaps the in-memory view. Publication and successful activation are different states: expose both the desired ID and the actually loaded ID. Preserve a durable last-known-good reference compatible with the detector build for restart recovery. A failed reload keeps the currently loaded view. Do not require a target request to trigger loading.
+The updater atomically writes a durable `current.json` pointer to the desired bundle. The service watches or polls it, builds and verifies the replacement away from request handling, and then swaps its in-memory view. Loading must not depend on a target request.
+
+Expose the desired ID and the actually loaded ID separately. Preserve a durable last-known-good reference compatible with the detector build for restart recovery. A failed reload keeps the current view.
 
 Use a single-writer lock for the snapshot store. Revalidate approvals against the active baseline at activation. An invalid candidate cannot be forced into service. A review-required candidate needs an explicit operator approval bound to its content hash.
 
@@ -800,7 +868,9 @@ Bound decompressed content, not merely `Content-Length`. Enforce network and par
 
 `partial` means at least one requested capability could not complete, but useful observations or supported classification results remain. `failed` means an admitted target's collection produced no useful analysis. `cancelled` is explicit. Optional capabilities deliberately excluded by the request are `skipped`, not failures. A missing necessary execution capability is an explicit operation error, not a successful empty report.
 
-Useful results do not require a positive finding. A completed DNS negative answer, a collected HTTP error response, or a completed search of a usable source can establish useful scoped evidence. A failed DNS query alone or an unsearched source cannot establish absence. For `ip`, a completed search of remaining sources with zero associations and other requested sources unavailable is partial, not a successful complete no-match.
+Useful results need not contain a positive finding. A completed negative DNS answer, an HTTP error response, or a completed search of a usable source can be useful evidence within its scope. A failed query or unsearched source cannot establish absence.
+
+For `ip`, zero associations from surviving sources is partial when other requested sources are unavailable. It is not a complete no-match.
 
 The following table is normative for execution admission, readiness, and synchronous results. All modes need valid input, the applicable policy/schema configuration, and a compatible execution view. A compatible view may contain unavailable enrichment components. Full/dns CLI execution and local IP lookup do not require PostgreSQL. Service operations that promise report persistence or durable work also require writable storage.
 
@@ -817,9 +887,15 @@ The following table is normative for execution admission, readiness, and synchro
 | Persistence unavailable or commit fails | Reject durable admission or return an explicit storage error; do not claim a stored result or accepted job. | Standalone CLI and local-IP operations remain independent of storage. | Persistence-dependent operations `unavailable`. | `persistence_unavailable` / `persistence_failed` | 503 | 4 |
 | Admitted collection fails with no useful observations | Retain actual query/request failure coverage. This is distinct from a missing execution capability. | No useful result remains. | A target failure alone does not change service readiness. | `failed` | 200 with terminal report if persisted as required | 3 |
 
-For reclassification, `complete` means every requested replay path completed. It does not upgrade an originally partial collection to complete collection coverage. For durable jobs, successful admission returns 202; polling a persisted job returns 200 and exposes each target's report or explicit error code, including unavailable-capability and persistence failures. Those envelope statuses do not turn a failed target into a successful result. The result-creation route in section 11.3 enqueues reclassification and therefore follows this asynchronous contract.
+For reclassification, `complete` applies to requested replay paths. It does not upgrade the original collection coverage.
 
-Report readiness per enabled operation as `ready`, `degraded`, or `unavailable`, with capability-level reasons and source age. `/readyz` returns 200 when at least one enabled public operation can execute and 503 when none can. Its overall state is `ready` only when all enabled operations have full capability availability; otherwise it is `degraded` while any remain executable. Thus PostgreSQL failure can disable durable analysis and jobs while local-IP lookup remains available. Configured deployment checks may require a particular operation's readiness. `/livez` reports process liveness independently. Request-specific invalid inputs, unavailable pins, and missing replay captures do not by themselves mark unrelated operations unavailable.
+Durable job admission returns 202. Polling a persisted job returns 200 with each target's report or error code, including capability and persistence failures. These envelope statuses do not make failed targets successful. The reclassification route in section 11.3 creates a job and follows this asynchronous contract.
+
+Report each enabled operation as `ready`, `degraded`, or `unavailable`, with capability reasons and source age. `/readyz` returns 200 if any enabled public operation can run, otherwise 503.
+
+Overall readiness is `ready` only when every enabled operation has full capability availability. It is `degraded` when any operation remains executable but coverage is incomplete. PostgreSQL failure can therefore disable durable analysis and jobs while local IP lookup remains available. Deployment checks may require a specific operation to be ready.
+
+`/livez` reports process liveness independently. Invalid inputs, unavailable pins, and missing replay captures do not by themselves disable unrelated operations.
 
 ### 14.3 Metrics and logs
 
@@ -837,7 +913,11 @@ Use local authoritative DNS fixtures, a recursive-resolver fixture, controlled H
 
 Prefix matching must pass a brute-force oracle for IPv4, IPv6, nested ranges, duplicate prefixes, multiple providers, retired children, mapped addresses, boundary addresses, and no-match cases.
 
-DNS tests must cover chain preservation, loops, delegation, null MX, TXT chunk boundaries, negative caching, timeouts, UDP truncation/TCP fallback, and malformed records. HTTP tests must cover redirects, changed DNS answers, per-address validation, TLS validation, body limits, slow responses, and cancellation. A controlled mixed-answer fixture must prove that the approved public address is dialed with correct Host/SNI and prohibited addresses are never dialed. Use explicit synchronization to prove HTTP starts before a delayed AAAA query finishes. Test private AAAA and AAAA timeout variants, including redirect destinations, and assert blocked-address and incomplete-query coverage while useful HTTP evidence survives. Fixture dialing must remain controlled by the test-only policy. Null MX semantics follow RFC 7505. [S19]
+DNS tests cover chain preservation, loops, delegation, null MX, TXT chunk boundaries, negative caching, timeouts, UDP truncation and TCP fallback, and malformed records. Null MX follows RFC 7505. [S19]
+
+HTTP tests cover redirects, changed DNS answers, per-address validation, TLS validation, body limits, slow responses, and cancellation.
+
+A controlled mixed-answer fixture must prove exact public-address dialing with correct Host and SNI, with no prohibited dial attempts. Use explicit synchronization to prove HTTP starts before delayed AAAA finishes. Include private AAAA, AAAA timeout, and redirect variants. Assert blocked-address and incomplete-query coverage while HTTP evidence survives. Fixture dialing must use the test-only policy.
 
 Rules require positive, negative, and misleading lookalike fixtures. Integration tests must cover a combined CDN + authoritative-DNS + mail-routing + SaaS-script report. Assertions must verify the absence of unsupported conclusions, not merely the presence of expected labels.
 
@@ -855,7 +935,7 @@ CT tests must pair valid signed checkpoints with altered entry bytes and require
 
 ### 15.2 Accuracy and performance evaluation
 
-Maintain a labeled, consented or synthetic corpus with separate metrics for provider, product, and relationship detection. Report precision and recall on that corpus only, including unresolved/unsupported cases and per-signal error categories. Do not publish an overall “80–90% coverage” estimate without evidence.
+Maintain a labeled, consented or synthetic corpus with separate metrics for provider, product, and relationship detection. Report precision and recall on that corpus only, including unresolved/unsupported cases and per-signal error categories. Do not publish an overall "80–90% coverage" estimate without evidence.
 
 Section 8.5's per-product and per-relationship fixtures are the minimum deterministic acceptance criteria. Publish unsupported cases with signal-specific reasons. A provider-only result cannot pass a fixture whose supported signal establishes a product. Accuracy measurements describe evidence attribution, not lead quality or estimated commercial value.
 
@@ -875,7 +955,7 @@ Pin build dependencies, container images, and source revisions. Produce a depend
 
 ## 16. Complete-system acceptance gate
 
-The project is complete only when all required capabilities in section 1 work together and have the evidence in the implementation plan. In particular:
+Completion requires every capability in section 1 to work together and pass the implementation plan's acceptance requirements:
 
 1. A domain request collects DNS and HTTP once, runs local web fingerprints, enriches addresses with cloud/service/CDN/ASN data, and returns normalized product and infrastructure findings with provenance.
 2. A fixture using different vendors for DNS, CDN, mail, and web integrations produces those separate relationships without collapsing them into a single hosting vendor.
@@ -890,7 +970,7 @@ The project is complete only when all required capabilities in section 1 work to
 11. Pinned batches survive queue waits, activations, retries, and restart; admission/pruning races cannot lose an accepted bundle. Backlog admission is bounded and shared operator identity is enforced.
 12. CT verification distinguishes checkpoint signatures, continuity, and entry inclusion. The shipping collector has measured throughput, bandwidth, storage, and lag under documented budgets.
 
-A working BART index, dataset importer, or IP API alone does not satisfy this specification.
+Acceptance covers the full attribution system. Component tests alone do not satisfy this gate.
 
 ## 17. Sources and verification notes
 

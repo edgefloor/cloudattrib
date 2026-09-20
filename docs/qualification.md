@@ -1,6 +1,18 @@
 # Qualification report
 
-This report records the Wave 7 release-candidate evidence collected on 2026-09-20. It evaluates attribution evidence, not lead quality, commercial adoption, spend, or savings. Routine acceptance uses controlled, pinned fixtures; the full-source import is a compatibility and scale check, not a redistributable artifact.
+This report records release-candidate measurements from 2026-09-20 and the later acceptance repairs listed below. It evaluates attribution evidence, not lead quality, commercial adoption, spend, or savings.
+
+The controlled fixtures test defined behavior. The full-source import tests compatibility and scale. Neither establishes detection accuracy for arbitrary Internet domains, and the imported snapshot is not a redistributable artifact.
+
+- [Test environment](#release-environment)
+- [Controlled corpus](#controlled-corpus-results)
+- [Full-source compatibility and memory](#full-upstream-compatibility)
+- [Local latency](#local-latency)
+- [Operational tests](#operational-qualification)
+- [Repair evidence and untested combinations](#repair-acceptance-evidence)
+- [CT measurements](#ct-qualification)
+- [Requirement traceability](#requirement-traceability)
+- [Accepted limits](#accepted-limits-and-release-conditions)
 
 ## Release environment
 
@@ -12,9 +24,11 @@ This report records the Wave 7 release-candidate evidence collected on 2026-09-2
 
 ## Controlled corpus results
 
-The deterministic rule corpus has 21 supported positive product/relationship cases and seven negative or misleading cases. All pass. On this corpus only, product/relation precision and recall are both 100%: 21 expected positives were found, no expected positive was missed, and none of the seven forbidden product conclusions was emitted. This is not an estimate for arbitrary Internet domains.
+The deterministic corpus contained 21 supported positive product and relationship cases and seven negative or misleading cases. All passed. The run found all 21 expected positives and emitted none of the seven forbidden conclusions. Precision and recall were 100% on this corpus only.
 
-The multi-vendor fixture keeps Cloudflare authoritative DNS, AWS CloudFront web delivery, Google-hosted mail routing, and Segment web integration as four distinct relationships. The E1 controlled-network fixtures prove that useful DNS and HTTP evidence survives a missing prefix source and that HTTP can start on an approved public address while a delayed or prohibited AAAA result remains visible. The complete matrix and signal-specific limitations are in `rules/coverage-matrix.md`.
+The multi-vendor fixture kept four relationships separate: Cloudflare authoritative DNS, AWS CloudFront web delivery, Google-hosted mail routing, and Segment web integration.
+
+E1 tested that DNS and HTTP evidence survived a missing prefix source. It also tested HTTP starting through an approved public address while a delayed or prohibited AAAA result remained visible. The [rule matrix](../rules/coverage-matrix.md) lists supported signals and their limits.
 
 Known evidence limits include:
 
@@ -40,9 +54,20 @@ The selected source snapshot imported successfully from local files with no requ
 | IPtoASN IPv6 | SHA-256 `74b2a2847fc8bff14175d5d704dfe7027400ef6f7168519c5c095fbb80d8bac6` |
 | `cloud-ip-ranges` | commit `0c4c204e650a47a6f57d3709893a9dc96f942ed9`, 91 provider JSON files |
 
-The deterministic compiled bundle was `bundle-sha256-1a5900754842dc811a6d24fffcc74a989482c312d903717e67fd780dd60fc3f3`. It contained 685,784 prefix associations, all active in this snapshot; 685,784 service associations; 65,565 region associations; 115,670 role/method associations; 720,051 ASN intervals; and 103 CDN suffixes. The importer produced 80 warnings for current Azure entries whose `systemService` field was empty; those records were retained with the service-tag name rather than discarded or promoted to unsupported specificity.
+The compiled bundle ID was `bundle-sha256-1a5900754842dc811a6d24fffcc74a989482c312d903717e67fd780dd60fc3f3`.
 
-The final full import took 3.70 seconds wall time in the measured test process. Peak resident memory was 1,421,426,688 bytes. The release therefore does not claim a sub-gigabyte full-bundle build. Operators should budget at least 2 GiB for update/import work and validate their own source mix.
+| Record type | Count |
+| --- | ---: |
+| Prefix associations | 685,784, all active in this snapshot |
+| Service associations | 685,784 |
+| Region associations | 65,565 |
+| Role or method associations | 115,670 |
+| ASN intervals | 720,051 |
+| CDN suffixes | 103 |
+
+The importer reported 80 Azure records with empty `systemService` fields. It retained those records with their service-tag names and warnings, without inventing a more specific product.
+
+The full import took 3.70 seconds and reached 1,421,426,688 bytes of resident memory in the test process. Allow at least 2 GiB for an import of this source mix. Measure your own inputs before setting a memory limit.
 
 ## Local latency
 
@@ -55,11 +80,28 @@ The latency test constructs 4,096 disjoint prefixes and ASN intervals, uses one 
 | Rule evaluation, one observation | 5,000 | 14.542 µs | 19.458 µs | 25.792 µs |
 | Six-file fixture bundle load | 1,000 | 111.5 µs | 129.375 µs | 259.458 µs |
 
-Separate Go benchmarks measured a 4,096-record prefix hit at 194–208 ns/op, 608 B/op, two allocations; ASN at 50–51 ns/op, 112 B/op, one allocation; five-observation rule evaluation at 59–62 µs/op, about 39 KiB/op and 666 allocations; and fixture bundle load at 114–122 µs/op, about 58.5 KiB/op and 743 allocations. The combined network-lookup p95 is below the initial one-millisecond local target for this distribution. No claim is made about adversarial overlap distributions or live collection latency.
+Separate Go benchmarks recorded:
+
+| Operation | Time per operation | Bytes per operation | Allocations |
+| --- | --- | --- | ---: |
+| Prefix hit in 4,096 records | 194–208 ns | 608 B | 2 |
+| ASN lookup | 50–51 ns | 112 B | 1 |
+| Rule evaluation, five observations | 59–62 µs | About 39 KiB | 666 |
+| Fixture bundle load | 114–122 µs | About 58.5 KiB | 743 |
+
+For this distribution, the combined network-lookup p95 was below the initial one-millisecond target. These measurements do not cover adversarial overlap distributions or live collection latency.
 
 ## Operational qualification
 
-The clean Compose drill uses no enrichment credentials. It builds the static unprivileged application image, initializes PostgreSQL, starts the pinned recursive resolver, mounts source data read-only, and requires bearer authentication even on the loopback-published port. The drill checks authenticated liveness, operation-level readiness, bounded metrics, synchronous local IP lookup, CLI lookup inside the application container, candidate import, reviewed activation, rollback, and status. PostgreSQL integration runs against a fresh pinned PostgreSQL 18 container and covers migrations, atomic admission, work claims, terminal completion, durable pins, and operational metrics.
+The Compose drill built an unprivileged application image, initialized PostgreSQL, started the pinned resolver, and mounted sources read-only. It used no enrichment credentials. API requests required bearer authentication, including on the loopback-published port.
+
+The drill checked:
+
+- Authenticated liveness, operation readiness, and bounded metrics.
+- Local IP lookup through the API and the CLI inside the application container.
+- Candidate import, reviewed activation, rollback, and status.
+
+PostgreSQL integration used a fresh pinned PostgreSQL 18 container. It covered migrations, atomic admission, work claims, terminal completion, durable pins, and operational metrics.
 
 The dataset repository tests cover malformed and corrupt artifacts, stale sources, single-writer contention, approval-hash-bound activation, rollback, immutable candidates, durable publication, and pruning. Manager, job, and PostgreSQL tests cover coherent readers during activation, retained last-known-good views, retry/restart recovery, stale attempt rejection, terminal pin release, capacity reservations, and fail-closed reference checks. Health tests distinguish process liveness, durable-operation storage health, and actual local lookup-index availability.
 
@@ -67,7 +109,7 @@ Offline classification paths do not initialize an enrichment client. Local looku
 
 ## Repair acceptance evidence
 
-The acceptance repair at `2e52440` and its reload-cancellation follow-up cover these findings:
+Commit `2e52440` addressed the acceptance findings. Commit `8c17d98` added the reload-cancellation follow-up. The table maps each finding to maintained tests:
 
 | Finding | Maintained evidence |
 | --- | --- |
@@ -79,7 +121,7 @@ The acceptance repair at `2e52440` and its reload-cancellation follow-up cover t
 | 6. Bundle acquisition cancellation | `TestRunnerRenewsLeaseAndCancelsDuringBundleAcquisition` covers lease renewal before acquisition. `TestBundleAnalyzerFactoryLoadsDifferentBundlesConcurrently` covers per-bundle load isolation. `TestBundleAnalyzerFactoryReloadLoopCancelsBlockedLoad` covers cancellation through the production reload loop. |
 | 7. Shutdown ownership | `TestSupervisorJoinsWorkerTerminalCommitOnShutdown` proves that the supervisor waits for a bounded terminal commit. `TestBundleAnalyzerFactoryReloadLoopCancelsBlockedLoad` proves that the reloader stops on cancellation. The service waits for both goroutines before `Store.Close`. |
 
-The repair did not exercise these full production compositions:
+These combinations were not tested together through the full production path:
 
 - No single test restarts the complete service with a queued `builtin-rules-v1` PostgreSQL job and then runs that job through the production worker. The factory, runner, and durable pin behavior are tested separately.
 - No single test races the production `datasets activate` and `datasets prune` CLI commands across both the filesystem and PostgreSQL. Repository exclusion and PostgreSQL lifecycle serialization are tested separately.
@@ -88,9 +130,11 @@ The repair did not exercise these full production compositions:
 
 ## CT qualification
 
-The optional RFC 6962 collector passes synthetic tests for checkpoint signatures, initial and continued tree consistency, exact-entry inclusion, altered entry bytes, proof budgets, invalid certificates, checkpoint retention after failure, and durable ingestion resume. The shipping 256-entry synthetic benchmark completed in 3.07 ms/run, accounted for 21 requests, 84,640 response bytes, 44,800 retained-field bytes, one-hour fixture lag, and reduced the fixture backlog from 256 to zero. See `docs/ct-operations.md` for the budget and interpretation.
+Synthetic CT tests covered checkpoint signatures, initial and continued tree consistency, exact-entry inclusion, altered bytes, proof budgets, invalid certificates, checkpoint retention after failure, and durable resume.
 
-A live public-log probe was not run because no operator-approved log URL, public key, and starting checkpoint were supplied. This is an accepted operational limit: the collector and verification boundary ship and are tested, but the synthetic throughput is not presented as public-network capacity.
+The 256-entry benchmark completed in 3.07 ms per run. It accounted for 21 requests, 84,640 response bytes, 44,800 retained-field bytes, and one hour of fixture lag. The fixture backlog fell from 256 to zero. [CT operations](ct-operations.md#retention-and-operating-envelope) records the budgets and measurement limits.
+
+Live public-log performance remains unmeasured. No approved log URL, key, and starting checkpoint were supplied. Synthetic verification tests do not establish public-network capacity.
 
 ## Requirement traceability
 

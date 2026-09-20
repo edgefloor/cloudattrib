@@ -1,22 +1,48 @@
 # Operations guide
 
-`cloudattrib` runs as an unprivileged service with PostgreSQL for durable reports and jobs, Unbound as its explicit recursive resolver, an immutable bundle directory, and operator-supplied source files. It does not download enrichment data during startup or request processing.
+Use this guide to install and operate the service. For a standalone CLI run, start with the [README](../README.md#run-your-first-analysis).
+
+The service uses PostgreSQL for reports and jobs, Unbound for DNS, and local files for enrichment. It runs without root privileges. Startup and analysis never download enrichment data.
+
+- [Install with Compose](#compose-installation)
+- [Import and activate data](#import-and-activate-data)
+- [Schedule staging](#scheduled-staging)
+- [Back up and restore](#backup-and-restore)
+- [Recover from failures](#failure-and-recovery-behavior)
+- [Tune resource limits](#resource-tuning)
+- [Install without containers](#non-container-installation)
+- [Build and update offline](#offline-build-and-update)
 
 ## Security boundary
 
-The reference Compose deployment publishes the API only on `127.0.0.1:8080` and requires a bearer token from the private `api_credentials` secret. This is necessary because the application sees the Docker bridge address rather than the host loopback address. Before publishing the API on another interface, retain bearer authentication or put it behind a trusted authenticated reverse proxy and configure the corresponding mode in `config.yaml`.
+Compose publishes the API on `127.0.0.1:8080` and requires a bearer token from the private `api_credentials` secret. The application sees a Docker bridge address, so loopback publication alone does not satisfy its authentication boundary.
 
-The Compose networks separate database traffic, collection traffic, and updater traffic. The application can reach PostgreSQL on the internal `backend` network and targets through the `collector` network. PostgreSQL has no outbound network. The optional updater runs on `update`, reads an operator-populated source directory, and cannot reach the application database network. Apply host or platform firewall rules when the deployment requires destination or port restrictions beyond this topology.
+Before exposing another interface, retain bearer authentication or configure a trusted authenticated reverse proxy. Set the matching authentication mode in the application configuration.
 
-Metrics use fixed names and no target-valued labels. Logs contain operation and error classes; the application does not log target values by default. Treat PostgreSQL reports as sensitive retained captures even when response bodies have already been bounded and sanitized.
+The Compose networks separate three kinds of traffic:
+
+| Network | Access |
+| --- | --- |
+| `backend` | Application to PostgreSQL; the network is internal. |
+| `collector` | Application to the resolver and public targets. |
+| `update` | Optional updater; no access to the database network. |
+
+The updater reads operator-populated local files. Apply host or platform firewall rules for any additional destination or port restrictions.
+
+Metrics do not use domains or IPs as labels. Logs contain operation and error classes and omit target values by default. Treat stored reports as retained captures, even after sanitization.
 
 ## Compose installation
 
-Requirements are Docker Engine with Compose v2 and an `amd64` runtime or emulation for the pinned Unbound image. Image and module identities are in `sbom/cloudattrib.cdx.json`.
+Use Docker Engine with Compose v2. The pinned Unbound image needs an `amd64` runtime or emulation. See the [SBOM](../sbom/cloudattrib.cdx.json) for image and module identities.
 
-Create private database and API secrets and an empty source directory:
+### 1. Create secrets for a new installation
+
+Run these commands from the repository root on a fresh installation. They create new database and API credentials; do not run them over existing secrets.
+
+Create private secret files and an empty source directory:
 
 ```sh
+umask 077
 mkdir -p secrets data/sources
 chmod 700 secrets
 openssl rand -hex 24 > secrets/postgres-password
@@ -33,7 +59,9 @@ chmod 600 secrets/api-credentials
 
 Use a password whose URI representation does not require escaping, or percent-encode it in the DSN. The application rejects an empty, oversized, non-regular, group-readable, or world-readable DSN file.
 
-Validate and start the stack:
+### 2. Start the stack
+
+Validate the Compose configuration, build the image, and start the services:
 
 ```sh
 docker compose config --quiet
@@ -44,11 +72,23 @@ curl --fail -H "Authorization: Bearer $api_token" http://127.0.0.1:8080/livez
 curl --fail -H "Authorization: Bearer $api_token" http://127.0.0.1:8080/readyz
 ```
 
-All routes, including health and metrics, require the bearer token in the Compose configuration. `/livez` reports process liveness. `/readyz` reports each public operation. A PostgreSQL outage makes durable operations unavailable while local lookup can remain available. `/metrics` exposes request count, admission rejections, reserved and maximum target capacity, queued and running targets, durable bundle pins, active bundle identity, source age/availability, and CT checkpoint lag.
+### 3. Check health and coverage
+
+All routes require the bearer token, including health and metrics.
+
+| Route | Check |
+| --- | --- |
+| `/livez` | Is the process alive? |
+| `/readyz` | Which operations are ready, degraded, or unavailable? |
+| `/metrics` | Requests, admission rejections, queue capacity, targets, pins, bundle identity, source availability and age, and CT lag. |
+
+A PostgreSQL outage disables durable operations while local lookup may remain usable. A 200 readiness response means at least one operation can run; inspect the operation you need. Before loading datasets, expect enrichment coverage to be unavailable or partial.
 
 ## Import and activate data
 
-Populate `data/sources` with any supported files:
+### 1. Prepare source files
+
+Populate `data/sources` with supported files:
 
 - `aws-ip-ranges.json`
 - `gcp-cloud.json`
@@ -57,18 +97,23 @@ Populate `data/sources` with any supported files:
 - `iptoasn-v4.tsv` and `iptoasn-v6.tsv`
 - primary provider JSON files below `cloudranges/json/`
 
-For local ASN lookup, `iptoasn-v4.tsv` and `iptoasn-v6.tsv` each contain five tab-separated fields
-per line: inclusive start address, inclusive end address, unsigned decimal ASN, country code, and
-description. IPv4 uses unsigned integer endpoints. IPv6 uses literal IPv6 endpoints. Intervals
-must be ordered and must not overlap.
+ASN files must be decompressed TSV with ordered, non-overlapping intervals. IPv4 endpoints are unsigned integers; IPv6 endpoints are textual addresses. See [source contracts](source-contracts.md) for all fields and source identities.
 
-Keep the directory read-only to the service. Review each source's terms and retain its acquisition record outside the application. Stage a candidate with the isolated updater profile:
+Keep the directory read-only to the service. Review each source's terms and retain its acquisition record outside the application.
+
+### 2. Stage a candidate
+
+Run the isolated updater profile:
 
 ```sh
 docker compose --profile update run --rm updater
 ```
 
-The JSON result contains `candidate_id`, `candidate_hash`, record counts, source coverage, warnings, and fetch receipts. Review it before activation. Activation requires the exact validation hash:
+The JSON result contains `candidate_id`, `candidate_hash`, counts, coverage, warnings, and fetch receipts. Review the result before activation.
+
+### 3. Activate and check loading
+
+Replace the placeholders below with the candidate ID and exact validation hash. Activation requires PostgreSQL for durable bundle coordination:
 
 ```sh
 docker compose exec app /usr/local/bin/cloudattrib datasets activate \
@@ -79,9 +124,13 @@ docker compose exec app /usr/local/bin/cloudattrib datasets status \
   --config /etc/cloudattrib/config.yaml
 ```
 
-Each process loads the desired bundle off-path and then swaps its active analyzer. A failed load records a process-load failure and retains the last-known-good analyzer. Accepted pinned jobs retain their historical analyzer and durable prune protection, including the built-in bundle after a process restart. Activation and pruning use the same filesystem-to-database lock order, so a candidate cannot be pruned between validation and durable publication.
+Check both the desired bundle and each process's load status. A process builds the replacement away from request handling, then swaps its analyzer. A failed load leaves the last-known-good analyzer active and records the failure.
 
-Rollback uses the same review-bound hash:
+Pinned jobs retain their selected bundle across restarts, including the built-in bundle. Activation and pruning acquire filesystem and database locks in the same order. This prevents pruning between validation and durable publication.
+
+### 4. Roll back or prune
+
+To roll back, supply the previous bundle and its reviewed hash:
 
 ```sh
 docker compose exec app /usr/local/bin/cloudattrib datasets rollback \
@@ -90,7 +139,7 @@ docker compose exec app /usr/local/bin/cloudattrib datasets rollback \
   --approval-hash sha256:PREVIOUS
 ```
 
-Pruning fails closed when PostgreSQL cannot confirm durable references. It does not remove the active bundle, recent rollback generations, or a bundle pinned by nonterminal work:
+Pruning stops if PostgreSQL cannot confirm durable references. It preserves the active bundle, recent rollback generations, and pins held by nonterminal work. To request pruning of an eligible old bundle:
 
 ```sh
 docker compose exec app /usr/local/bin/cloudattrib datasets prune \
@@ -100,11 +149,17 @@ docker compose exec app /usr/local/bin/cloudattrib datasets prune \
 
 ## Scheduled staging
 
-`deploy/cloudattrib-updater.timer` runs the local-source validation and staging command weekly with up to six hours of jitter. It does not activate a candidate. Fetch source files in a separate operator-controlled job whose egress allowlist is limited to the approved upstream hosts, then publish the files into the read-only source directory. Activation remains a separate reviewed action.
+The checked-in [updater timer](../deploy/cloudattrib-updater.timer) validates and stages local files weekly, with up to six hours of jitter. It does not download sources or activate candidates.
+
+Fetch files in a separate operator-controlled job. Allow that job to contact only approved upstream hosts, then publish the files into the service's read-only source directory. Review and activate each candidate separately.
+
+The specification calls for daily source checks. The supplied weekly staging timer does not implement that acquisition schedule; configure the fetch job to meet your source freshness policy.
 
 ## Backup and restore
 
-Back up PostgreSQL and immutable bundles together closely enough for the required recovery point:
+### Back up
+
+Back up PostgreSQL and immutable bundles close enough in time to meet your recovery-point requirement:
 
 ```sh
 umask 077
@@ -116,9 +171,16 @@ docker run --rm \
   tar -C /data -czf /backup/cloudattrib-bundles.tgz .
 ```
 
-For restore, stop the application and updater, restore the bundle archive into the bundle volume, restore the database with `pg_restore`, and then start the application. Check `/readyz`, `datasets status`, and `cloudattrib_bundle_info` before admitting work. Do not restore an active pointer without its matching immutable candidate directory.
+### Restore
 
-Reports and raw retained observations have no automatic age-based deletion. Define database backup and deletion retention according to the operator's policy. Bundle pruning does not remove provenance embedded in retained reports.
+1. Stop the application and updater.
+2. Restore the bundle archive into the bundle volume.
+3. Restore PostgreSQL with `pg_restore`.
+4. Confirm that the active pointer has its matching immutable candidate directory.
+5. Start the application.
+6. Check `/readyz`, `datasets status`, and `cloudattrib_bundle_info` before admitting work.
+
+Reports and retained observations currently have no automatic age-based deletion. Define a backup and deletion policy for PostgreSQL. Bundle pruning preserves provenance embedded in reports. The specification's default retention requirement is not an automatic cleanup schedule in this implementation.
 
 ## Failure and recovery behavior
 
@@ -126,14 +188,16 @@ Reports and raw retained observations have no automatic age-based deletion. Defi
 - A corrupt or incompatible candidate fails validation or process loading. The last-known-good analyzer remains active.
 - Writer contention rejects the second updater instead of allowing concurrent publication.
 - PostgreSQL admission and report commits fail explicitly. The service does not return an unstored success.
-- `SIGTERM` stops admission, cancels workers, allows up to 10 seconds for HTTP shutdown, and waits for owned worker and reloader goroutines while PostgreSQL remains open. Worker terminal commits have a five-second shutdown bound; unfinished leases remain recoverable on restart.
+- On `SIGTERM`, the service stops admission and cancels workers. HTTP shutdown has a 10-second allowance. The service keeps PostgreSQL open until owned workers and the reloader stop. Terminal worker commits have a five-second bound; unfinished leases remain recoverable on restart.
 - Expired work leases are recovered at startup. Reservations and bundle pins remain durable through restart and retry.
 
 If a process stops after desired-bundle publication but before reload, it loads that desired candidate on restart. If loading fails, inspect `datasets status`, correct or roll back the desired pointer, and restart or wait for the reload loop.
 
 ## Resource tuning
 
-Start with the checked-in limits. `concurrent_targets` bounds workers; DNS and HTTP budgets remain per target; `maximum_backlog_targets` bounds all nonterminal reservations, including retries. PostgreSQL disk is normally the first long-term capacity constraint because reports are retained. Monitor queue reservation ratio, CT lag when enabled, database size, and bundle-volume free space before increasing concurrency.
+Start with the limits in [config/example.yaml](../config/example.yaml). `concurrent_targets` bounds workers. Per-target budgets bound DNS and HTTP work. `maximum_backlog_targets` bounds all nonterminal reservations, including retries.
+
+Monitor queue use, CT lag, database size, and free space in the bundle volume before increasing concurrency. Reports accumulate until deleted. The [measured full-source import](qualification.md#full-upstream-compatibility) used about 1.42 GB of memory; allow at least 2 GiB for that source mix and measure yours.
 
 ## Non-container installation
 
@@ -146,7 +210,16 @@ Install the Go 1.25-built binary at `/usr/local/bin/cloudattrib`, copy `config/e
 - a mode-`0600` PostgreSQL DSN file readable by the service;
 - a local PostgreSQL database and an Unbound listener matching the configuration.
 
-Install `deploy/cloudattrib.service`, `deploy/cloudattrib-updater.service`, and `deploy/cloudattrib-updater.timer` under `/etc/systemd/system`, then run:
+Set absolute paths in `/etc/cloudattrib/config.yaml`. The checked-in example uses paths relative to the working directory, which are unsuitable for these service units.
+
+| Setting | Service value |
+| --- | --- |
+| `data.bundle_directory` | `/var/lib/cloudattrib/bundles` |
+| `data.source_directory` | `/var/lib/cloudattrib/sources` |
+| `storage.postgres_dsn_file` | Absolute path to the private DSN file |
+| `resolver.address` | Address and port of your Unbound listener |
+
+Install `deploy/cloudattrib.service`, `deploy/cloudattrib-updater.service`, and `deploy/cloudattrib-updater.timer` under `/etc/systemd/system`. Then run:
 
 ```sh
 systemctl daemon-reload
@@ -176,4 +249,11 @@ docker load -i cloudattrib-base-images.tar
 docker build --network=none -f deploy/Dockerfile.offline -t cloudattrib:local .
 ```
 
-For an offline data update, transfer source files with their recorded hashes, import them with `datasets import` or the updater profile, review the generated candidate hash and coverage diff, then activate that exact hash. No online source fetch is required by the application.
+For an offline update:
+
+1. Transfer source files and their recorded hashes.
+2. Import them with `datasets import` or the updater profile.
+3. Review the candidate hash and coverage diff.
+4. Activate that exact candidate with its approval hash.
+
+The application does not need an online fetch for this procedure.

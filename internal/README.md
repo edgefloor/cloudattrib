@@ -1,5 +1,25 @@
-# Internal packages
+# Internal package map
 
-Keep implementation packages under `internal/` until an external Go consumer needs a stable public API. Shared domain types should stay independent of DNS, HTTP, database, and dataset-library types.
+Reusable application code lives under `internal/`. The executable in `cmd/cloudattrib` loads configuration and connects these packages.
 
-The package boundaries planned for this repository are documented in [IMPLEMENTATION-PLAN.md](../IMPLEMENTATION-PLAN.md). Add a package when its contract is ready instead of introducing broad utility packages.
+| Package | Responsibility |
+| --- | --- |
+| `app` | Domain analysis, local IP lookup, and reclassification. |
+| `model` | Targets, observations, dataset references, evidence, findings, reports, and error contracts. |
+| `target`, `policy` | Normalize input, bound scope, validate destinations, and track collection budgets. |
+| `collect/dns`, `collect/http` | Collect DNS records and bounded HTTP responses with TLS metadata. |
+| `detect/dnsrules`, `detect/webtech`, `rules` | Interpret DNS and HTTP signals with local rules and fingerprints. |
+| `enrich/prefix`, `enrich/asn` | Query immutable prefix and ASN indexes. |
+| `ingest` | Parse provider, service-range, CDN, and IPtoASN source formats. |
+| `datasets` | Validate source data and manage immutable bundles, activation, and pruning. |
+| `aggregate` | Group evidence into findings without merging incompatible relationships. |
+| `jobs`, `store/postgres` | Admit durable work, manage attempts and pins, and store reports. |
+| `ctlog` | Import CT records, collect bounded log increments, and query the local index. |
+| `api`, `cli` | Expose application operations through HTTP and command-line interfaces. |
+| `runtime`, `config` | Construct local and service runtimes from operator configuration. |
+| `observability` | Expose operational metrics. |
+| `dependency`, `qualification` | Test dependency boundaries and measured behavior. |
+
+Keep library-specific types inside their adapters. Shared models must not expose BART tables, DNS-library records, fingerprint-engine types, or PostgreSQL types. Add a public package only when an external Go consumer needs one.
+
+The [architecture contracts](../docs/architecture.md) explain ownership and lifecycle rules. The [implementation plan](../IMPLEMENTATION-PLAN.md) records required deliverables and acceptance cases.
