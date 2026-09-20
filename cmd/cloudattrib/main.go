@@ -1,7 +1,12 @@
 package main
 
-import "fmt"
+import (
+	"context"
+	"os"
+
+	"cloudattrib/internal/cli"
+)
 
 func main() {
-	fmt.Println("cloudattrib: implementation pending")
+	os.Exit(cli.Run(context.Background(), os.Args[1:], cli.Dependencies{}))
 }
