@@ -16,24 +16,9 @@ type Analyzer interface {
 	Reclassify(context.Context, model.ReclassifyRequest) (model.Report, error)
 }
 
-// DNSQuestion identifies one raw DNS question.
-type DNSQuestion struct {
-	Name string
-	Type uint16
-}
-
-// DNSResult contains library-independent raw records and query metadata.
-type DNSResult struct {
-	Question     DNSQuestion
-	ResponseCode int
-	Transport    string
-	Resolver     string
-	Records      []model.Observation
-}
-
 // DNSClient performs raw queries through an explicitly configured resolver.
 type DNSClient interface {
-	Query(context.Context, DNSQuestion) (DNSResult, error)
+	Query(context.Context, model.DNSQuestion) (model.DNSResult, error)
 }
 
 // Dialer connects only to an already approved concrete address.

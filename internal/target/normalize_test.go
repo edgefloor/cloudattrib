@@ -19,21 +19,21 @@ func TestNormalize(t *testing.T) {
 	}{
 		{
 			name:      "IDNA domain and terminal dot",
-			req:       model.AnalyzeRequest{Target: "BÜCHER.Example.", Kind: model.TargetDomain},
+			req:       model.AnalyzeRequest{Target: "BÜCHER.Example.", Kind: model.TargetDomain, IncludeWWW: boolPointer(false)},
 			wantKind:  model.TargetDomain,
 			wantValue: "xn--bcher-kva.example",
 			wantSeeds: []string{"xn--bcher-kva.example"},
 		},
 		{
 			name:      "root domain adds www",
-			req:       model.AnalyzeRequest{Target: "Example.COM", Kind: model.TargetDomain, IncludeWWW: true},
+			req:       model.AnalyzeRequest{Target: "Example.COM", Kind: model.TargetDomain},
 			wantKind:  model.TargetDomain,
 			wantValue: "example.com",
 			wantSeeds: []string{"example.com", "www.example.com"},
 		},
 		{
 			name:      "hostname does not expand",
-			req:       model.AnalyzeRequest{Target: "App.Example.COM", Kind: model.TargetDomain, IncludeWWW: true},
+			req:       model.AnalyzeRequest{Target: "App.Example.COM", Kind: model.TargetDomain},
 			wantKind:  model.TargetDomain,
 			wantValue: "app.example.com",
 			wantSeeds: []string{"app.example.com"},
@@ -114,4 +114,8 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+func boolPointer(value bool) *bool {
+	return &value
 }

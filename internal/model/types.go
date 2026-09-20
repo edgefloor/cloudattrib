@@ -2,7 +2,10 @@
 // classifiers, storage, and interfaces.
 package model
 
-import "time"
+import (
+	"net/netip"
+	"time"
+)
 
 // SchemaVersion is the current report and interface schema version.
 const SchemaVersion = "1"
@@ -113,7 +116,7 @@ type AnalyzeRequest struct {
 	Target              string     `json:"target"`
 	Kind                TargetKind `json:"kind"`
 	Mode                Mode       `json:"mode,omitempty"`
-	IncludeWWW          bool       `json:"include_www,omitempty"`
+	IncludeWWW          *bool      `json:"include_www,omitempty"`
 	AdditionalHostnames []string   `json:"additional_hostnames,omitempty"`
 	ScopeRoots          []string   `json:"scope_roots,omitempty"`
 	CTDiscovery         bool       `json:"ct_discovery,omitempty"`
@@ -134,6 +137,52 @@ type NormalizedRequest struct {
 
 // JSONValue owns an encoded JSON value.
 type JSONValue []byte
+
+// DNSQuestion identifies one raw DNS question without exposing library types.
+type DNSQuestion struct {
+	Name string `json:"name"`
+	Type uint16 `json:"type"`
+}
+
+// DNSResult contains raw record observations and addresses from one question.
+type DNSResult struct {
+	Question     DNSQuestion   `json:"question"`
+	ResponseCode int           `json:"response_code"`
+	Transport    string        `json:"transport"`
+	Resolver     string        `json:"resolver"`
+	Records      []Observation `json:"records"`
+	Addresses    []netip.Addr  `json:"addresses"`
+}
+
+// DNSPayload is the application-owned DNS record and outcome payload.
+type DNSPayload struct {
+	RRType       string     `json:"rrtype"`
+	Owner        string     `json:"owner"`
+	Value        string     `json:"value,omitempty"`
+	Address      netip.Addr `json:"address,omitempty"`
+	TTL          uint32     `json:"ttl,omitempty"`
+	ResponseCode int        `json:"response_code,omitempty"`
+	Resolver     string     `json:"resolver,omitempty"`
+	Transport    string     `json:"transport,omitempty"`
+	PolicyReason string     `json:"policy_reason,omitempty"`
+}
+
+// HTTPPayload contains sanitized response metadata used by the early pipeline.
+type HTTPPayload struct {
+	URL           string       `json:"url"`
+	StatusCode    int          `json:"status_code"`
+	PeerAddress   netip.Addr   `json:"peer_address"`
+	Headers       []HTTPHeader `json:"headers"`
+	BodyHash      string       `json:"body_hash"`
+	BodyLength    int64        `json:"body_length"`
+	BodyTruncated bool         `json:"body_truncated"`
+}
+
+// HTTPHeader is one retained response header and its sanitized values.
+type HTTPHeader struct {
+	Name   string   `json:"name"`
+	Values []string `json:"values"`
+}
 
 // Observation is an immutable fact collected from a target.
 type Observation struct {

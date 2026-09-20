@@ -60,7 +60,8 @@ func Normalize(req model.AnalyzeRequest) (model.NormalizedRequest, error) {
 		if err != nil {
 			return model.NormalizedRequest{}, invalidTarget("domain must be below a public suffix")
 		}
-		if req.IncludeWWW && name == registrable {
+		includeWWW := req.IncludeWWW == nil || *req.IncludeWWW
+		if includeWWW && name == registrable {
 			result.SeedHostnames = append(result.SeedHostnames, "www."+name)
 		}
 	case model.TargetURL:
