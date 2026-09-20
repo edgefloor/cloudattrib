@@ -1,6 +1,7 @@
 package jobs
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -53,6 +54,19 @@ func (s *MemoryStore) Submit(ctx context.Context, request SubmitRequest) (Job, e
 		return Job{}, fmt.Errorf("hash job request: %w", err)
 	}
 	identity := idempotencyIdentity{operator: request.OperatorID, key: request.IdempotencyKey}
+	validationErrors := make([]error, len(request.Targets))
+	reservations := len(request.Reclassifications)
+	for index, targetRequest := range request.Targets {
+		validationErrors[index] = ValidateAnalyzeRequest(targetRequest)
+		if validationErrors[index] == nil {
+			reservations++
+		}
+	}
+	for _, replay := range request.Reclassifications {
+		if replay.ReportID == "" || replay.BundleID == "" || replay.BundleID != request.BundleID {
+			return Job{}, model.NewError(model.CodeInvalidOptions, "reclassification requires a report and the pinned batch bundle", nil)
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if existingID, ok := s.idempotency[identity]; ok {
@@ -62,7 +76,7 @@ func (s *MemoryStore) Submit(ctx context.Context, request SubmitRequest) (Job, e
 		}
 		return cloneJob(*existing), nil
 	}
-	if s.maximumTargets <= 0 || request.WorkCount() > s.maximumTargets-s.reservations {
+	if s.maximumTargets <= 0 || reservations > s.maximumTargets-s.reservations {
 		return Job{}, model.NewError(model.CodeQueueCapacityExceeded, "nonterminal target capacity is exhausted", nil)
 	}
 	now := s.now()
@@ -70,14 +84,22 @@ func (s *MemoryStore) Submit(ctx context.Context, request SubmitRequest) (Job, e
 	if err != nil {
 		return Job{}, fmt.Errorf("create job ID: %w", err)
 	}
-	job := &Job{ID: jobID, OperatorID: request.OperatorID, IdempotencyKey: request.IdempotencyKey, BundleID: request.BundleID, Status: JobQueued, CreatedAt: now, UpdatedAt: now, payloadHash: payloadHash}
+	status := JobQueued
+	if reservations == 0 {
+		status = JobFailed
+	}
+	job := &Job{ID: jobID, OperatorID: request.OperatorID, IdempotencyKey: request.IdempotencyKey, BundleID: request.BundleID, Status: status, CreatedAt: now, UpdatedAt: now, payloadHash: payloadHash}
 	job.Targets = make([]Target, request.WorkCount())
 	for index, targetRequest := range request.Targets {
 		targetID, idErr := randomID("target")
 		if idErr != nil {
 			return Job{}, fmt.Errorf("create target ID: %w", idErr)
 		}
-		job.Targets[index] = Target{ID: targetID, Index: index, Request: targetRequest, Status: TargetQueued}
+		targetStatus, reason := TargetQueued, ""
+		if validationErrors[index] != nil {
+			targetStatus, reason = TargetFailed, ValidationReason(validationErrors[index])
+		}
+		job.Targets[index] = Target{ID: targetID, Index: index, Request: targetRequest, Status: targetStatus, TerminalReason: reason}
 	}
 	for requestIndex, reclassifyRequest := range request.Reclassifications {
 		index := len(request.Targets) + requestIndex
@@ -91,8 +113,8 @@ func (s *MemoryStore) Submit(ctx context.Context, request SubmitRequest) (Job, e
 	s.jobs[job.ID] = job
 	s.order = append(s.order, job.ID)
 	s.idempotency[identity] = job.ID
-	s.reservations += request.WorkCount()
-	if job.BundleID != "" {
+	s.reservations += reservations
+	if job.BundleID != "" && reservations > 0 {
 		s.pins[job.BundleID]++
 	}
 	return cloneJob(*job), nil
@@ -176,15 +198,25 @@ func (s *MemoryStore) Complete(ctx context.Context, targetID, token string, repo
 	if !terminalTarget(status) {
 		return model.NewError(model.CodeInvalidOptions, "completion status is not terminal", nil)
 	}
+	if report.ID != "" {
+		if err := report.ValidateReferences(); err != nil {
+			return model.NewError(model.CodeInvalidOptions, "report references are invalid", err)
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	job, target := s.findTarget(targetID)
-	if target == nil || target.Status != TargetRunning || target.AttemptToken != token {
+	if target == nil || target.AttemptToken != token {
 		return model.NewError(model.CodeIdempotencyConflict, "attempt token is stale", nil)
+	}
+	if target.Status != TargetRunning {
+		if target.Status == status && target.TerminalReason == reason && reportsEqual(target, report) {
+			return nil
+		}
+		return model.NewError(model.CodeIdempotencyConflict, "attempt completion conflicts with the committed result", nil)
 	}
 	target.Status = status
 	target.TerminalReason = reason
-	target.AttemptToken = ""
 	target.LeaseOwner = ""
 	target.LeaseExpiresAt = time.Time{}
 	if report.ID != "" {
@@ -196,10 +228,25 @@ func (s *MemoryStore) Complete(ctx context.Context, targetID, token string, repo
 	return nil
 }
 
+func reportsEqual(target *Target, report model.Report) bool {
+	if !target.ReportAvailable || target.Report.ID == "" {
+		return report.ID == ""
+	}
+	if report.ID == "" {
+		return false
+	}
+	left, leftErr := target.Report.CanonicalJSON()
+	right, rightErr := report.CanonicalJSON()
+	return leftErr == nil && rightErr == nil && bytes.Equal(left, right)
+}
+
 // RequestCancel prevents new claims and terminalizes queued targets.
 func (s *MemoryStore) RequestCancel(ctx context.Context, jobID, operatorID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
+	}
+	if operatorID == "" {
+		return model.NewError(model.CodeInvalidOptions, "cancelling operator is required", nil)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

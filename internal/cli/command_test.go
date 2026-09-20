@@ -44,6 +44,15 @@ func TestRunLookupIPRejectsInvalidAddress(t *testing.T) {
 		t.Fatalf("stdout=%q stderr=%q", out.String(), errOut.String())
 	}
 }
+
+func TestRunServeUsesLifecycleDependency(t *testing.T) {
+	var out, errOut bytes.Buffer
+	called := false
+	exit := Run(t.Context(), []string{"serve"}, Dependencies{Serve: func(context.Context) error { called = true; return nil }, Stdout: &out, Stderr: &errOut})
+	if exit != 0 || !called || out.Len() != 0 || errOut.Len() != 0 {
+		t.Fatalf("exit=%d called=%v stdout=%q stderr=%q", exit, called, out.String(), errOut.String())
+	}
+}
 func TestRunAnalyzeJSONLAddsInputIndex(t *testing.T) {
 	var out, errOut bytes.Buffer
 	input := bytes.NewBufferString("{\"target\":\"one.test\",\"kind\":\"domain\"}\n{\"target\":\"two.test\",\"kind\":\"domain\"}\n")

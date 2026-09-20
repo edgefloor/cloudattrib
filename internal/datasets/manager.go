@@ -61,6 +61,8 @@ type Manager struct {
 // ReferenceStore coordinates durable job pins with bundle pruning.
 type ReferenceStore interface {
 	WithBundlePruneLock(context.Context, string, func(bool) error) error
+	RecordBundleActivation(context.Context, string) error
+	ProtectedBundles(context.Context, int) ([]string, error)
 }
 
 // Option configures bundle lifecycle integration.
@@ -72,30 +74,42 @@ func WithReferenceStore(store ReferenceStore) Option {
 }
 
 // NewManager validates and publishes the initial last-known-good candidate.
-func NewManager(initial Candidate, buildID string, options ...Option) (*Manager, error) {
+func NewManager(ctx context.Context, initial Candidate, buildID string, options ...Option) (*Manager, error) {
 	manager := &Manager{buildID: buildID, readers: make(map[string]int)}
 	for _, option := range options {
 		option(manager)
 	}
-	if err := manager.Activate(initial); err != nil {
+	if manager.references != nil {
+		protected, err := manager.references.ProtectedBundles(ctx, 3)
+		if err != nil {
+			return nil, fmt.Errorf("load protected bundles: %w", err)
+		}
+		manager.lastKnownGood = slices.Clone(protected)
+	}
+	if err := manager.Activate(ctx, initial); err != nil {
 		return nil, err
 	}
 	return manager, nil
 }
 
 // Activate validates a complete candidate before one atomic pointer swap.
-func (m *Manager) Activate(candidate Candidate) error {
+func (m *Manager) Activate(ctx context.Context, candidate Candidate) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := validateCandidate(candidate, m.buildID); err != nil {
 		return err
 	}
+	if m.references != nil {
+		if err := m.references.RecordBundleActivation(ctx, candidate.Manifest.BundleID); err != nil {
+			return fmt.Errorf("record bundle activation: %w", err)
+		}
+	}
 	snapshot := &Snapshot{Manifest: cloneManifest(candidate.Manifest), View: candidate.View}
 	m.active.Store(snapshot)
 	m.lastKnownGood = append([]string{candidate.Manifest.BundleID}, m.lastKnownGood...)
 	m.lastKnownGood = slices.Compact(m.lastKnownGood)
-	if len(m.lastKnownGood) > 2 {
-		m.lastKnownGood = m.lastKnownGood[:2]
+	if len(m.lastKnownGood) > 3 {
+		m.lastKnownGood = m.lastKnownGood[:3]
 	}
 	return nil
 }

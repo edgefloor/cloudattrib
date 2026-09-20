@@ -21,9 +21,13 @@ type Config struct {
 
 // API configures the local HTTP listener and trusted-operator identity mode.
 type API struct {
-	ListenAddress              string `json:"listen_address" yaml:"listen_address"`
-	AuthenticationEnabled      bool   `json:"authentication_enabled" yaml:"authentication_enabled"`
-	TrustedProxyIdentityHeader string `json:"trusted_proxy_identity_header,omitempty" yaml:"trusted_proxy_identity_header,omitempty"`
+	ListenAddress              string            `json:"listen_address" yaml:"listen_address"`
+	AuthenticationEnabled      bool              `json:"authentication_enabled" yaml:"authentication_enabled"`
+	AuthenticationMode         string            `json:"authentication_mode,omitempty" yaml:"authentication_mode,omitempty"`
+	Credentials                map[string]string `json:"credentials,omitempty" yaml:"credentials,omitempty"`
+	TrustedProxyCIDRs          []string          `json:"trusted_proxy_cidrs,omitempty" yaml:"trusted_proxy_cidrs,omitempty"`
+	TrustedProxyIdentityHeader string            `json:"trusted_proxy_identity_header,omitempty" yaml:"trusted_proxy_identity_header,omitempty"`
+	LocalOperatorID            string            `json:"local_operator_id,omitempty" yaml:"local_operator_id,omitempty"`
 }
 
 // Resolver identifies the only DNS resolver used by collectors.

@@ -265,16 +265,18 @@ func (s *server) analyze(writer http.ResponseWriter, request *http.Request) {
 		writeApplicationError(writer, model.NewError(model.CodeCapabilityUnavailable, "analysis is unavailable", nil))
 		return
 	}
+	if s.results == nil {
+		writeApplicationError(writer, model.NewError(model.CodePersistenceUnavailable, "synchronous analysis persistence is unavailable", nil))
+		return
+	}
 	report, err := s.analyzer.Analyze(request.Context(), input)
 	if err != nil {
 		writeApplicationError(writer, err)
 		return
 	}
-	if s.results != nil {
-		if err := s.results.SaveReport(request.Context(), report); err != nil {
-			writeApplicationError(writer, err)
-			return
-		}
+	if err := s.results.SaveReport(request.Context(), report); err != nil {
+		writeApplicationError(writer, err)
+		return
 	}
 	writeJSON(writer, http.StatusOK, report)
 }
@@ -341,8 +343,8 @@ func (s *server) getJob(writer http.ResponseWriter, request *http.Request, id st
 }
 
 func (s *server) cancelJob(writer http.ResponseWriter, request *http.Request, id string) {
-	if request.ContentLength > 0 {
-		writeApplicationError(writer, model.NewError(model.CodeInvalidSyntax, "cancel request must not contain a body", nil))
+	if err := requireEmptyBody(writer, request, s.maxBytes); err != nil {
+		writeRequestError(writer, err)
 		return
 	}
 	if s.jobs == nil {
@@ -359,6 +361,22 @@ func (s *server) cancelJob(writer http.ResponseWriter, request *http.Request, id
 		return
 	}
 	writeJSON(writer, http.StatusAccepted, newJobResponse(job))
+}
+
+func requireEmptyBody(writer http.ResponseWriter, request *http.Request, limit int64) error {
+	if request.ContentLength > limit {
+		return requestBodyError{tooLarge: true}
+	}
+	reader := http.MaxBytesReader(writer, request.Body, limit)
+	read, err := io.Copy(io.Discard, reader)
+	var maxBytesError *http.MaxBytesError
+	if errors.As(err, &maxBytesError) {
+		return requestBodyError{tooLarge: true}
+	}
+	if err != nil || read != 0 {
+		return requestBodyError{}
+	}
+	return nil
 }
 
 type jobResponse struct {
@@ -513,9 +531,28 @@ func (s *server) reclassify(writer http.ResponseWriter, request *http.Request, i
 		writeRequestError(writer, err)
 		return
 	}
-	if s.jobs == nil {
+	if s.jobs == nil || s.results == nil {
 		writeApplicationError(writer, model.NewError(model.CodeCapabilityUnavailable, "reclassification is unavailable", nil))
 		return
+	}
+	if input.BundleID == "" {
+		writeApplicationError(writer, model.NewError(model.CodeInvalidOptions, "reclassification requires a bundle ID", nil))
+		return
+	}
+	original, err := s.results.LoadReport(request.Context(), id)
+	if err != nil {
+		writeApplicationError(writer, err)
+		return
+	}
+	if len(original.Observations) == 0 && len(original.Evidence) == 0 {
+		writeApplicationError(writer, model.NewError(model.CodeCapabilityUnavailable, "report has no retained replay inputs", nil))
+		return
+	}
+	if validator, ok := s.analyzer.(app.ReclassificationValidator); ok {
+		if err := validator.ValidateReclassify(request.Context(), model.ReclassifyRequest{ReportID: id, BundleID: input.BundleID}); err != nil {
+			writeApplicationError(writer, err)
+			return
+		}
 	}
 	job, err := s.jobs.Submit(request.Context(), jobs.SubmitRequest{
 		OperatorID: OperatorID(request.Context()), IdempotencyKey: input.IdempotencyKey, BundleID: input.BundleID,
@@ -570,14 +607,36 @@ func (s *server) ready(writer http.ResponseWriter, request *http.Request) {
 }
 
 func (s *server) defaultReadiness(_ context.Context) ReadinessSnapshot {
-	state := ReadinessUnavailable
-	if s.analyzer != nil {
-		state = ReadinessReady
+	operations := []OperationReadiness{
+		operationReadiness("analyze", s.analyzer != nil && s.results != nil, "analyzer or writable result storage is unavailable"),
+		operationReadiness("lookup_ip", s.analyzer != nil, "local analyzer is unavailable"),
+		operationReadiness("jobs", s.jobs != nil, "durable job storage is unavailable"),
+		operationReadiness("results", s.results != nil, "durable result storage is unavailable"),
+		operationReadiness("findings", s.findings != nil, "finding storage is unavailable"),
+		{Name: "catalog", State: ReadinessReady},
 	}
-	return ReadinessSnapshot{State: state, Operations: []OperationReadiness{
-		{Name: "analyze", State: state},
-		{Name: "lookup_ip", State: state},
-	}}
+	ready, unavailable := 0, 0
+	for _, operation := range operations {
+		if operation.State == ReadinessReady {
+			ready++
+		} else {
+			unavailable++
+		}
+	}
+	state := ReadinessReady
+	if ready == 0 {
+		state = ReadinessUnavailable
+	} else if unavailable > 0 {
+		state = ReadinessDegraded
+	}
+	return ReadinessSnapshot{State: state, Operations: operations}
+}
+
+func operationReadiness(name string, ready bool, reason string) OperationReadiness {
+	if ready {
+		return OperationReadiness{Name: name, State: ReadinessReady}
+	}
+	return OperationReadiness{Name: name, State: ReadinessUnavailable, Reason: reason}
 }
 
 type ipLookupInput struct {

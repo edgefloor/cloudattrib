@@ -19,6 +19,10 @@ import (
 
 // NewLocal constructs the collection-only local analyzer without downloading data.
 func NewLocal(configuration config.Config) (app.Analyzer, error) {
+	return newAnalyzer(configuration, standaloneReportStore{})
+}
+
+func newAnalyzer(configuration config.Config, store app.ResultStore) (app.Analyzer, error) {
 	if err := configuration.Validate(); err != nil {
 		return nil, fmt.Errorf("validate configuration: %w", err)
 	}
@@ -74,7 +78,7 @@ func NewLocal(configuration config.Config) (app.Analyzer, error) {
 		Detectors:     []app.Detector{dnsrules.NewDefault()},
 		WebDetector:   webDetector,
 		View:          view,
-		Store:         standaloneReportStore{},
+		Store:         store,
 		TargetTimeout: configuration.Limits.Target.TargetDeadline,
 	}), nil
 }

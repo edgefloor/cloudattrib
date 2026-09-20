@@ -18,6 +18,11 @@ type Analyzer interface {
 	Reclassify(context.Context, model.ReclassifyRequest) (model.Report, error)
 }
 
+// ReclassificationValidator checks replay admission without creating a report.
+type ReclassificationValidator interface {
+	ValidateReclassify(context.Context, model.ReclassifyRequest) error
+}
+
 // DNSClient performs raw queries through an explicitly configured resolver.
 type DNSClient interface {
 	Query(context.Context, model.DNSQuestion) (model.DNSResult, error)

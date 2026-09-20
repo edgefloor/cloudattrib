@@ -11,6 +11,9 @@ import (
 //go:embed migrations/001_initial.sql
 var initialMigration string
 
+//go:embed migrations/002_bundle_lifecycle.sql
+var bundleLifecycleMigration string
+
 // Migrate applies the idempotent initial schema under a database advisory lock.
 func Migrate(ctx context.Context, pool *pgxpool.Pool, maximumTargets int) error {
 	if maximumTargets <= 0 {
@@ -29,6 +32,12 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, maximumTargets int) error 
 	}
 	if _, err := transaction.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES (1) ON CONFLICT DO NOTHING`); err != nil {
 		return fmt.Errorf("record migration: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, bundleLifecycleMigration); err != nil {
+		return fmt.Errorf("apply bundle lifecycle migration: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES (2) ON CONFLICT DO NOTHING`); err != nil {
+		return fmt.Errorf("record bundle lifecycle migration: %w", err)
 	}
 	capacity, err := transaction.Exec(ctx, `INSERT INTO queue_capacity(singleton,reserved_targets,maximum_targets) VALUES (true,0,$1) ON CONFLICT (singleton) DO UPDATE SET maximum_targets=EXCLUDED.maximum_targets WHERE queue_capacity.reserved_targets <= EXCLUDED.maximum_targets`, maximumTargets)
 	if err != nil {

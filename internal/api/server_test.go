@@ -127,6 +127,19 @@ func TestAnalyzePersistsTerminalReport(t *testing.T) {
 	}
 }
 
+func TestAnalyzeRequiresWritableResultStore(t *testing.T) {
+	t.Parallel()
+
+	handler, err := NewHandler(Config{Analyzer: &fixtureAnalyzer{report: fixtureReport(model.StatusComplete)}})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+	recorder := serve(handler, http.MethodPost, "/v1/analyze", `{"target":"example.com","kind":"domain"}`, "127.0.0.1:1000", nil)
+	if recorder.Code != http.StatusServiceUnavailable || decodeError(t, recorder).Code != model.CodePersistenceUnavailable {
+		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestJobsUseAuthenticatedIdempotencyAndSharedVisibility(t *testing.T) {
 	t.Parallel()
 
@@ -163,6 +176,21 @@ func TestJobsUseAuthenticatedIdempotencyAndSharedVisibility(t *testing.T) {
 	}
 }
 
+func TestJobsPersistInvalidRowsAsTerminalFailures(t *testing.T) {
+	t.Parallel()
+
+	store := jobs.NewMemoryStore(1)
+	handler := mustHandler(t, Config{Jobs: store})
+	recorder := serve(handler, http.MethodPost, "/v1/jobs", `{"idempotency_key":"mixed","targets":[{"target":"not a domain","kind":"domain"},{"target":"example.com","kind":"domain"}]}`, "127.0.0.1:1000", nil)
+	var response jobResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if recorder.Code != http.StatusAccepted || response.Counts[jobs.TargetFailed] != 1 || response.Counts[jobs.TargetQueued] != 1 || store.Reservations() != 1 {
+		t.Fatalf("response = %d %#v, reservations=%d", recorder.Code, response, store.Reservations())
+	}
+}
+
 func TestJobsRejectOversizedBatchBeforeStoreAdmission(t *testing.T) {
 	t.Parallel()
 
@@ -177,6 +205,25 @@ func TestJobsRejectOversizedBatchBeforeStoreAdmission(t *testing.T) {
 	handler := mustHandler(t, Config{Jobs: jobs.NewMemoryStore(2000), MaximumRequestBytes: maximumRequestBytes})
 	recorder := serve(handler, http.MethodPost, "/v1/jobs", string(body), "127.0.0.1:1000", nil)
 	if recorder.Code != http.StatusUnprocessableEntity || decodeError(t, recorder).Code != model.CodeInvalidOptions {
+		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestCancellationRejectsOversizedChunkedBody(t *testing.T) {
+	t.Parallel()
+
+	store := jobs.NewMemoryStore(2)
+	job, err := store.Submit(t.Context(), jobs.SubmitRequest{OperatorID: "operator", IdempotencyKey: "cancel-body", Targets: []model.AnalyzeRequest{{Target: "example.com", Kind: model.TargetDomain}}})
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	handler := mustHandler(t, Config{Jobs: store})
+	request := httptest.NewRequest(http.MethodPost, "/v1/jobs/"+job.ID+"/cancel", strings.NewReader(strings.Repeat("x", int(maximumRequestBytes)+1)))
+	request.ContentLength = -1
+	request.RemoteAddr = "127.0.0.1:1000"
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusRequestEntityTooLarge || decodeError(t, recorder).Code != model.CodeInputTooLarge {
 		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
 	}
 }
@@ -227,7 +274,13 @@ func TestReclassifyCreatesPinnedReplayJob(t *testing.T) {
 	t.Parallel()
 
 	store := jobs.NewMemoryStore(2)
-	handler := mustHandler(t, Config{Jobs: store})
+	results := newFixtureResultStore()
+	original := fixtureReport(model.StatusComplete)
+	original.Observations = []model.Observation{{ID: "observation-1"}}
+	if err := results.SaveReport(t.Context(), original); err != nil {
+		t.Fatalf("save original report: %v", err)
+	}
+	handler := mustHandler(t, Config{Jobs: store, Results: results})
 	recorder := serve(handler, http.MethodPost, "/v1/results/report-1/reclassify", `{"bundle_id":"bundle-2","idempotency_key":"replay-1"}`, "127.0.0.1:1000", nil)
 	var response jobResponse
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
@@ -239,6 +292,22 @@ func TestReclassifyCreatesPinnedReplayJob(t *testing.T) {
 	job, err := store.Job(t.Context(), response.ID)
 	if err != nil || job.BundleID != "bundle-2" || job.Targets[0].Reclassify == nil || job.Targets[0].Reclassify.ReportID != "report-1" {
 		t.Fatalf("reclassification job = %#v, %v", job, err)
+	}
+}
+
+func TestReclassifyValidatesRetainedInputAndBundle(t *testing.T) {
+	t.Parallel()
+
+	store := jobs.NewMemoryStore(2)
+	results := newFixtureResultStore()
+	handler := mustHandler(t, Config{Jobs: store, Results: results})
+	missingBundle := serve(handler, http.MethodPost, "/v1/results/report-1/reclassify", `{"idempotency_key":"replay-1"}`, "127.0.0.1:1000", nil)
+	if missingBundle.Code != http.StatusUnprocessableEntity || decodeError(t, missingBundle).Code != model.CodeInvalidOptions {
+		t.Fatalf("missing bundle response = %d %s", missingBundle.Code, missingBundle.Body.String())
+	}
+	missingReport := serve(handler, http.MethodPost, "/v1/results/report-1/reclassify", `{"bundle_id":"bundle-1","idempotency_key":"replay-2"}`, "127.0.0.1:1000", nil)
+	if missingReport.Code != http.StatusUnprocessableEntity || decodeError(t, missingReport).Code != model.CodeInvalidTarget {
+		t.Fatalf("missing report response = %d %s", missingReport.Code, missingReport.Body.String())
 	}
 }
 
@@ -344,6 +413,27 @@ func TestHealthUsesOperationReadiness(t *testing.T) {
 				t.Fatalf("readiness state = %q, want %q", snapshot.State, test.snapshot.State)
 			}
 		})
+	}
+}
+
+func TestDefaultReadinessSeparatesAnalyzePersistenceFromLookup(t *testing.T) {
+	t.Parallel()
+
+	handler, err := NewHandler(Config{Analyzer: &fixtureAnalyzer{}})
+	if err != nil {
+		t.Fatalf("NewHandler() error = %v", err)
+	}
+	recorder := serve(handler, http.MethodGet, "/readyz", "", "127.0.0.1:1000", nil)
+	var snapshot ReadinessSnapshot
+	if err := json.Unmarshal(recorder.Body.Bytes(), &snapshot); err != nil {
+		t.Fatalf("decode readiness: %v", err)
+	}
+	states := make(map[string]ReadinessState)
+	for _, operation := range snapshot.Operations {
+		states[operation.Name] = operation.State
+	}
+	if recorder.Code != http.StatusOK || snapshot.State != ReadinessDegraded || states["analyze"] != ReadinessUnavailable || states["lookup_ip"] != ReadinessReady {
+		t.Fatalf("readiness = %d %#v", recorder.Code, snapshot)
 	}
 }
 
@@ -499,6 +589,9 @@ func fixtureReport(status model.ReportStatus) model.Report {
 
 func mustHandler(t *testing.T, config Config) http.Handler {
 	t.Helper()
+	if config.Analyzer != nil && config.Results == nil {
+		config.Results = newFixtureResultStore()
+	}
 	handler, err := NewHandler(config)
 	if err != nil {
 		t.Fatalf("NewHandler() error = %v", err)

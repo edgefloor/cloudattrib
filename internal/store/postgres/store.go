@@ -64,8 +64,14 @@ func (s *Store) RegisterBundle(ctx context.Context, bundleID string, manifest []
 	if bundleID == "" || !json.Valid(manifest) {
 		return model.NewError(model.CodeInvalidOptions, "bundle ID and JSON manifest are required", nil)
 	}
-	if _, err := s.pool.Exec(ctx, `INSERT INTO dataset_bundles(bundle_id,manifest,compatible) VALUES($1,$2,$3) ON CONFLICT (bundle_id) DO UPDATE SET manifest=EXCLUDED.manifest,compatible=EXCLUDED.compatible`, bundleID, manifest, compatible); err != nil {
+	result, err := s.pool.Exec(ctx, `INSERT INTO dataset_bundles(bundle_id,manifest,compatible,available) VALUES($1,$2,$3,true)
+		ON CONFLICT (bundle_id) DO UPDATE SET available=true
+		WHERE dataset_bundles.manifest=EXCLUDED.manifest AND dataset_bundles.compatible=EXCLUDED.compatible`, bundleID, manifest, compatible)
+	if err != nil {
 		return persistence("register bundle", err)
+	}
+	if result.RowsAffected() != 1 {
+		return model.NewError(model.CodeIdempotencyConflict, "bundle ID is already registered with different immutable content", nil)
 	}
 	return nil
 }
@@ -78,6 +84,19 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 	hash, err := payloadHash(request)
 	if err != nil {
 		return jobs.Job{}, fmt.Errorf("hash job payload: %w", err)
+	}
+	validationErrors := make([]error, len(request.Targets))
+	reservations := len(request.Reclassifications)
+	for index, targetRequest := range request.Targets {
+		validationErrors[index] = jobs.ValidateAnalyzeRequest(targetRequest)
+		if validationErrors[index] == nil {
+			reservations++
+		}
+	}
+	for _, replay := range request.Reclassifications {
+		if replay.ReportID == "" || replay.BundleID == "" || replay.BundleID != request.BundleID {
+			return jobs.Job{}, model.NewError(model.CodeInvalidOptions, "reclassification requires a report and the pinned batch bundle", nil)
+		}
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
 	if err != nil {
@@ -106,7 +125,7 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 	}
 	if request.BundleID != "" {
 		var compatible bool
-		if err := tx.QueryRow(ctx, `SELECT compatible FROM dataset_bundles WHERE bundle_id=$1 FOR SHARE`, request.BundleID).Scan(&compatible); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT compatible FROM dataset_bundles WHERE bundle_id=$1 AND available FOR SHARE`, request.BundleID).Scan(&compatible); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return jobs.Job{}, model.NewError(model.CodeBundleUnavailable, "requested bundle is unavailable", nil)
 			}
@@ -116,7 +135,7 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 			return jobs.Job{}, model.NewError(model.CodeBundleIncompatible, "requested bundle is incompatible", nil)
 		}
 	}
-	capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets+$1 WHERE singleton=true AND reserved_targets+$1<=maximum_targets`, request.WorkCount())
+	capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets+$1 WHERE singleton=true AND reserved_targets+$1<=maximum_targets`, reservations)
 	if err != nil {
 		return jobs.Job{}, persistence("reserve queue capacity", err)
 	}
@@ -128,10 +147,14 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 	if err != nil {
 		return jobs.Job{}, fmt.Errorf("create job ID: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO jobs(id,operator_id,idempotency_key,payload_hash,bundle_id,status,created_at,updated_at) VALUES($1,$2,$3,$4,NULLIF($5,''),'queued',$6,$6)`, jobID, request.OperatorID, request.IdempotencyKey, hash, request.BundleID, now); err != nil {
+	jobStatus := jobs.JobQueued
+	if reservations == 0 {
+		jobStatus = jobs.JobFailed
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO jobs(id,operator_id,idempotency_key,payload_hash,bundle_id,status,created_at,updated_at) VALUES($1,$2,$3,$4,NULLIF($5,''),$6,$7,$7)`, jobID, request.OperatorID, request.IdempotencyKey, hash, request.BundleID, jobStatus, now); err != nil {
 		return jobs.Job{}, persistence("insert job", err)
 	}
-	result := jobs.Job{ID: jobID, OperatorID: request.OperatorID, IdempotencyKey: request.IdempotencyKey, BundleID: request.BundleID, Status: jobs.JobQueued, CreatedAt: now, UpdatedAt: now, Targets: make([]jobs.Target, request.WorkCount())}
+	result := jobs.Job{ID: jobID, OperatorID: request.OperatorID, IdempotencyKey: request.IdempotencyKey, BundleID: request.BundleID, Status: jobStatus, CreatedAt: now, UpdatedAt: now, Targets: make([]jobs.Target, request.WorkCount())}
 	for index, targetRequest := range request.Targets {
 		targetID, idErr := newID("target")
 		if idErr != nil {
@@ -142,10 +165,14 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 		if encodeErr != nil {
 			return jobs.Job{}, fmt.Errorf("encode target request: %w", encodeErr)
 		}
-		if _, err := tx.Exec(ctx, `INSERT INTO job_targets(id,job_id,input_index,request,status) VALUES($1,$2,$3,$4,'queued')`, targetID, jobID, index, encoded); err != nil {
+		targetStatus, reason := jobs.TargetQueued, ""
+		if validationErrors[index] != nil {
+			targetStatus, reason = jobs.TargetFailed, jobs.ValidationReason(validationErrors[index])
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO job_targets(id,job_id,input_index,request,status,terminal_reason) VALUES($1,$2,$3,$4,$5,NULLIF($6,''))`, targetID, jobID, index, encoded, targetStatus, reason); err != nil {
 			return jobs.Job{}, persistence("insert target", err)
 		}
-		result.Targets[index] = jobs.Target{ID: targetID, Index: index, Request: targetRequest, Status: jobs.TargetQueued}
+		result.Targets[index] = jobs.Target{ID: targetID, Index: index, Request: targetRequest, Status: targetStatus, TerminalReason: reason}
 	}
 	for requestIndex, reclassifyRequest := range request.Reclassifications {
 		index := len(request.Targets) + requestIndex
@@ -163,7 +190,7 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 		}
 		result.Targets[index] = jobs.Target{ID: targetID, Index: index, Reclassify: &copied, Status: jobs.TargetQueued}
 	}
-	if request.BundleID != "" {
+	if request.BundleID != "" && reservations > 0 {
 		if _, err := tx.Exec(ctx, `INSERT INTO bundle_pins(bundle_id,job_id) VALUES($1,$2)`, request.BundleID, jobID); err != nil {
 			return jobs.Job{}, persistence("pin job bundle", err)
 		}
@@ -283,7 +310,9 @@ func (s *Store) Renew(ctx context.Context, targetID, token string, lease time.Du
 	return nil
 }
 
-// Complete stores a report and terminal target state in one transaction.
+// Complete stores a report and terminal target state in one transaction. Lease
+// expiry makes an attempt eligible for recovery; the token remains authoritative
+// until recovery revokes it so a completion racing recovery has one serial winner.
 func (s *Store) Complete(ctx context.Context, targetID, token string, report model.Report, status jobs.TargetStatus, reason string) error {
 	if status != jobs.TargetCompleted && status != jobs.TargetPartial && status != jobs.TargetFailed && status != jobs.TargetCancelled {
 		return model.NewError(model.CodeInvalidOptions, "completion status is not terminal", nil)
@@ -298,23 +327,46 @@ func (s *Store) Complete(ctx context.Context, targetID, token string, report mod
 		return persistence("begin completion", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	var jobID string
-	if err := tx.QueryRow(ctx, `SELECT job_id FROM job_targets WHERE id=$1 AND attempt_token=$2 AND status='running' FOR UPDATE`, targetID, token).Scan(&jobID); err != nil {
+	var jobID, existingReason, existingReportID string
+	var existingStatus jobs.TargetStatus
+	if err := tx.QueryRow(ctx, `SELECT job_id,status,COALESCE(terminal_reason,''),COALESCE(report_id,'') FROM job_targets WHERE id=$1 AND attempt_token=$2 FOR UPDATE`, targetID, token).Scan(&jobID, &existingStatus, &existingReason, &existingReportID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return model.NewError(model.CodeIdempotencyConflict, "attempt token is stale", nil)
 		}
 		return persistence("lock target completion", err)
+	}
+	if existingStatus != jobs.TargetRunning {
+		matches := existingStatus == status && existingReason == reason && existingReportID == report.ID
+		if matches && report.ID != "" {
+			document, encodeErr := report.CanonicalJSON()
+			if encodeErr != nil {
+				return model.NewError(model.CodeInvalidOptions, "encode repeated report completion", encodeErr)
+			}
+			var existingDocument []byte
+			if err := tx.QueryRow(ctx, `SELECT document FROM reports WHERE id=$1`, report.ID).Scan(&existingDocument); err != nil {
+				return persistence("load repeated report completion", err)
+			}
+			matches = sameJSON(existingDocument, document)
+		}
+		if matches {
+			return nil
+		}
+		return model.NewError(model.CodeIdempotencyConflict, "attempt completion conflicts with the committed result", nil)
 	}
 	if report.ID != "" {
 		if err := saveReport(ctx, tx, report); err != nil {
 			return err
 		}
 	}
-	if _, err := tx.Exec(ctx, `UPDATE job_targets SET status=$2,terminal_reason=NULLIF($3,''),report_id=NULLIF($4,''),attempt_token=NULL,lease_owner=NULL,lease_expires_at=NULL WHERE id=$1`, targetID, status, reason, report.ID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE job_targets SET status=$2,terminal_reason=NULLIF($3,''),report_id=NULLIF($4,''),lease_owner=NULL,lease_expires_at=NULL WHERE id=$1`, targetID, status, reason, report.ID); err != nil {
 		return persistence("terminalize target", err)
 	}
-	if _, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-1 WHERE singleton=true AND reserved_targets>0`); err != nil {
+	released, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-1 WHERE singleton=true AND reserved_targets>0`)
+	if err != nil {
 		return persistence("release queue reservation", err)
+	}
+	if released.RowsAffected() != 1 {
+		return persistence("release queue reservation", fmt.Errorf("reservation invariant is inconsistent"))
 	}
 	if err := finalizeJob(ctx, tx, jobID); err != nil {
 		return err
@@ -327,6 +379,9 @@ func (s *Store) Complete(ctx context.Context, targetID, token string, report mod
 
 // RequestCancel accepts cancellation from any authenticated shared operator.
 func (s *Store) RequestCancel(ctx context.Context, jobID, operatorID string) error {
+	if operatorID == "" {
+		return model.NewError(model.CodeInvalidOptions, "cancelling operator is required", nil)
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return persistence("begin cancellation", err)
@@ -344,8 +399,12 @@ func (s *Store) RequestCancel(ctx context.Context, jobID, operatorID string) err
 		return persistence("cancel queued targets", err)
 	}
 	if released > 0 {
-		if _, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-$1 WHERE singleton=true`, released); err != nil {
+		capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-$1 WHERE singleton=true AND reserved_targets >= $1`, released)
+		if err != nil {
 			return persistence("release cancelled reservations", err)
+		}
+		if capacity.RowsAffected() != 1 {
+			return persistence("release cancelled reservations", fmt.Errorf("reservation invariant is inconsistent"))
 		}
 	}
 	if err := finalizeJob(ctx, tx, jobID); err != nil {
@@ -407,8 +466,12 @@ func (s *Store) RecoverExpired(ctx context.Context, maximumAttempts int) error {
 		affectedJobs[item.jobID] = struct{}{}
 	}
 	if terminalCount > 0 {
-		if _, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-$1 WHERE singleton=true`, terminalCount); err != nil {
+		capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-$1 WHERE singleton=true AND reserved_targets >= $1`, terminalCount)
+		if err != nil {
 			return persistence("release expired reservations", err)
+		}
+		if capacity.RowsAffected() != 1 {
+			return persistence("release expired reservations", fmt.Errorf("reservation invariant is inconsistent"))
 		}
 	}
 	for jobID := range affectedJobs {
@@ -552,17 +615,62 @@ func (s *Store) WithBundlePruneLock(ctx context.Context, bundleID string, action
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lifecycleLockID); err != nil {
 		return persistence("lock bundle pruning", err)
 	}
-	var pinned bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bundle_pins WHERE bundle_id=$1)`, bundleID).Scan(&pinned); err != nil {
+	var protected bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bundle_pins WHERE bundle_id=$1) OR EXISTS(
+		SELECT 1 FROM (SELECT bundle_id FROM bundle_activations ORDER BY activation_order DESC LIMIT 3) protected WHERE bundle_id=$1)`, bundleID).Scan(&protected); err != nil {
 		return persistence("check bundle pruning pins", err)
 	}
-	if err := action(pinned); err != nil {
-		return err
+	if !protected {
+		result, err := tx.Exec(ctx, `UPDATE dataset_bundles SET available=false WHERE bundle_id=$1 AND available`, bundleID)
+		if err != nil {
+			return persistence("mark bundle unavailable", err)
+		}
+		if result.RowsAffected() != 1 {
+			return model.NewError(model.CodeBundleUnavailable, "bundle is unavailable", nil)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return persistence("commit bundle pruning", err)
 	}
+	return action(protected)
+}
+
+// RecordBundleActivation durably orders active and rollback-protected bundles.
+func (s *Store) RecordBundleActivation(ctx context.Context, bundleID string) error {
+	result, err := s.pool.Exec(ctx, `INSERT INTO bundle_activations(bundle_id)
+		SELECT bundle_id FROM dataset_bundles WHERE bundle_id=$1 AND available
+		ON CONFLICT (bundle_id) DO UPDATE SET activation_order=nextval('bundle_activation_order'),activated_at=clock_timestamp()`, bundleID)
+	if err != nil {
+		return persistence("record bundle activation", err)
+	}
+	if result.RowsAffected() != 1 {
+		return model.NewError(model.CodeBundleUnavailable, "bundle is unavailable", nil)
+	}
 	return nil
+}
+
+// ProtectedBundles returns the active bundle and prior rollback generations.
+func (s *Store) ProtectedBundles(ctx context.Context, limit int) ([]string, error) {
+	if limit < 1 {
+		return nil, model.NewError(model.CodeInvalidOptions, "protected bundle limit must be positive", nil)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT bundle_id FROM bundle_activations ORDER BY activation_order DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, persistence("load protected bundles", err)
+	}
+	defer rows.Close()
+	var bundles []string
+	for rows.Next() {
+		var bundleID string
+		if err := rows.Scan(&bundleID); err != nil {
+			return nil, persistence("scan protected bundle", err)
+		}
+		bundles = append(bundles, bundleID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, persistence("iterate protected bundles", err)
+	}
+	return bundles, nil
 }
 
 func finalizeJob(ctx context.Context, tx pgx.Tx, jobID string) error {

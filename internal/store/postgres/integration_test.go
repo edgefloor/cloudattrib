@@ -30,6 +30,26 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	if err := store.RegisterBundle(ctx, "fixture-bundle", []byte(`{"schema_version":1}`), true); err != nil {
 		t.Fatalf("RegisterBundle() error = %v", err)
 	}
+	if err := store.RecordBundleActivation(ctx, "fixture-bundle"); err != nil {
+		t.Fatalf("RecordBundleActivation() error = %v", err)
+	}
+	protected, err := store.ProtectedBundles(ctx, 3)
+	if err != nil || len(protected) != 1 || protected[0] != "fixture-bundle" {
+		t.Fatalf("ProtectedBundles() = %v, %v", protected, err)
+	}
+	if err := store.RegisterBundle(ctx, "fixture-bundle", []byte(`{"schema_version":2}`), true); model.ErrorCodeOf(err) != model.CodeIdempotencyConflict {
+		t.Fatalf("mutable RegisterBundle() error = %v", err)
+	}
+	if err := store.RegisterBundle(ctx, "old-bundle", []byte(`{"schema_version":1,"old":true}`), true); err != nil {
+		t.Fatalf("RegisterBundle(old) error = %v", err)
+	}
+	removed := false
+	if err := store.WithBundlePruneLock(ctx, "old-bundle", func(protected bool) error { removed = !protected; return nil }); err != nil || !removed {
+		t.Fatalf("WithBundlePruneLock() removed=%v, error=%v", removed, err)
+	}
+	if _, err := store.Submit(ctx, jobs.SubmitRequest{OperatorID: "operator-a", IdempotencyKey: "pruned-key", BundleID: "old-bundle", Targets: []model.AnalyzeRequest{{Target: "example.com", Kind: model.TargetDomain}}}); model.ErrorCodeOf(err) != model.CodeBundleUnavailable {
+		t.Fatalf("Submit(pruned bundle) error = %v", err)
+	}
 	job, err := store.Submit(ctx, jobs.SubmitRequest{OperatorID: "operator-a", IdempotencyKey: "fixture-key", BundleID: "fixture-bundle", Targets: []model.AnalyzeRequest{{Target: "example.com", Kind: model.TargetDomain}}})
 	if err != nil {
 		t.Fatalf("Submit() error = %v (cause: %v)", err, errors.Unwrap(err))
@@ -52,6 +72,9 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	}
 	if err := store.Complete(ctx, claim.TargetID, claim.AttemptToken, report, jobs.TargetCompleted, ""); err != nil {
 		t.Fatalf("Complete() error = %v", err)
+	}
+	if err := store.Complete(ctx, claim.TargetID, claim.AttemptToken, report, jobs.TargetCompleted, ""); err != nil {
+		t.Fatalf("repeated Complete() error = %v", err)
 	}
 	loaded, err := store.Job(ctx, job.ID)
 	if err != nil || loaded.Status != jobs.JobCompleted || !loaded.Targets[0].ReportAvailable {
@@ -87,7 +110,7 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 		t.Fatalf("Job(reclassification) = %#v, %v", replayLoaded, err)
 	}
 
-	cancelJob, err := store.Submit(ctx, jobs.SubmitRequest{OperatorID: "operator-a", IdempotencyKey: "cancel-key", BundleID: "fixture-bundle", Targets: []model.AnalyzeRequest{{Target: "one.example", Kind: model.TargetDomain}, {Target: "two.example", Kind: model.TargetDomain}}})
+	cancelJob, err := store.Submit(ctx, jobs.SubmitRequest{OperatorID: "operator-a", IdempotencyKey: "cancel-key", BundleID: "fixture-bundle", Targets: []model.AnalyzeRequest{{Target: "one.example.com", Kind: model.TargetDomain}, {Target: "two.example.com", Kind: model.TargetDomain}}})
 	if err != nil {
 		t.Fatalf("Submit(cancel) error = %v", err)
 	}
@@ -116,5 +139,13 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	pinned, err = store.BundlePinned(ctx, "fixture-bundle")
 	if err != nil || pinned {
 		t.Fatalf("BundlePinned() after cancelled terminals = %v, %v", pinned, err)
+	}
+	invalid, err := store.Submit(ctx, jobs.SubmitRequest{OperatorID: "operator-a", IdempotencyKey: "invalid-key", BundleID: "fixture-bundle", Targets: []model.AnalyzeRequest{{Target: "not a domain", Kind: model.TargetDomain}}})
+	if err != nil || invalid.Status != jobs.JobFailed || invalid.Targets[0].Status != jobs.TargetFailed {
+		t.Fatalf("Submit(invalid row) = %#v, %v", invalid, err)
+	}
+	var reservations int
+	if err := store.pool.QueryRow(ctx, `SELECT reserved_targets FROM queue_capacity WHERE singleton=true`).Scan(&reservations); err != nil || reservations != 0 {
+		t.Fatalf("reserved targets after invalid row = %d, %v", reservations, err)
 	}
 }

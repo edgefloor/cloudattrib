@@ -13,7 +13,15 @@ CREATE TABLE IF NOT EXISTS dataset_bundles (
     bundle_id text PRIMARY KEY,
     manifest jsonb NOT NULL,
     compatible boolean NOT NULL,
+	available boolean NOT NULL DEFAULT true,
     created_at timestamptz NOT NULL DEFAULT clock_timestamp()
+);
+
+CREATE SEQUENCE IF NOT EXISTS bundle_activation_order;
+CREATE TABLE IF NOT EXISTS bundle_activations (
+	bundle_id text PRIMARY KEY REFERENCES dataset_bundles(bundle_id) ON DELETE CASCADE,
+	activation_order bigint NOT NULL DEFAULT nextval('bundle_activation_order'),
+	activated_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
 
 CREATE TABLE IF NOT EXISTS jobs (

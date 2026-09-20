@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -13,7 +14,7 @@ func TestAdmissionIsIdempotentAndCapacityBounded(t *testing.T) {
 	t.Parallel()
 
 	store := NewMemoryStore(2)
-	request := SubmitRequest{OperatorID: "operator-a", IdempotencyKey: "key", BundleID: "bundle-1", Targets: []model.AnalyzeRequest{{Target: "one.example", Kind: model.TargetDomain}, {Target: "two.example", Kind: model.TargetDomain}}}
+	request := SubmitRequest{OperatorID: "operator-a", IdempotencyKey: "key", BundleID: "bundle-1", Targets: []model.AnalyzeRequest{{Target: "one.example.com", Kind: model.TargetDomain}, {Target: "two.example.com", Kind: model.TargetDomain}}}
 	first, err := store.Submit(context.Background(), request)
 	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
@@ -33,8 +34,27 @@ func TestAdmissionIsIdempotentAndCapacityBounded(t *testing.T) {
 	if _, err := store.Submit(context.Background(), conflict); model.ErrorCodeOf(err) != model.CodeIdempotencyConflict {
 		t.Fatalf("conflicting Submit() error = %v", err)
 	}
-	if _, err := store.Submit(context.Background(), SubmitRequest{OperatorID: "operator-b", IdempotencyKey: "other", BundleID: "bundle-1", Targets: []model.AnalyzeRequest{{Target: "three.example", Kind: model.TargetDomain}}}); model.ErrorCodeOf(err) != model.CodeQueueCapacityExceeded {
+	if _, err := store.Submit(context.Background(), SubmitRequest{OperatorID: "operator-b", IdempotencyKey: "other", BundleID: "bundle-1", Targets: []model.AnalyzeRequest{{Target: "three.example.com", Kind: model.TargetDomain}}}); model.ErrorCodeOf(err) != model.CodeQueueCapacityExceeded {
 		t.Fatalf("capacity Submit() error = %v", err)
+	}
+}
+
+func TestInvalidRowsAreTerminalWithoutReservations(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStore(1)
+	job, err := store.Submit(context.Background(), SubmitRequest{
+		OperatorID: "operator", IdempotencyKey: "mixed",
+		Targets: []model.AnalyzeRequest{{Target: "not a domain", Kind: model.TargetDomain}, {Target: "example.com", Kind: model.TargetDomain}},
+	})
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	if job.Targets[0].Status != TargetFailed || job.Targets[1].Status != TargetQueued || store.Reservations() != 1 {
+		t.Fatalf("job = %#v, reservations = %d", job, store.Reservations())
+	}
+	if !strings.Contains(job.Targets[0].TerminalReason, "validation failed") {
+		t.Fatalf("terminal reason = %q", job.Targets[0].TerminalReason)
 	}
 }
 
@@ -44,7 +64,7 @@ func TestAttemptTokenRejectsStaleCompletionAndPinReleasesAtAllTerminal(t *testin
 	now := time.Date(2026, 9, 20, 10, 0, 0, 0, time.UTC)
 	store := NewMemoryStore(10)
 	store.now = func() time.Time { return now }
-	job, err := store.Submit(context.Background(), SubmitRequest{OperatorID: "operator", IdempotencyKey: "key", BundleID: "bundle", Targets: []model.AnalyzeRequest{{Target: "one.example", Kind: model.TargetDomain}, {Target: "two.example", Kind: model.TargetDomain}}})
+	job, err := store.Submit(context.Background(), SubmitRequest{OperatorID: "operator", IdempotencyKey: "key", BundleID: "bundle", Targets: []model.AnalyzeRequest{{Target: "one.example.com", Kind: model.TargetDomain}, {Target: "two.example.com", Kind: model.TargetDomain}}})
 	if err != nil {
 		t.Fatalf("Submit() error = %v", err)
 	}
@@ -68,6 +88,12 @@ func TestAttemptTokenRejectsStaleCompletionAndPinReleasesAtAllTerminal(t *testin
 	}
 	if err := store.Complete(context.Background(), retried.TargetID, retried.AttemptToken, model.Report{ID: "fresh"}, TargetCompleted, ""); err != nil {
 		t.Fatalf("Complete() error = %v", err)
+	}
+	if err := store.Complete(context.Background(), retried.TargetID, retried.AttemptToken, model.Report{ID: "fresh"}, TargetCompleted, ""); err != nil {
+		t.Fatalf("repeated Complete() error = %v", err)
+	}
+	if err := store.Complete(context.Background(), retried.TargetID, retried.AttemptToken, model.Report{ID: "different"}, TargetCompleted, ""); model.ErrorCodeOf(err) != model.CodeIdempotencyConflict {
+		t.Fatalf("conflicting repeated Complete() error = %v", err)
 	}
 	if got := store.BundlePins("bundle"); got != 1 {
 		t.Fatalf("bundle pins after one target = %d, want 1", got)
@@ -95,7 +121,7 @@ func TestCancellationKeepsRunningPinUntilTargetTerminates(t *testing.T) {
 	t.Parallel()
 
 	store := NewMemoryStore(10)
-	job, _ := store.Submit(context.Background(), SubmitRequest{OperatorID: "a", IdempotencyKey: "cancel", BundleID: "bundle", Targets: []model.AnalyzeRequest{{Target: "one.example", Kind: model.TargetDomain}, {Target: "two.example", Kind: model.TargetDomain}}})
+	job, _ := store.Submit(context.Background(), SubmitRequest{OperatorID: "a", IdempotencyKey: "cancel", BundleID: "bundle", Targets: []model.AnalyzeRequest{{Target: "one.example.com", Kind: model.TargetDomain}, {Target: "two.example.com", Kind: model.TargetDomain}}})
 	claim, _ := store.Claim(context.Background(), "worker", time.Minute)
 	if err := store.RequestCancel(context.Background(), job.ID, "operator-b"); err != nil {
 		t.Fatalf("RequestCancel() error = %v", err)

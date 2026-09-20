@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ const maxJSONLRows = 1000
 // Dependencies supplies application behavior and testable command streams.
 type Dependencies struct {
 	Analyzer app.Analyzer
+	Serve    func(context.Context) error
 	Stdin    io.Reader
 	Stdout   io.Writer
 	Stderr   io.Writer
@@ -40,6 +42,17 @@ func Run(ctx context.Context, args []string, dependencies Dependencies) int {
 		return runLookupIP(ctx, args[1:], dependencies, streams)
 	case "reclassify":
 		return runReclassify(ctx, args[1:], dependencies, streams)
+	case "serve":
+		if len(args) != 1 {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "serve does not accept positional arguments", nil))
+		}
+		if dependencies.Serve == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "service wiring is unavailable", nil))
+		}
+		if err := dependencies.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			return diagnostic(streams.stderr, model.NewError(model.CodePersistenceUnavailable, "service stopped", err))
+		}
+		return 0
 	default:
 		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, fmt.Sprintf("unknown subcommand %q", args[0]), nil))
 	}

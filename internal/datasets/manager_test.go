@@ -12,12 +12,12 @@ import (
 func TestFailedActivationKeepsLastKnownGood(t *testing.T) {
 	t.Parallel()
 
-	manager, err := NewManager(candidate("bundle-a", "build-a"), "build-a")
+	manager, err := NewManager(t.Context(), candidate("bundle-a", "build-a"), "build-a")
 	if err != nil {
 		t.Fatalf("NewManager() error = %v", err)
 	}
 	bad := candidate("bundle-b", "other-build")
-	if err := manager.Activate(bad); err == nil {
+	if err := manager.Activate(t.Context(), bad); err == nil {
 		t.Fatal("Activate() error = nil, want incompatible build error")
 	}
 	if got := manager.Capture().View.BundleID(); got != "bundle-a" {
@@ -29,12 +29,12 @@ func TestPruneHonorsLastKnownGoodReadersAndDurablePins(t *testing.T) {
 	t.Parallel()
 
 	references := &fixtureReferences{pinned: map[string]bool{"bundle-a": true}}
-	manager, err := NewManager(candidate("bundle-a", "build-a"), "build-a", WithReferenceStore(references))
+	manager, err := NewManager(t.Context(), candidate("bundle-a", "build-a"), "build-a", WithReferenceStore(references))
 	if err != nil {
 		t.Fatalf("NewManager() error = %v", err)
 	}
-	for _, bundleID := range []string{"bundle-b", "bundle-c"} {
-		if err := manager.Activate(candidate(bundleID, "build-a")); err != nil {
+	for _, bundleID := range []string{"bundle-b", "bundle-c", "bundle-d"} {
+		if err := manager.Activate(t.Context(), candidate(bundleID, "build-a")); err != nil {
 			t.Fatalf("Activate(%s) error = %v", bundleID, err)
 		}
 	}
@@ -51,33 +51,69 @@ func TestPruneHonorsLastKnownGoodReadersAndDurablePins(t *testing.T) {
 	}
 
 	acquired, release := manager.Acquire()
-	if acquired.Manifest.BundleID != "bundle-c" {
+	if acquired.Manifest.BundleID != "bundle-d" {
 		t.Fatalf("Acquire() bundle = %q", acquired.Manifest.BundleID)
 	}
-	for _, bundleID := range []string{"bundle-d", "bundle-e"} {
-		if err := manager.Activate(candidate(bundleID, "build-a")); err != nil {
+	for _, bundleID := range []string{"bundle-e", "bundle-f", "bundle-g"} {
+		if err := manager.Activate(t.Context(), candidate(bundleID, "build-a")); err != nil {
 			t.Fatalf("Activate(%s) error = %v", bundleID, err)
 		}
 	}
-	if ok, err := manager.Prune(context.Background(), "bundle-c", func() error { return nil }); err != nil || ok {
+	if ok, err := manager.Prune(context.Background(), "bundle-d", func() error { return nil }); err != nil || ok {
 		t.Fatalf("Prune(active-reader) = %v, %v", ok, err)
 	}
 	release()
-	if ok, err := manager.Prune(context.Background(), "bundle-c", func() error { return nil }); err != nil || !ok {
+	if ok, err := manager.Prune(context.Background(), "bundle-d", func() error { return nil }); err != nil || !ok {
 		t.Fatalf("Prune(released-reader) = %v, %v", ok, err)
 	}
 }
 
-type fixtureReferences struct{ pinned map[string]bool }
+func TestManagerRestoresRollbackProtectionAfterRestart(t *testing.T) {
+	t.Parallel()
+
+	references := &fixtureReferences{pinned: make(map[string]bool), protected: []string{"bundle-b", "bundle-a"}}
+	manager, err := NewManager(t.Context(), candidate("bundle-c", "build-a"), "build-a", WithReferenceStore(references))
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	for _, bundleID := range []string{"bundle-a", "bundle-b", "bundle-c"} {
+		if removed, pruneErr := manager.Prune(t.Context(), bundleID, func() error { return nil }); pruneErr != nil || removed {
+			t.Fatalf("Prune(%s) = %v, %v", bundleID, removed, pruneErr)
+		}
+	}
+}
+
+type fixtureReferences struct {
+	pinned    map[string]bool
+	protected []string
+}
 
 func (f *fixtureReferences) WithBundlePruneLock(_ context.Context, bundleID string, action func(bool) error) error {
 	return action(f.pinned[bundleID])
 }
 
+func (f *fixtureReferences) RecordBundleActivation(_ context.Context, bundleID string) error {
+	for index, existing := range f.protected {
+		if existing == bundleID {
+			f.protected = append(f.protected[:index], f.protected[index+1:]...)
+			break
+		}
+	}
+	f.protected = append([]string{bundleID}, f.protected...)
+	if len(f.protected) > 3 {
+		f.protected = f.protected[:3]
+	}
+	return nil
+}
+
+func (f *fixtureReferences) ProtectedBundles(context.Context, int) ([]string, error) {
+	return append([]string(nil), f.protected...), nil
+}
+
 func TestParallelReadersCaptureCoherentViewsDuringActivation(t *testing.T) {
 	t.Parallel()
 
-	manager, err := NewManager(candidate("bundle-0", "build-a"), "build-a")
+	manager, err := NewManager(t.Context(), candidate("bundle-0", "build-a"), "build-a")
 	if err != nil {
 		t.Fatalf("NewManager() error = %v", err)
 	}
@@ -94,7 +130,7 @@ func TestParallelReadersCaptureCoherentViewsDuringActivation(t *testing.T) {
 		})
 	}
 	for version := 1; version <= 20; version++ {
-		if err := manager.Activate(candidate(fmt.Sprintf("bundle-%d", version), "build-a")); err != nil {
+		if err := manager.Activate(t.Context(), candidate(fmt.Sprintf("bundle-%d", version), "build-a")); err != nil {
 			t.Fatalf("Activate() error = %v", err)
 		}
 	}
@@ -104,7 +140,7 @@ func TestParallelReadersCaptureCoherentViewsDuringActivation(t *testing.T) {
 func TestCaptureOwnsManifestSlices(t *testing.T) {
 	t.Parallel()
 
-	manager, err := NewManager(candidate("bundle-a", "build-a"), "build-a")
+	manager, err := NewManager(t.Context(), candidate("bundle-a", "build-a"), "build-a")
 	if err != nil {
 		t.Fatalf("NewManager() error = %v", err)
 	}

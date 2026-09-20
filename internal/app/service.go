@@ -378,17 +378,8 @@ func (s *Service) LookupIP(ctx context.Context, request model.IPLookupRequest) (
 
 // Reclassify reinterprets immutable normalized observations without collecting.
 func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyRequest) (model.Report, error) {
-	if request.ReportID == "" {
-		return model.Report{}, model.NewError(model.CodeInvalidOptions, "report ID is required", nil)
-	}
-	if s.store == nil {
-		return model.Report{}, model.NewError(model.CodeCapabilityUnavailable, "reclassification input storage is unavailable", nil)
-	}
-	if request.BundleID != "" && request.BundleID != s.view.BundleID() {
-		return model.Report{}, model.NewError(model.CodeBundleUnavailable, "requested bundle is not loaded", nil)
-	}
-	if len(s.detectors) == 0 && s.prefixes == nil {
-		return model.Report{}, model.NewError(model.CodeCapabilityUnavailable, "no replay classifier is usable", nil)
+	if err := s.ValidateReclassify(ctx, request); err != nil {
+		return model.Report{}, err
 	}
 	original, err := s.store.LoadReport(ctx, request.ReportID)
 	if err != nil {
@@ -489,6 +480,33 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 		return model.Report{}, fmt.Errorf("validate reclassified report references: %w", err)
 	}
 	return report, nil
+}
+
+// ValidateReclassify checks bundle compatibility, retained inputs, and replay classifiers.
+func (s *Service) ValidateReclassify(ctx context.Context, request model.ReclassifyRequest) error {
+	if request.ReportID == "" {
+		return model.NewError(model.CodeInvalidOptions, "report ID is required", nil)
+	}
+	if s.store == nil {
+		return model.NewError(model.CodeCapabilityUnavailable, "reclassification input storage is unavailable", nil)
+	}
+	if request.BundleID != "" && request.BundleID != s.view.BundleID() {
+		return model.NewError(model.CodeBundleUnavailable, "requested bundle is not loaded", nil)
+	}
+	if len(s.detectors) == 0 && s.prefixes == nil {
+		return model.NewError(model.CodeCapabilityUnavailable, "no replay classifier is usable", nil)
+	}
+	original, err := s.store.LoadReport(ctx, request.ReportID)
+	if err != nil {
+		if model.ErrorCodeOf(err) != "" {
+			return fmt.Errorf("load replay input: %w", err)
+		}
+		return model.NewError(model.CodePersistenceFailed, "load replay input", err)
+	}
+	if len(original.Observations) == 0 && len(original.Evidence) == 0 {
+		return model.NewError(model.CodeCapabilityUnavailable, "report has no retained replay inputs", nil)
+	}
+	return nil
 }
 
 func technologyObservation(item model.Evidence, source model.Observation) (model.Observation, bool) {
