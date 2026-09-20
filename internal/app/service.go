@@ -19,24 +19,26 @@ import (
 
 // Dependencies contains the settled E1 application seams.
 type Dependencies struct {
-	DNS        *collectdns.Collector
-	HTTP       *collecthttp.Collector
-	Detectors  []Detector
-	Prefixes   PrefixReader
-	View       model.AttributionView
-	HTTPScheme string
-	Now        func() time.Time
+	DNS         *collectdns.Collector
+	HTTP        *collecthttp.Collector
+	Detectors   []Detector
+	WebDetector WebDetector
+	Prefixes    PrefixReader
+	View        model.AttributionView
+	HTTPScheme  string
+	Now         func() time.Time
 }
 
 // Service coordinates one immutable view through collection and classification.
 type Service struct {
-	dns        *collectdns.Collector
-	http       *collecthttp.Collector
-	detectors  []Detector
-	prefixes   PrefixReader
-	view       model.AttributionView
-	httpScheme string
-	now        func() time.Time
+	dns         *collectdns.Collector
+	http        *collecthttp.Collector
+	detectors   []Detector
+	webDetector WebDetector
+	prefixes    PrefixReader
+	view        model.AttributionView
+	httpScheme  string
+	now         func() time.Time
 }
 
 // NewService constructs the analyzer without starting background work.
@@ -50,13 +52,14 @@ func NewService(dependencies Dependencies) *Service {
 		scheme = "https"
 	}
 	return &Service{
-		dns:        dependencies.DNS,
-		http:       dependencies.HTTP,
-		detectors:  slices.Clone(dependencies.Detectors),
-		prefixes:   dependencies.Prefixes,
-		view:       dependencies.View,
-		httpScheme: scheme,
-		now:        now,
+		dns:         dependencies.DNS,
+		http:        dependencies.HTTP,
+		detectors:   slices.Clone(dependencies.Detectors),
+		webDetector: dependencies.WebDetector,
+		prefixes:    dependencies.Prefixes,
+		view:        dependencies.View,
+		httpScheme:  scheme,
+		now:         now,
 	}
 }
 
@@ -143,7 +146,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	if httpStarted {
 		coverage = append(coverage, httpResult.Coverage)
 		if httpErr == nil {
-			observations = append(observations, httpResult.Observation)
+			observations = append(observations, httpResult.Observations...)
 		}
 	} else {
 		coverage = append(coverage, model.Coverage{Capability: "http", Status: model.CoverageUnavailable, Reason: "no approved address"})
@@ -160,6 +163,16 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		}
 		evidence = append(evidence, detected...)
 		coverage = append(coverage, detectorCoverage...)
+	}
+	if s.webDetector != nil && httpErr == nil && httpStarted {
+		detected, detectorCoverage := s.webDetector.Detect(ctx, httpResult.Observation.ID, hostname, httpResult.Headers, httpResult.Body, s.view)
+		for i := range detected {
+			if detected[i].ClassifiedAt.IsZero() {
+				detected[i].ClassifiedAt = classifiedAt
+			}
+		}
+		evidence = append(evidence, detected...)
+		coverage = append(coverage, detectorCoverage)
 	}
 
 	if s.prefixes != nil {

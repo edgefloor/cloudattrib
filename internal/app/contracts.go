@@ -4,6 +4,7 @@ package app
 import (
 	"context"
 	"net"
+	"net/http"
 	"net/netip"
 
 	"cloudattrib/internal/model"
@@ -40,6 +41,11 @@ type Collector interface {
 // Detector interprets existing observations without collecting new data.
 type Detector interface {
 	Detect(context.Context, []model.Observation, model.AttributionView) ([]model.Evidence, []model.Coverage)
+}
+
+// WebDetector classifies one already-collected response without fetching it.
+type WebDetector interface {
+	Detect(context.Context, string, string, http.Header, []byte, model.AttributionView) ([]model.Evidence, model.Coverage)
 }
 
 // PrefixReader returns caller-owned local prefix associations.
