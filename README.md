@@ -48,6 +48,40 @@ The command writes JSON to stdout. A shortened report looks like this:
 
 If a lookup fails or a local data file is missing, `status` is `partial` and `coverage` names the affected lookup.
 
+## How it works
+
+```mermaid
+flowchart TB
+	accTitle: Cloudattrib domain analysis
+	accDescr: DNS and HTTP collection produce observations. Local rules and datasets turn those observations into findings. The CLI or API returns the report, and service mode stores it in PostgreSQL.
+
+	input["Domain, hostname, or URL<br/>CLI or HTTP API"] --> plan["Normalize target<br/>Set scope and budgets"]
+	ct[("Local CT index")] -. "seed names" .-> plan
+
+	subgraph collection["Live collection"]
+		dns["DNS records and query results"]
+		http["HTTP and TLS<br/>Headers, redirects, HTML, and peer IPs"]
+		dns -->|"approved public address"| http
+	end
+
+	plan --> dns
+	dns --> observations["Observations"]
+	http --> observations
+
+	subgraph local["Local matching"]
+		classify["Product rules, web fingerprints,<br/>cloud ranges, CDN data, and ASN data"]
+		aggregate["Group matches by<br/>provider, product, and relationship"]
+		classify --> aggregate
+	end
+
+	observations --> classify
+	sources["Local source files"] --> bundle[("Data bundle")]
+	bundle -. "lookup data" .-> classify
+	aggregate --> report["Report<br/>Findings, evidence, and coverage"]
+	report --> output["CLI JSON or HTTP response"]
+	report --> storage[("PostgreSQL<br/>Reports and jobs")]
+```
+
 ## Other commands
 
 ```sh
