@@ -116,7 +116,7 @@ func (f fixtureAnalyzer) Reclassify(_ context.Context, request model.ReclassifyR
 type blockingAnalyzerFactory struct{ started chan<- struct{} }
 
 func (f blockingAnalyzerFactory) AnalyzerForBundle(context.Context, string) (app.Analyzer, error) {
-	return blockingAnalyzer{started: f.started}, nil
+	return blockingAnalyzer(f), nil
 }
 
 type blockingAnalyzer struct{ started chan<- struct{} }

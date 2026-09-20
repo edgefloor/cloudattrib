@@ -12,6 +12,7 @@ import (
 type JobStatus string
 
 const (
+	// JobQueued means no target in the accepted batch has started.
 	JobQueued    JobStatus = "queued"
 	JobRunning   JobStatus = "running"
 	JobCompleted JobStatus = "completed"
@@ -24,6 +25,7 @@ const (
 type TargetStatus string
 
 const (
+	// TargetQueued means the target is admitted and available for a worker claim.
 	TargetQueued    TargetStatus = "queued"
 	TargetRunning   TargetStatus = "running"
 	TargetCompleted TargetStatus = "completed"
