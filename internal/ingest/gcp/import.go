@@ -59,7 +59,8 @@ func Parse(data []byte, revision, digest string) (Result, error) {
 		if w != "" {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("prefixes[%d]: %s", n, w))
 		}
-		result.Associations = append(result.Associations, model.Association{ID: fmt.Sprintf("gcp:%s:%s:%s:%d", entry.Service, entry.Scope, p, n), Prefix: p, ProviderID: "gcp", Service: entry.Service, Region: entry.Scope, Lifecycle: "active", SourceID: "gcp-cloud-ranges", RecordRef: fmt.Sprintf("#/prefixes/%d", n)})
+		recordRef := fmt.Sprintf("#/prefixes/%d", n)
+		result.Associations = append(result.Associations, model.Association{ID: fmt.Sprintf("gcp:%s:%s:%s:%d", entry.Service, entry.Scope, p, n), Prefix: p, ProviderID: "gcp", Service: entry.Service, Region: entry.Scope, Lifecycle: "active", SourceID: "gcp-cloud-ranges", SourceRevision: revision, SourceDigest: digest, RecordRef: recordRef, RecordRefs: []string{recordRef}, ProvenanceGroup: "gcp-official-ranges"})
 	}
 	if len(result.Associations) == 0 {
 		return Result{}, fmt.Errorf("parse GCP ranges: required source contains no prefixes")

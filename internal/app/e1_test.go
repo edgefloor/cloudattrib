@@ -40,14 +40,17 @@ func TestE1DomainAnalysisStartsHTTPBeforeAAAAAndKeepsPartialEvidence(t *testing.
 	dnsClient := fixtureDNSClient{allowAAAA: allowAAAA}
 
 	prefixIndex := prefix.New([]model.Association{{
-		ID:         "fixture-prefix",
-		Prefix:     netip.MustParsePrefix("93.184.216.0/24"),
-		ProviderID: "example-cloud",
-		ProductID:  "example.compute",
-		Service:    "COMPUTE",
-		Lifecycle:  "active",
-		SourceID:   "fixture-ranges",
-		RecordRef:  "fixture-ranges.json#/0",
+		ID:             "fixture-prefix",
+		Prefix:         netip.MustParsePrefix("93.184.216.0/24"),
+		ProviderID:     "example-cloud",
+		ProductID:      "example.compute",
+		Service:        "COMPUTE",
+		Lifecycle:      "active",
+		SourceID:       "fixture-ranges",
+		SourceRevision: "fixture-v1",
+		SourceDigest:   "sha256:fixture",
+		RecordRef:      "fixture-ranges.json#/0",
+		RecordRefs:     []string{"fixture-ranges.json#/0"},
 	}})
 	view := model.NewAttributionView(
 		"fixture-bundle",

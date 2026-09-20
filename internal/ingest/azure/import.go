@@ -57,7 +57,8 @@ func Parse(data []byte, revision, digest string) (Result, error) {
 			if w != "" {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("values[%d] addressPrefixes[%d]: %s", n, pnum, w))
 			}
-			result.Associations = append(result.Associations, model.Association{ID: fmt.Sprintf("azure:%s:%s:%d", item.ID, p, pnum), Prefix: p, ProviderID: "azure", Service: item.Properties.SystemService, Region: item.Properties.Region, Role: item.Properties.Platform, Lifecycle: "active", SourceID: "azure-service-tags", RecordRef: fmt.Sprintf("#/values/%d/properties/addressPrefixes/%d", n, pnum)})
+			recordRef := fmt.Sprintf("#/values/%d/properties/addressPrefixes/%d", n, pnum)
+			result.Associations = append(result.Associations, model.Association{ID: fmt.Sprintf("azure:%s:%s:%d", item.ID, p, pnum), Prefix: p, ProviderID: "azure", Service: item.Properties.SystemService, Region: item.Properties.Region, Role: item.Properties.Platform, Lifecycle: "active", SourceID: "azure-service-tags", SourceRevision: revision, SourceDigest: digest, RecordRef: recordRef, RecordRefs: []string{recordRef}, ProvenanceGroup: "azure-official-service-tags"})
 		}
 	}
 	if len(result.Associations) == 0 {

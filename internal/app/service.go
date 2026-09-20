@@ -270,8 +270,8 @@ func prefixEvidence(subject string, address netip.Addr, association model.Associ
 		ObservationIDs: []string{observationID},
 		DatasetRecords: []model.DatasetRecord{{
 			SourceID:  association.SourceID,
-			Revision:  "fixture-v1",
-			Digest:    "fixture-sha256",
+			Revision:  association.SourceRevision,
+			Digest:    association.SourceDigest,
 			RecordRef: association.RecordRef,
 			Fields:    fields,
 		}},

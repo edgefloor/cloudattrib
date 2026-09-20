@@ -63,8 +63,13 @@ type Association struct {
 	Region          string       `json:"region,omitempty"`
 	Role            string       `json:"role,omitempty"`
 	Lifecycle       string       `json:"lifecycle"`
+	LifecycleTime   string       `json:"lifecycle_time,omitempty"`
 	SourceID        string       `json:"source_id"`
+	SourceRevision  string       `json:"source_revision"`
+	SourceDigest    string       `json:"source_digest"`
 	RecordRef       string       `json:"record_ref"`
+	RecordRefs      []string     `json:"record_refs,omitempty"`
+	CoverageNotes   string       `json:"coverage_notes,omitempty"`
 	ProvenanceGroup string       `json:"provenance_group,omitempty"`
 }
 

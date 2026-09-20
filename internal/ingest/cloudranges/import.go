@@ -96,16 +96,24 @@ func Parse(data []byte, input Input) (Result, error) {
 			seen[key] = id
 			lifecycles[key] = lifecycle
 			result.Associations = append(result.Associations, model.Association{
-				ID:         id,
-				Prefix:     prefix,
-				ProviderID: document.ProviderID,
-				Service:    document.Method,
-				Lifecycle:  lifecycle,
-				SourceID:   "disposable/cloud-ip-ranges",
-				RecordRef:  recordRef,
+				ID:             id,
+				Prefix:         prefix,
+				ProviderID:     document.ProviderID,
+				Service:        document.Method,
+				Lifecycle:      lifecycle,
+				LifecycleTime:  entry.retiredAt,
+				SourceID:       "disposable/cloud-ip-ranges",
+				SourceRevision: input.Revision,
+				SourceDigest:   input.Digest,
+				RecordRef:      recordRef,
+				RecordRefs:     []string{recordRef},
+				CoverageNotes:  document.CoverageNotes,
 			})
 			result.RecordReferences[id] = []string{recordRef}
 		}
+	}
+	for index := range result.Associations {
+		result.Associations[index].RecordRefs = append([]string(nil), result.RecordReferences[result.Associations[index].ID]...)
 	}
 	if len(result.Associations) == 0 {
 		return Result{}, fmt.Errorf("parse cloud ranges %q: required provider source contains no prefixes", input.Path)

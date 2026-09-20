@@ -24,6 +24,7 @@ func New(associations []model.Association) *Index {
 	catalog := make(map[string]model.Association, len(associations))
 	for _, association := range associations {
 		association.Prefix = association.Prefix.Masked()
+		association.RecordRefs = slices.Clone(association.RecordRefs)
 		catalog[association.ID] = association
 		ids, _ := table.Get(association.Prefix)
 		ids = append(slices.Clone(ids), association.ID)
@@ -82,7 +83,9 @@ func (i *Index) LookupPrefixes(ctx context.Context, request model.IPLookupReques
 	})
 	result := make([]model.Association, 0, len(matches))
 	for _, item := range matches {
-		result = append(result, item.association)
+		association := item.association
+		association.RecordRefs = slices.Clone(item.association.RecordRefs)
+		result = append(result, association)
 	}
 	return result, model.Coverage{Capability: "prefix", Status: model.CoverageComplete, Attempted: 1, Completed: 1}, nil
 }

@@ -67,7 +67,8 @@ func Parse(data []byte, revision, digest string) (Result, error) {
 			if warning != "" {
 				result.Warnings = append(result.Warnings, fmt.Sprintf("%s[%d]: %s", list.name, n, warning))
 			}
-			result.Associations = append(result.Associations, model.Association{ID: fmt.Sprintf("aws:%s:%s:%s:%d", entry.Service, entry.Region, p, n), Prefix: p, ProviderID: "aws", Service: entry.Service, Region: entry.Region, Role: entry.NetworkBorderGroup, Lifecycle: "active", SourceID: "aws-ip-ranges", RecordRef: fmt.Sprintf("#/%s/%d", list.name, n)})
+			recordRef := fmt.Sprintf("#/%s/%d", list.name, n)
+			result.Associations = append(result.Associations, model.Association{ID: fmt.Sprintf("aws:%s:%s:%s:%d", entry.Service, entry.Region, p, n), Prefix: p, ProviderID: "aws", Service: entry.Service, Region: entry.Region, Role: entry.NetworkBorderGroup, Lifecycle: "active", SourceID: "aws-ip-ranges", SourceRevision: revision, SourceDigest: digest, RecordRef: recordRef, RecordRefs: []string{recordRef}, ProvenanceGroup: "aws-official-ranges"})
 		}
 	}
 	if len(result.Associations) == 0 {
