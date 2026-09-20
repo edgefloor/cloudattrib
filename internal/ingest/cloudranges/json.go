@@ -9,7 +9,9 @@ import (
 	"unicode/utf8"
 )
 
-const maxJSONBytes = 8 << 20
+// maxJSONBytes accommodates the largest audited provider document while keeping
+// every importer below the repository's 64 MiB artifact boundary.
+const maxJSONBytes = 16 << 20
 
 // DecodeStrict rejects ambiguous JSON before decoding it into destination.
 func DecodeStrict(data []byte, destination any) error {

@@ -1,15 +1,20 @@
 package runtime
 
 import (
+	"context"
 	"io"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"cloudattrib/internal/api"
+	"cloudattrib/internal/app"
 	"cloudattrib/internal/config"
+	"cloudattrib/internal/datasets"
+	"cloudattrib/internal/model"
 )
 
 func TestReadDSNRequiresPrivateSingleLineFile(t *testing.T) {
@@ -54,6 +59,151 @@ func TestResponseBudgetTransportBoundsWireBytes(t *testing.T) {
 	}
 }
 
+func TestCheckedInCTCollectorYAMLLoads(t *testing.T) {
+	t.Parallel()
+
+	configuration, err := loadCTCollectorFile(filepath.Join("..", "..", "config", "ct-logs.example.yaml"))
+	if err != nil {
+		t.Fatalf("loadCTCollectorFile() error = %v", err)
+	}
+	if configuration.Protocol != "rfc6962" || configuration.StartIndex == nil || configuration.Budget.MaximumEntries != 256 {
+		t.Fatalf("collector configuration = %#v", configuration)
+	}
+}
+
+func TestNewAnalyzerLoadsOfflinePrefixAndASNData(t *testing.T) {
+	t.Parallel()
+
+	configuration := config.Default()
+	configuration.Data.SourceDirectory = runtimeFixtureSources(t, "runtime-source")
+	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
+	analyzer, bundleID, _, lookup, err := newAnalyzerDetails(configuration, standaloneReportStore{})
+	if err != nil {
+		t.Fatalf("newAnalyzerDetails() error = %v", err)
+	}
+	result, err := analyzer.LookupIP(context.Background(), model.IPLookupRequest{Address: netip.MustParseAddr("192.0.2.1"), Match: "all"})
+	if err != nil {
+		t.Fatalf("LookupIP() error = %v", err)
+	}
+	if !lookup.complete() || !strings.HasPrefix(bundleID, "bundle-sha256-") || len(result.Associations) == 0 || len(result.ASN) == 0 {
+		t.Fatalf("LookupIP() bundle = %q, result = %#v", bundleID, result)
+	}
+}
+
+func TestNewAnalyzerTreatsMissingASNAsDegradedNotAvailable(t *testing.T) {
+	t.Parallel()
+
+	sources := t.TempDir()
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "upstream", "aws-ip-ranges.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sources, "aws-ip-ranges.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration := config.Default()
+	configuration.Data.SourceDirectory = sources
+	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
+	analyzer, _, _, lookup, err := newAnalyzerDetails(configuration, standaloneReportStore{})
+	if err != nil {
+		t.Fatalf("newAnalyzerDetails() error = %v", err)
+	}
+	if !lookup.usable() || lookup.complete() || !lookup.prefix || lookup.asn {
+		t.Fatalf("lookup availability = %#v", lookup)
+	}
+	result, err := analyzer.LookupIP(context.Background(), model.IPLookupRequest{Address: netip.MustParseAddr("192.0.2.1"), Match: "all"})
+	if err != nil {
+		t.Fatalf("LookupIP() error = %v", err)
+	}
+	if result.Status != model.StatusPartial || len(result.Associations) == 0 || len(result.ASN) != 0 {
+		t.Fatalf("LookupIP() = %#v", result)
+	}
+}
+
+func TestBundleAnalyzerFactoryReloadsDesiredAndRetainsPinnedBundle(t *testing.T) {
+	t.Parallel()
+
+	configuration := config.Default()
+	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
+	configuration.Data.SourceDirectory = filepath.Join(t.TempDir(), "absent")
+	repository, err := datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
+	if err != nil {
+		t.Fatalf("NewRepository() error = %v", err)
+	}
+	first, err := repository.Import(context.Background(), runtimeFixtureSources(t, "runtime-first"))
+	if err != nil {
+		t.Fatalf("Import(first) error = %v", err)
+	}
+	if _, err := repository.Activate(context.Background(), first.CandidateID, first.CandidateHash, "activate"); err != nil {
+		t.Fatalf("Activate(first) error = %v", err)
+	}
+	store := standaloneReportStore{}
+	analyzer, bundleID, _, lookup, err := newAnalyzerDetails(configuration, store)
+	if err != nil {
+		t.Fatalf("newAnalyzerDetails() error = %v", err)
+	}
+	factory := &bundleAnalyzerFactory{
+		configuration:  configuration,
+		store:          store,
+		active:         analyzer,
+		activeBundleID: bundleID,
+		activeLookup:   lookup,
+		analyzers:      map[string]app.Analyzer{bundleID: analyzer},
+		lookup:         map[string]lookupAvailability{bundleID: lookup},
+	}
+	second, err := repository.Import(context.Background(), runtimeFixtureSources(t, "runtime-second"))
+	if err != nil {
+		t.Fatalf("Import(second) error = %v", err)
+	}
+	if _, err := repository.Activate(context.Background(), second.CandidateID, second.CandidateHash, "activate"); err != nil {
+		t.Fatalf("Activate(second) error = %v", err)
+	}
+	if err := factory.reloadDesired(); err != nil {
+		t.Fatalf("reloadDesired() error = %v", err)
+	}
+	if factory.activeBundleID != second.CandidateID {
+		t.Fatalf("active bundle = %q, want %q", factory.activeBundleID, second.CandidateID)
+	}
+	if !factory.localLookupAvailability().complete() {
+		t.Fatal("local lookup is not ready after loading an attributed bundle")
+	}
+	if _, err := factory.AnalyzerForBundle(context.Background(), first.CandidateID); err != nil {
+		t.Fatalf("AnalyzerForBundle(first) error = %v", err)
+	}
+}
+
+func TestServiceReadinessReportsMissingLocalLookupData(t *testing.T) {
+	t.Parallel()
+
+	snapshot := serviceReadinessSnapshot(true, lookupAvailability{})
+	states := make(map[string]api.OperationReadiness, len(snapshot.Operations))
+	for _, operation := range snapshot.Operations {
+		states[operation.Name] = operation
+	}
+	if snapshot.State != api.ReadinessDegraded || states["analyze"].State != api.ReadinessDegraded || states["lookup_ip"].State != api.ReadinessUnavailable {
+		t.Fatalf("readiness = %#v", snapshot)
+	}
+	if len(states["analyze"].Capabilities) != 2 || len(states["lookup_ip"].Capabilities) != 2 {
+		t.Fatalf("lookup capabilities = %#v", states["lookup_ip"].Capabilities)
+	}
+}
+
+func TestServiceReadinessReportsPartialLocalLookupData(t *testing.T) {
+	t.Parallel()
+
+	snapshot := serviceReadinessSnapshot(true, lookupAvailability{prefix: true})
+	states := make(map[string]api.OperationReadiness, len(snapshot.Operations))
+	for _, operation := range snapshot.Operations {
+		states[operation.Name] = operation
+	}
+	if snapshot.State != api.ReadinessDegraded || states["analyze"].State != api.ReadinessDegraded || states["lookup_ip"].State != api.ReadinessDegraded {
+		t.Fatalf("readiness = %#v", snapshot)
+	}
+	if states["lookup_ip"].Capabilities[0].Status != model.CoverageComplete || states["lookup_ip"].Capabilities[1].Status != model.CoverageUnavailable {
+		t.Fatalf("lookup capabilities = %#v", states["lookup_ip"].Capabilities)
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -73,4 +223,30 @@ func TestServiceAuthenticationParsesTrustedProxyRanges(t *testing.T) {
 	if authentication.Mode != api.AuthTrustedProxy || len(authentication.TrustedProxyCIDRs) != 1 || authentication.TrustedProxyCIDRs[0].String() != "192.0.2.0/24" {
 		t.Fatalf("authentication = %#v", authentication)
 	}
+}
+
+func runtimeFixtureSources(t *testing.T, syncToken string) string {
+	t.Helper()
+	directory := t.TempDir()
+	fixtures := map[string]string{
+		"aws-ip-ranges.json":         "../../testdata/upstream/aws-ip-ranges.json",
+		"gcp-cloud.json":             "../../testdata/upstream/gcp-cloud.json",
+		"azure-service-tags.json":    "../../testdata/upstream/azure-service-tags.json",
+		"cdncheck-sources-data.json": "../../testdata/upstream/cdncheck-sources-data.json",
+		"iptoasn-v4.tsv":             "../../testdata/upstream/iptoasn-v4.tsv",
+		"iptoasn-v6.tsv":             "../../testdata/upstream/iptoasn-v6.tsv",
+	}
+	for target, source := range fixtures {
+		data, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatalf("read fixture %s: %v", source, err)
+		}
+		if target == "aws-ip-ranges.json" {
+			data = []byte(strings.Replace(string(data), "fixture-1", syncToken, 1))
+		}
+		if err := os.WriteFile(filepath.Join(directory, target), data, 0o600); err != nil {
+			t.Fatalf("write fixture %s: %v", target, err)
+		}
+	}
+	return directory
 }

@@ -17,6 +17,7 @@ import (
 // ClientConfig configures one explicit recursive resolver.
 type ClientConfig struct {
 	Resolver string
+	Network  string
 	Timeout  time.Duration
 	Attempts int
 }
@@ -24,6 +25,7 @@ type ClientConfig struct {
 // Client is a raw-record adapter around the pinned DNS library.
 type Client struct {
 	resolver string
+	network  string
 	timeout  time.Duration
 	attempts int
 	now      func() time.Time
@@ -37,7 +39,14 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if config.Timeout <= 0 || config.Attempts <= 0 {
 		return nil, fmt.Errorf("DNS timeout and attempts must be positive")
 	}
-	return &Client{resolver: config.Resolver, timeout: config.Timeout, attempts: config.Attempts, now: time.Now}, nil
+	network := config.Network
+	if network == "" {
+		network = "udp"
+	}
+	if network != "udp" && network != "tcp" {
+		return nil, fmt.Errorf("DNS network must be udp or tcp")
+	}
+	return &Client{resolver: config.Resolver, network: network, timeout: config.Timeout, attempts: config.Attempts, now: time.Now}, nil
 }
 
 // Query sends one raw question to the configured resolver only.
@@ -57,6 +66,11 @@ func (c *Client) Query(ctx context.Context, question model.DNSQuestion) (model.D
 }
 
 func (c *Client) exchange(ctx context.Context, message *mdns.Msg) (*mdns.Msg, string, error) {
+	if c.network == "tcp" {
+		tcp := &mdns.Client{Net: "tcp", Timeout: c.timeout}
+		response, _, err := tcp.ExchangeContext(ctx, message, c.resolver)
+		return response, "tcp", err
+	}
 	udp := &mdns.Client{Net: "udp", Timeout: c.timeout}
 	response, _, err := udp.ExchangeContext(ctx, message, c.resolver)
 	if err != nil {

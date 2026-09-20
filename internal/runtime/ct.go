@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"io"
@@ -16,32 +15,33 @@ import (
 	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/store/postgres"
+	"go.yaml.in/yaml/v3"
 )
 
 const maximumCTConfigBytes = 1 << 20
 
 type ctCollectorFile struct {
-	Protocol      string   `json:"protocol"`
-	LogID         string   `json:"log_id"`
-	URL           string   `json:"url"`
-	PublicKeyFile string   `json:"public_key_file"`
-	SourceID      string   `json:"source_id"`
-	Roots         []string `json:"roots"`
-	StartIndex    *uint64  `json:"start_index,omitempty"`
+	Protocol      string   `json:"protocol" yaml:"protocol"`
+	LogID         string   `json:"log_id" yaml:"log_id"`
+	URL           string   `json:"url" yaml:"url"`
+	PublicKeyFile string   `json:"public_key_file" yaml:"public_key_file"`
+	SourceID      string   `json:"source_id" yaml:"source_id"`
+	Roots         []string `json:"roots" yaml:"roots"`
+	StartIndex    *uint64  `json:"start_index,omitempty" yaml:"start_index,omitempty"`
 	Checkpoint    *struct {
-		NextIndex     uint64 `json:"next_index"`
-		TreeSize      uint64 `json:"tree_size"`
-		RootHash      string `json:"root_hash"`
-		TreeTimestamp string `json:"tree_timestamp"`
-	} `json:"trusted_checkpoint,omitempty"`
+		NextIndex     uint64 `json:"next_index" yaml:"next_index"`
+		TreeSize      uint64 `json:"tree_size" yaml:"tree_size"`
+		RootHash      string `json:"root_hash" yaml:"root_hash"`
+		TreeTimestamp string `json:"tree_timestamp" yaml:"tree_timestamp"`
+	} `json:"trusted_checkpoint,omitempty" yaml:"trusted_checkpoint,omitempty"`
 	Budget struct {
-		MaximumEntries  int   `json:"maximum_entries"`
-		BatchSize       int   `json:"batch_size"`
-		MaximumProofs   int   `json:"maximum_proofs"`
-		MaximumRequests int   `json:"maximum_requests"`
-		MaximumBytes    int64 `json:"maximum_bytes"`
-		MaximumSeconds  int   `json:"maximum_seconds"`
-	} `json:"budget"`
+		MaximumEntries  int   `json:"maximum_entries" yaml:"maximum_entries"`
+		BatchSize       int   `json:"batch_size" yaml:"batch_size"`
+		MaximumProofs   int   `json:"maximum_proofs" yaml:"maximum_proofs"`
+		MaximumRequests int   `json:"maximum_requests" yaml:"maximum_requests"`
+		MaximumBytes    int64 `json:"maximum_bytes" yaml:"maximum_bytes"`
+		MaximumSeconds  int   `json:"maximum_seconds" yaml:"maximum_seconds"`
+	} `json:"budget" yaml:"budget"`
 }
 
 // ImportCT imports operator-controlled JSONL into the durable local CT index.
@@ -56,20 +56,9 @@ func ImportCT(ctx context.Context, configuration config.Config, reader io.Reader
 
 // CollectCT runs one explicitly bounded collection against one configured RFC 6962 log.
 func CollectCT(ctx context.Context, configuration config.Config, path string) (ctlog.Metrics, error) {
-	file, err := os.Open(path)
+	supplied, err := loadCTCollectorFile(path)
 	if err != nil {
-		return ctlog.Metrics{}, model.NewError(model.CodeInvalidSyntax, "open CT collector configuration", err)
-	}
-	defer func() { _ = file.Close() }()
-	decoder := json.NewDecoder(io.LimitReader(file, maximumCTConfigBytes+1))
-	decoder.DisallowUnknownFields()
-	var supplied ctCollectorFile
-	if err := decoder.Decode(&supplied); err != nil {
-		return ctlog.Metrics{}, model.NewError(model.CodeInvalidSyntax, "decode CT collector configuration", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
-		return ctlog.Metrics{}, model.NewError(model.CodeInvalidSyntax, "CT collector configuration contains trailing data", err)
+		return ctlog.Metrics{}, err
 	}
 	if supplied.StartIndex == nil && supplied.Checkpoint == nil {
 		return ctlog.Metrics{}, model.NewError(model.CodeInvalidOptions, "CT collector requires start_index or trusted_checkpoint", nil)
@@ -144,6 +133,29 @@ func CollectCT(ctx context.Context, configuration config.Config, path string) (c
 		return metrics, model.NewError(model.CodeCollectionFailed, "collect CT log", err)
 	}
 	return metrics, nil
+}
+
+func loadCTCollectorFile(path string) (ctCollectorFile, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return ctCollectorFile{}, model.NewError(model.CodeInvalidSyntax, "open CT collector configuration", err)
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > maximumCTConfigBytes {
+		return ctCollectorFile{}, model.NewError(model.CodeInvalidSyntax, "CT collector configuration must be a non-empty regular file no larger than 1 MiB", err)
+	}
+	decoder := yaml.NewDecoder(io.LimitReader(file, maximumCTConfigBytes+1))
+	decoder.KnownFields(true)
+	var supplied ctCollectorFile
+	if err := decoder.Decode(&supplied); err != nil {
+		return ctCollectorFile{}, model.NewError(model.CodeInvalidSyntax, "decode CT collector configuration", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return ctCollectorFile{}, model.NewError(model.CodeInvalidSyntax, "CT collector configuration contains trailing data", err)
+	}
+	return supplied, nil
 }
 
 type responseBudgetTransport struct {

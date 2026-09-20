@@ -24,7 +24,7 @@ type Interval struct {
 	Revision, Digest         string
 }
 
-// ParseV4 parses the unsigned-integer IPv4 TSV form.
+// ParseV4 parses the current textual or archived unsigned-integer IPv4 TSV forms.
 func ParseV4(data []byte, metadata Metadata) ([]Interval, error) { return parse(data, true, metadata) }
 
 // ParseV6 parses the textual IPv6 TSV form.
@@ -88,6 +88,16 @@ func sourceID(v4 bool) string {
 }
 func parseAddress(raw string, v4 bool) (netip.Addr, error) {
 	if v4 {
+		if strings.Contains(raw, ".") {
+			address, err := netip.ParseAddr(raw)
+			if err != nil {
+				return netip.Addr{}, err
+			}
+			if !address.Is4() {
+				return netip.Addr{}, fmt.Errorf("expected IPv4 address")
+			}
+			return address, nil
+		}
 		n, e := strconv.ParseUint(raw, 10, 32)
 		if e != nil {
 			return netip.Addr{}, e

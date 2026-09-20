@@ -1,0 +1,40 @@
+api:
+  listen_address: 0.0.0.0:8080
+  authentication_enabled: true
+  authentication_mode: bearer
+  credentials_file: /run/secrets/api-credentials
+resolver:
+  address: unbound:53
+  network: udp
+data:
+  bundle_directory: /var/lib/cloudattrib/bundles
+  source_directory: /var/lib/cloudattrib/sources
+limits:
+  target:
+    target_deadline: 1m
+    dns_query_timeout: 3s
+    dns_attempts: 2
+    dns_questions: 512
+    cname_chain_depth: 16
+    http_request_timeout: 10s
+    http_requests: 64
+    http_response_headers: 65536
+    http_document_bytes: 2097152
+    http_total_body_bytes: 16777216
+    redirects: 5
+    seed_hostnames: 32
+    resolved_addresses: 128
+    prefix_associations: 1024
+  concurrent_targets: 32
+  concurrent_http: 32
+  concurrent_dns: 128
+  maximum_request_bytes: 1048576
+  maximum_batch_targets: 1000
+  maximum_backlog_targets: 10000
+ct:
+  enabled: false
+  maximum_seed_names: 20
+storage:
+  postgres_dsn_file: /run/secrets/postgres-dsn
+  lease_duration: 30s
+  maximum_attempts: 3

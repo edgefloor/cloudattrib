@@ -2,7 +2,9 @@ package http
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"net"
 	stdhttp "net/http"
 	"net/http/httptest"
@@ -166,6 +168,34 @@ func TestRedirectToOnlyProhibitedAddressesIsNotDialed(t *testing.T) {
 	}
 	if result.Coverage.Status != model.CoveragePartial || result.Coverage.Omitted != 1 {
 		t.Fatalf("coverage = %#v", result.Coverage)
+	}
+}
+
+func TestHTTPSUsesTargetHostnameForSNIWhenDialingApprovedAddress(t *testing.T) {
+	t.Parallel()
+
+	clientConnection, serverConnection := net.Pipe()
+	serverName := make(chan string, 1)
+	go func() {
+		defer func() { _ = serverConnection.Close() }()
+		server := tls.Server(serverConnection, &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+				serverName <- hello.ServerName
+				return nil, errors.New("fixture stops after client hello")
+			},
+		})
+		_ = server.Handshake()
+	}()
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := New(func(context.Context, string, netip.Addr, uint16) (net.Conn, error) {
+		return clientConnection, nil
+	}, policy.PublicDestinationPolicy(), 2<<20)
+	if _, err := collector.Collect(context.Background(), "https", "example.com", address); err == nil {
+		t.Fatal("Collect() succeeded despite fixture handshake stop")
+	}
+	if got := <-serverName; got != "example.com" {
+		t.Fatalf("TLS server name = %q, want example.com", got)
 	}
 }
 

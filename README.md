@@ -27,6 +27,9 @@ cloudattrib lookup-ip 198.51.100.7 --match all
 cloudattrib reclassify --report report.json --bundle builtin-rules-v1
 cloudattrib ct import --input ct-records.jsonl --scope example.com
 cloudattrib ct collect --config ct-log.json
+cloudattrib serve --config config/example.yaml
+cloudattrib datasets import --config config/example.yaml --source-dir data/sources
+cloudattrib datasets status --config config/example.yaml
 ```
 
 The built-in execution view supports DNS, bounded HTTP, reviewed product rules, passive web
@@ -36,9 +39,19 @@ require an activated dataset bundle; without one, `lookup-ip` returns
 original observations and collection coverage while recording a new classification time and
 bundle identity.
 
+Set `CLOUDATTRIB_CONFIG` to load one strict YAML or JSON configuration for all CLI operations.
+Command-specific `--config` flags on `serve` and `datasets` override the path for that operation.
+
 Certificate Transparency support is optional and disabled by default. It uses a local PostgreSQL
 index and never performs request-time CT searches. See [CT operations](docs/ct-operations.md) for
 the import schema, pinned-log collector, verification boundary, and measured operating envelope.
+
+The [operations guide](docs/operations.md) covers the pinned Compose and systemd deployments,
+dataset staging/activation/rollback, monitoring, backup/restore, network separation, and offline
+build/update procedures. Third-party identities and unresolved data-redistribution questions are
+recorded in [the SBOM](sbom/cloudattrib.cdx.json), [notices](NOTICE.md), and
+[dependency audit](docs/dependency-audit.md). Measured compatibility, latency, release checks, and
+R01–R23 evidence are recorded in the [qualification report](docs/qualification.md).
 
 ## Agent skills
 

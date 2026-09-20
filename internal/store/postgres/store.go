@@ -21,6 +21,7 @@ import (
 	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/observability"
 )
 
 const lifecycleLockID int64 = 174120260921
@@ -59,6 +60,48 @@ func Open(ctx context.Context, connectionString string, maximumTargets int) (*St
 
 // Close closes the connection pool.
 func (s *Store) Close() { s.pool.Close() }
+
+// Ping verifies that durable operations can reach PostgreSQL.
+func (s *Store) Ping(ctx context.Context) error {
+	if err := s.pool.Ping(ctx); err != nil {
+		return persistence("ping PostgreSQL", err)
+	}
+	return nil
+}
+
+// OperationalMetrics reads bounded queue, pin, bundle, and CT gauges.
+func (s *Store) OperationalMetrics(ctx context.Context) (observability.Snapshot, error) {
+	var snapshot observability.Snapshot
+	err := s.pool.QueryRow(ctx, `WITH active AS (
+		SELECT manifest FROM dataset_bundles WHERE bundle_id=(SELECT bundle_id FROM bundle_activations ORDER BY activation_order DESC LIMIT 1)
+	) SELECT
+		reserved_targets,
+		maximum_targets,
+		(SELECT count(*) FROM job_targets WHERE status='queued'),
+		(SELECT count(*) FROM job_targets WHERE status='running'),
+		(SELECT count(*) FROM bundle_pins),
+		(SELECT count(*) FROM ct_checkpoints),
+		COALESCE((SELECT GREATEST(EXTRACT(EPOCH FROM clock_timestamp()-max(tree_timestamp)),0) FROM ct_checkpoints WHERE tree_timestamp IS NOT NULL),0),
+		COALESCE((SELECT count(*) FROM active, jsonb_array_elements(COALESCE(manifest->'sources','[]'::jsonb)) source WHERE source->>'status'<>'complete'),0),
+		COALESCE((SELECT GREATEST(EXTRACT(EPOCH FROM clock_timestamp()-min((source->>'published_at')::timestamptz)),0) FROM active, jsonb_array_elements(COALESCE(manifest->'sources','[]'::jsonb)) source WHERE source ? 'published_at'),0),
+		COALESCE((SELECT bundle_id FROM bundle_activations ORDER BY activation_order DESC LIMIT 1),'')
+	FROM queue_capacity WHERE singleton=true`).Scan(
+		&snapshot.ReservedTargets,
+		&snapshot.MaximumTargets,
+		&snapshot.QueuedTargets,
+		&snapshot.RunningTargets,
+		&snapshot.BundlePins,
+		&snapshot.CTCheckpoints,
+		&snapshot.CTIngestionLagSeconds,
+		&snapshot.UnavailableSources,
+		&snapshot.OldestSourceAgeSeconds,
+		&snapshot.ActiveBundleID,
+	)
+	if err != nil {
+		return observability.Snapshot{}, persistence("read operational metrics", err)
+	}
+	return snapshot, nil
+}
 
 // RegisterBundle records a validated local bundle before jobs may pin it.
 func (s *Store) RegisterBundle(ctx context.Context, bundleID string, manifest []byte, compatible bool) error {

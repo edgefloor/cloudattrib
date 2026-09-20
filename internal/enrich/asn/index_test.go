@@ -2,12 +2,33 @@ package asn
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"testing"
 
 	"cloudattrib/internal/ingest/iptoasn"
 	"cloudattrib/internal/model"
 )
+
+func BenchmarkLookupASN(b *testing.B) {
+	intervals := make([]iptoasn.Interval, 0, 4096)
+	for index := 0; index < 4096; index++ {
+		prefix := netip.MustParsePrefix(fmt.Sprintf("10.%d.%d.0/24", index/256, index%256))
+		intervals = append(intervals, iptoasn.Interval{Start: prefix.Addr(), End: netip.MustParseAddr(fmt.Sprintf("10.%d.%d.255", index/256, index%256)), ASN: uint32(64512 + index), SourceID: "fixture"})
+	}
+	index, err := New(intervals)
+	if err != nil {
+		b.Fatal(err)
+	}
+	address := netip.MustParseAddr("10.15.255.7")
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, _, err := index.LookupASN(context.Background(), address, model.AttributionView{}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
 
 func TestIndexFindsEndpointsAndLeavesGapUnmatched(t *testing.T) {
 	index, err := New([]iptoasn.Interval{{Start: netip.MustParseAddr("192.0.2.0"), End: netip.MustParseAddr("192.0.2.1"), ASN: 64512, SourceID: "fixture", RecordRef: "1"}})

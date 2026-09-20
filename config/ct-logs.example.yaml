@@ -1,8 +1,15 @@
-logs: []
-budgets:
+protocol: rfc6962
+log_id: sha256:replace-with-the-pinned-key-identity
+url: https://ct.example.test
+public_key_file: /etc/cloudattrib/secrets/ct-log-public-key.pem
+source_id: example-log
+roots:
+  - example.com
+start_index: 125000000
+budget:
   maximum_entries: 256
-  maximum_response_bytes: 8388608
+  batch_size: 64
+  maximum_proofs: 16
   maximum_requests: 24
-  maximum_elapsed: 1m
-  request_timeout: 10s
-  concurrency: 1
+  maximum_bytes: 8388608
+  maximum_seconds: 60

@@ -58,6 +58,39 @@ func TestClientUsesConfiguredResolverAndRetriesTruncatedUDPOverTCP(t *testing.T)
 	}
 }
 
+func TestClientCanUseConfiguredTCPWithoutUDP(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen TCP: %v", err)
+	}
+	server := &mdns.Server{Listener: listener, Handler: mdns.HandlerFunc(func(writer mdns.ResponseWriter, request *mdns.Msg) {
+		response := new(mdns.Msg)
+		response.SetReply(request)
+		response.Answer = []mdns.RR{&mdns.A{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeA, Class: mdns.ClassINET, Ttl: 60}, A: net.ParseIP("93.184.216.34")}}
+		if writeErr := writer.WriteMsg(response); writeErr != nil {
+			t.Errorf("WriteMsg() error = %v", writeErr)
+		}
+	})}
+	go func() { _ = server.ActivateAndServe() }()
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = server.ShutdownContext(shutdownCtx)
+	})
+
+	client, err := NewClient(ClientConfig{Resolver: listener.Addr().String(), Network: "tcp", Timeout: time.Second, Attempts: 1})
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	result, err := client.Query(context.Background(), model.DNSQuestion{Name: "example.com", Type: mdns.TypeA})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if result.Transport != "tcp" || len(result.Addresses) != 1 {
+		t.Fatalf("Query() result = %#v", result)
+	}
+}
+
 func TestDNSPayloadJoinsTXTChunksWithinOneRecord(t *testing.T) {
 	t.Parallel()
 

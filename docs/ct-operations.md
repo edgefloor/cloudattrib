@@ -30,7 +30,7 @@ Imported records always become `provenance=imported_unverified`; claimed verific
 
 The collector supports only the RFC 6962 HTTP read API. It uses `github.com/google/certificate-transparency-go` v1.3.3 with an application-owned HTTP client, an explicit timeout, and a pinned DER or single `PUBLIC KEY` PEM file. HTTPS is required. Unsupported protocols fail before collection.
 
-The configuration is strict JSON:
+The configuration is strict YAML or JSON:
 
 ```json
 {

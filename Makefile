@@ -5,7 +5,7 @@ GOLANGCI_LINT_VERSION := v2.10.1
 GOLANGCI_LINT := $(TOOLS_BIN)/$(GOLANGCI_LINT_VERSION)/golangci-lint
 
 .DEFAULT_GOAL := build
-.PHONY: build run fmt fmt-check vet test race lint-install lint skills-check verify check clean
+.PHONY: build run fmt fmt-check vet test race lint-install lint skills-check sbom-check verify check clean
 
 build:
 	mkdir -p "$(BIN_DIR)"
@@ -42,7 +42,10 @@ lint: $(GOLANGCI_LINT)
 skills-check:
 	python3 -B scripts/verify-skills.py
 
-verify: fmt-check vet test lint skills-check
+sbom-check:
+	python3 -B scripts/verify-sbom.py
+
+verify: fmt-check vet test lint skills-check sbom-check
 
 check: verify race build
 

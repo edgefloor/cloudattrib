@@ -1,0 +1,16 @@
+[Unit]
+Description=Validate and stage cloudattrib local source data
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=cloudattrib-update
+Group=cloudattrib
+ExecStart=/usr/local/bin/cloudattrib datasets sync --config /etc/cloudattrib/config.yaml
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/lib/cloudattrib/sources
+ReadWritePaths=/var/lib/cloudattrib/bundles

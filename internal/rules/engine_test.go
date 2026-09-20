@@ -8,6 +8,25 @@ import (
 	"cloudattrib/internal/model"
 )
 
+func BenchmarkDefaultRulesDetect(b *testing.B) {
+	engine, err := Default()
+	if err != nil {
+		b.Fatal(err)
+	}
+	observations := []model.Observation{
+		dnsObservation("CNAME", "d111111abcdef8.cloudfront.net", model.ScopeRoot),
+		dnsObservation("NS", "ada.ns.cloudflare.com", model.ScopeRoot),
+		dnsObservation("MX", "1 aspmx.l.google.com", model.ScopeRoot),
+		dnsObservation("TXT", "v=spf1 include:_spf.google.com ~all", model.ScopeRoot),
+		httpObservation(nil, []string{"https://cdn.segment.com/analytics.js/v1/key/analytics.min.js"}, model.ScopeRoot),
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		engine.Detect(context.Background(), observations, model.AttributionView{})
+	}
+}
+
 func TestDefaultRulesCoverProductRelationshipMatrix(t *testing.T) {
 	t.Parallel()
 
@@ -86,6 +105,39 @@ func TestDefaultRulesRejectUnsupportedConclusions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDefaultRulesKeepMultiVendorRelationshipsSeparate(t *testing.T) {
+	t.Parallel()
+
+	engine, err := Default()
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+	observations := []model.Observation{
+		dnsObservation("NS", "ada.ns.cloudflare.com", model.ScopeRoot),
+		dnsObservation("CNAME", "d111111abcdef8.cloudfront.net", model.ScopeRoot),
+		dnsObservation("MX", "1 aspmx.l.google.com", model.ScopeRoot),
+		httpObservation(nil, []string{"https://cdn.segment.com/analytics.js/v1/key/analytics.min.js"}, model.ScopeRoot),
+	}
+	evidence, coverage := engine.Detect(context.Background(), observations, model.AttributionView{})
+	if coverage[0].Status != model.CoverageComplete {
+		t.Fatalf("coverage = %#v", coverage)
+	}
+	for _, expected := range []struct {
+		provider string
+		product  string
+		relation model.Relation
+	}{
+		{"cloudflare", "cloudflare.dns", model.RelationAuthoritativeDNS},
+		{"aws", "aws.cloudfront", model.RelationWebDelivery},
+		{"google", "google.workspace-mail", model.RelationMailRouting},
+		{"segment", "segment.analytics", model.RelationWebIntegration},
+	} {
+		if !hasEvidence(evidence, expected.provider, expected.product, expected.relation) {
+			t.Fatalf("evidence = %#v, missing %#v", evidence, expected)
+		}
 	}
 }
 

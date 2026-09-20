@@ -7,17 +7,20 @@ import (
 	"slices"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"cloudattrib/internal/model"
 )
 
 // Source records one normalized source included in a bundle.
 type Source struct {
-	ID       string               `json:"id"`
-	Revision string               `json:"revision"`
-	Digest   string               `json:"digest"`
-	Status   model.CoverageStatus `json:"status"`
-	Reason   string               `json:"reason,omitempty"`
+	ID          string               `json:"id"`
+	Revision    string               `json:"revision"`
+	Digest      string               `json:"digest"`
+	Status      model.CoverageStatus `json:"status"`
+	Reason      string               `json:"reason,omitempty"`
+	Records     int                  `json:"records"`
+	PublishedAt *time.Time           `json:"published_at,omitempty"`
 }
 
 // Artifact records one canonical bundle file.
@@ -192,8 +195,14 @@ func validateCandidate(candidate Candidate, buildID string) error {
 		return fmt.Errorf("bundle manifest is incomplete")
 	}
 	for _, source := range manifest.Sources {
-		if source.ID == "" || source.Revision == "" || source.Digest == "" || source.Status == "" {
+		if source.ID == "" || source.Status == "" {
 			return fmt.Errorf("bundle source record is incomplete")
+		}
+		if source.Status == model.CoverageComplete && (source.Revision == "" || source.Digest == "") {
+			return fmt.Errorf("complete bundle source record is incomplete")
+		}
+		if source.Status == model.CoverageUnavailable && source.Reason == "" {
+			return fmt.Errorf("unavailable bundle source requires a reason")
 		}
 	}
 	for _, artifact := range manifest.Artifacts {

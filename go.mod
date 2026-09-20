@@ -9,6 +9,7 @@ require (
 	github.com/miekg/dns v1.1.73
 	github.com/projectdiscovery/wappalyzergo v0.3.2
 	github.com/transparency-dev/merkle v0.0.2
+	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/net v0.58.0
 )
 

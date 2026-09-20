@@ -14,6 +14,7 @@ import (
 
 	"cloudattrib/internal/app"
 	"cloudattrib/internal/ctlog"
+	"cloudattrib/internal/datasets"
 	"cloudattrib/internal/model"
 )
 
@@ -21,13 +22,18 @@ const maxJSONLRows = 1000
 
 // Dependencies supplies application behavior and testable command streams.
 type Dependencies struct {
-	Analyzer  app.Analyzer
-	Serve     func(context.Context) error
-	CTImport  func(context.Context, io.Reader, []string) (int, error)
-	CTCollect func(context.Context, string) (ctlog.Metrics, error)
-	Stdin     io.Reader
-	Stdout    io.Writer
-	Stderr    io.Writer
+	Analyzer        app.Analyzer
+	Serve           func(context.Context, string) error
+	CTImport        func(context.Context, io.Reader, []string) (int, error)
+	CTCollect       func(context.Context, string) (ctlog.Metrics, error)
+	DatasetImport   func(context.Context, string, string) (datasets.ValidationReport, error)
+	DatasetValidate func(context.Context, string, string) (datasets.ValidationReport, error)
+	DatasetActivate func(context.Context, string, string, string, string) (datasets.Activation, error)
+	DatasetStatus   func(context.Context, string) (datasets.RepositoryStatus, error)
+	DatasetPrune    func(context.Context, string, string) (bool, error)
+	Stdin           io.Reader
+	Stdout          io.Writer
+	Stderr          io.Writer
 }
 
 // Run executes a command and returns its process exit status.
@@ -46,20 +52,121 @@ func Run(ctx context.Context, args []string, dependencies Dependencies) int {
 	case "reclassify":
 		return runReclassify(ctx, args[1:], dependencies, streams)
 	case "serve":
-		if len(args) != 1 {
-			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "serve does not accept positional arguments", nil))
+		flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		configuration := flags.String("config", "", "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "serve accepts only --config", err))
 		}
 		if dependencies.Serve == nil {
 			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "service wiring is unavailable", nil))
 		}
-		if err := dependencies.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
+		if err := dependencies.Serve(ctx, *configuration); err != nil && !errors.Is(err, context.Canceled) {
 			return diagnostic(streams.stderr, model.NewError(model.CodePersistenceUnavailable, "service stopped", err))
 		}
 		return 0
 	case "ct":
 		return runCT(ctx, args[1:], dependencies, streams)
+	case "datasets":
+		return runDatasets(ctx, args[1:], dependencies, streams)
 	default:
 		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, fmt.Sprintf("unknown subcommand %q", args[0]), nil))
+	}
+}
+
+func runDatasets(ctx context.Context, args []string, dependencies Dependencies, streams commandStreams) int {
+	if len(args) == 0 {
+		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "datasets requires an operation", nil))
+	}
+	switch args[0] {
+	case "sync", "import":
+		flags := flag.NewFlagSet("datasets "+args[0], flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		configuration := flags.String("config", "", "")
+		sourceDirectory := flags.String("source-dir", "", "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || args[0] == "import" && *sourceDirectory == "" {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "datasets import requires --source-dir; --config is optional", err))
+		}
+		if dependencies.DatasetImport == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "dataset import wiring is unavailable", nil))
+		}
+		report, err := dependencies.DatasetImport(ctx, *configuration, *sourceDirectory)
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		return writeCommandJSON(streams, report)
+	case "validate":
+		flags := flag.NewFlagSet("datasets validate", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		configuration := flags.String("config", "", "")
+		candidate := flags.String("candidate", "", "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *candidate == "" {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "datasets validate requires --candidate", err))
+		}
+		if dependencies.DatasetValidate == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "dataset validation wiring is unavailable", nil))
+		}
+		report, err := dependencies.DatasetValidate(ctx, *configuration, *candidate)
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		return writeCommandJSON(streams, report)
+	case "activate", "rollback":
+		flags := flag.NewFlagSet("datasets "+args[0], flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		configuration := flags.String("config", "", "")
+		candidate := flags.String("candidate", "", "")
+		bundle := flags.String("bundle", "", "")
+		approvalHash := flags.String("approval-hash", "", "")
+		if args[0] == "rollback" {
+			candidate = bundle
+		}
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *candidate == "" || *approvalHash == "" {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "dataset activation requires a candidate or bundle and --approval-hash", err))
+		}
+		if dependencies.DatasetActivate == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "dataset activation wiring is unavailable", nil))
+		}
+		activation, err := dependencies.DatasetActivate(ctx, *configuration, *candidate, *approvalHash, args[0])
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		return writeCommandJSON(streams, activation)
+	case "status":
+		flags := flag.NewFlagSet("datasets status", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		configuration := flags.String("config", "", "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "datasets status accepts only --config", err))
+		}
+		if dependencies.DatasetStatus == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "dataset status wiring is unavailable", nil))
+		}
+		status, err := dependencies.DatasetStatus(ctx, *configuration)
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		return writeCommandJSON(streams, status)
+	case "prune":
+		flags := flag.NewFlagSet("datasets prune", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		configuration := flags.String("config", "", "")
+		candidate := flags.String("candidate", "", "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *candidate == "" {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "datasets prune requires --candidate", err))
+		}
+		if dependencies.DatasetPrune == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "dataset pruning wiring is unavailable", nil))
+		}
+		removed, err := dependencies.DatasetPrune(ctx, *configuration, *candidate)
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		return writeCommandJSON(streams, struct {
+			Removed bool `json:"removed"`
+		}{Removed: removed})
+	default:
+		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, fmt.Sprintf("unknown datasets operation %q", args[0]), nil))
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"cloudattrib/internal/app"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/observability"
 	"cloudattrib/internal/rules"
 )
 
@@ -33,6 +34,7 @@ type Config struct {
 	Results             app.ResultStore
 	Findings            app.FindingStore
 	Readiness           ReadinessProvider
+	Metrics             observability.Provider
 	Authentication      Authentication
 	MaximumRequestBytes int64
 }
@@ -91,6 +93,7 @@ func NewHandler(config Config) (http.Handler, error) {
 		results:      config.Results,
 		findings:     config.Findings,
 		readiness:    config.Readiness,
+		metrics:      config.Metrics,
 		authenticate: authenticator,
 		maxBytes:     maxBytes,
 		providers:    providers,
@@ -99,16 +102,18 @@ func NewHandler(config Config) (http.Handler, error) {
 }
 
 type server struct {
-	analyzer     app.Analyzer
-	jobs         jobs.Store
-	results      app.ResultStore
-	findings     app.FindingStore
-	readiness    ReadinessProvider
-	authenticate func(*http.Request) (string, bool)
-	maxBytes     int64
-	providers    []rules.Provider
-	products     []rules.Product
-	requests     atomic.Uint64
+	analyzer            app.Analyzer
+	jobs                jobs.Store
+	results             app.ResultStore
+	findings            app.FindingStore
+	readiness           ReadinessProvider
+	metrics             observability.Provider
+	authenticate        func(*http.Request) (string, bool)
+	maxBytes            int64
+	providers           []rules.Provider
+	products            []rules.Product
+	requests            atomic.Uint64
+	admissionRejections atomic.Uint64
 }
 
 func (s *server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -141,8 +146,7 @@ func (s *server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	case request.Method == http.MethodGet && request.URL.Path == "/readyz":
 		s.ready(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/metrics":
-		writer.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_http_requests_total counter\ncloudattrib_http_requests_total %d\n", s.requests.Load())
+		s.writeMetrics(writer, request)
 	default:
 		writeError(writer, http.StatusNotFound, errorEnvelope{Code: "not_found", Message: "route not found"})
 	}
@@ -308,6 +312,7 @@ func (s *server) submitJob(writer http.ResponseWriter, request *http.Request) {
 		Targets:        input.Targets,
 	})
 	if err != nil {
+		s.recordAdmissionRejection(err)
 		writeApplicationError(writer, err)
 		return
 	}
@@ -559,6 +564,7 @@ func (s *server) reclassify(writer http.ResponseWriter, request *http.Request, i
 		Reclassifications: []model.ReclassifyRequest{{ReportID: id, BundleID: input.BundleID}},
 	})
 	if err != nil {
+		s.recordAdmissionRejection(err)
 		writeApplicationError(writer, err)
 		return
 	}
@@ -604,6 +610,39 @@ func (s *server) ready(writer http.ResponseWriter, request *http.Request) {
 		status = http.StatusServiceUnavailable
 	}
 	writeJSON(writer, status, snapshot)
+}
+
+func (s *server) recordAdmissionRejection(err error) {
+	if model.ErrorCodeOf(err) == model.CodeQueueCapacityExceeded {
+		s.admissionRejections.Add(1)
+	}
+}
+
+func (s *server) writeMetrics(writer http.ResponseWriter, request *http.Request) {
+	writer.Header().Set("Content-Type", "text/plain; version=0.0.4")
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_http_requests_total counter\ncloudattrib_http_requests_total %d\n", s.requests.Load())
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_admission_rejections_total counter\ncloudattrib_admission_rejections_total %d\n", s.admissionRejections.Load())
+	if s.metrics == nil {
+		return
+	}
+	snapshot, err := s.metrics.OperationalMetrics(request.Context())
+	if err != nil {
+		_, _ = fmt.Fprint(writer, "# TYPE cloudattrib_metrics_scrape_error gauge\ncloudattrib_metrics_scrape_error 1\n")
+		return
+	}
+	_, _ = fmt.Fprint(writer, "# TYPE cloudattrib_metrics_scrape_error gauge\ncloudattrib_metrics_scrape_error 0\n")
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_queue_reserved_targets gauge\ncloudattrib_queue_reserved_targets %d\n", snapshot.ReservedTargets)
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_queue_maximum_targets gauge\ncloudattrib_queue_maximum_targets %d\n", snapshot.MaximumTargets)
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_queue_queued_targets gauge\ncloudattrib_queue_queued_targets %d\n", snapshot.QueuedTargets)
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_queue_running_targets gauge\ncloudattrib_queue_running_targets %d\n", snapshot.RunningTargets)
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_bundle_pins gauge\ncloudattrib_bundle_pins %d\n", snapshot.BundlePins)
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_ct_checkpoints gauge\ncloudattrib_ct_checkpoints %d\n", snapshot.CTCheckpoints)
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_ct_ingestion_lag_seconds gauge\ncloudattrib_ct_ingestion_lag_seconds %.3f\n", snapshot.CTIngestionLagSeconds)
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_dataset_unavailable_sources gauge\ncloudattrib_dataset_unavailable_sources %d\n", snapshot.UnavailableSources)
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_dataset_oldest_source_age_seconds gauge\ncloudattrib_dataset_oldest_source_age_seconds %.3f\n", snapshot.OldestSourceAgeSeconds)
+	if snapshot.ActiveBundleID != "" {
+		_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_bundle_info gauge\ncloudattrib_bundle_info{bundle_id=%q} 1\n", snapshot.ActiveBundleID)
+	}
 }
 
 func (s *server) defaultReadiness(_ context.Context) ReadinessSnapshot {

@@ -1,0 +1,181 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "serialNumber": "urn:uuid:8d371b7a-3d94-4fc8-bb39-98a4627bf2dd",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-09-20T00:00:00Z",
+    "tools": [
+      {
+        "vendor": "cloudattrib",
+        "name": "manual-go-build-inventory",
+        "version": "1"
+      }
+    ],
+    "component": {
+      "type": "application",
+      "bom-ref": "pkg:golang/cloudattrib@0.1.0-dev",
+      "name": "cloudattrib",
+      "version": "0.1.0-dev",
+      "purl": "pkg:golang/cloudattrib@0.1.0-dev"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "github.com/gaissmai/bart",
+      "version": "v0.29.1",
+      "purl": "pkg:golang/github.com/gaissmai/bart@v0.29.1",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "github.com/google/certificate-transparency-go",
+      "version": "v1.3.3",
+      "purl": "pkg:golang/github.com/google/certificate-transparency-go@v1.3.3",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "github.com/jackc/pgpassfile",
+      "version": "v1.0.0",
+      "purl": "pkg:golang/github.com/jackc/pgpassfile@v1.0.0",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "github.com/jackc/pgservicefile",
+      "version": "v0.0.0-20240606120523-5a60cdf6a761",
+      "purl": "pkg:golang/github.com/jackc/pgservicefile@v0.0.0-20240606120523-5a60cdf6a761",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "github.com/jackc/pgx/v5",
+      "version": "v5.11.0",
+      "purl": "pkg:golang/github.com/jackc/pgx/v5@v5.11.0",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "github.com/jackc/puddle/v2",
+      "version": "v2.2.2",
+      "purl": "pkg:golang/github.com/jackc/puddle/v2@v2.2.2",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "github.com/miekg/dns",
+      "version": "v1.1.73",
+      "purl": "pkg:golang/github.com/miekg/dns@v1.1.73",
+      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "github.com/projectdiscovery/wappalyzergo",
+      "version": "v0.3.2",
+      "purl": "pkg:golang/github.com/projectdiscovery/wappalyzergo@v0.3.2",
+      "licenses": [{"license": {"id": "MIT"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "github.com/transparency-dev/merkle",
+      "version": "v0.0.2",
+      "purl": "pkg:golang/github.com/transparency-dev/merkle@v0.0.2",
+      "licenses": [{"license": {"id": "Apache-2.0"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "go.yaml.in/yaml/v3",
+      "version": "v3.0.5",
+      "purl": "pkg:golang/go.yaml.in/yaml/v3@v3.0.5",
+      "licenses": [{"expression": "MIT OR Apache-2.0"}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "golang.org/x/crypto",
+      "version": "v0.55.0",
+      "purl": "pkg:golang/golang.org/x/crypto@v0.55.0",
+      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "golang.org/x/net",
+      "version": "v0.58.0",
+      "purl": "pkg:golang/golang.org/x/net@v0.58.0",
+      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "golang.org/x/sync",
+      "version": "v0.22.0",
+      "purl": "pkg:golang/golang.org/x/sync@v0.22.0",
+      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "golang.org/x/sys",
+      "version": "v0.47.0",
+      "purl": "pkg:golang/golang.org/x/sys@v0.47.0",
+      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "golang.org/x/text",
+      "version": "v0.41.0",
+      "purl": "pkg:golang/golang.org/x/text@v0.41.0",
+      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "library",
+      "name": "google.golang.org/protobuf",
+      "version": "v1.36.11",
+      "purl": "pkg:golang/google.golang.org/protobuf@v1.36.11",
+      "licenses": [{"license": {"id": "BSD-3-Clause"}}],
+      "properties": [{"name": "cloudattrib:ecosystem", "value": "go"}]
+    },
+    {
+      "type": "container",
+      "name": "golang",
+      "version": "1.25.1-alpine3.22",
+      "purl": "pkg:docker/golang@1.25.1-alpine3.22?repository_url=docker.io/library/golang",
+      "hashes": [{"alg": "SHA-256", "content": "b6ed3fd0452c0e9bcdef5597f29cc1418f61672e9d3a2f55bf02e7222c014abd"}]
+    },
+    {
+      "type": "container",
+      "name": "alpine",
+      "version": "3.22.1",
+      "purl": "pkg:docker/alpine@3.22.1?repository_url=docker.io/library/alpine",
+      "hashes": [{"alg": "SHA-256", "content": "4bcff63911fcb4448bd4fdacec207030997caf25e9bea4045fa6c8c44de311d1"}]
+    },
+    {
+      "type": "container",
+      "name": "postgres",
+      "version": "18.0-alpine3.22",
+      "purl": "pkg:docker/postgres@18.0-alpine3.22?repository_url=docker.io/library/postgres",
+      "hashes": [{"alg": "SHA-256", "content": "48c8ad3a7284b82be4482a52076d47d879fd6fb084a1cbfccbd551f9331b0e40"}]
+    },
+    {
+      "type": "container",
+      "name": "mvance/unbound",
+      "version": "1.22.0",
+      "purl": "pkg:docker/mvance/unbound@1.22.0?repository_url=docker.io/mvance/unbound",
+      "hashes": [{"alg": "SHA-256", "content": "76906da36d1806f3387338f15dcf8b357c51ce6897fb6450d6ce010460927e90"}]
+    }
+  ]
+}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"cloudattrib/internal/ctlog"
+	"cloudattrib/internal/datasets"
 	"cloudattrib/internal/model"
 )
 
@@ -51,7 +52,10 @@ func TestRunLookupIPRejectsInvalidAddress(t *testing.T) {
 func TestRunServeUsesLifecycleDependency(t *testing.T) {
 	var out, errOut bytes.Buffer
 	called := false
-	exit := Run(t.Context(), []string{"serve"}, Dependencies{Serve: func(context.Context) error { called = true; return nil }, Stdout: &out, Stderr: &errOut})
+	exit := Run(t.Context(), []string{"serve", "--config", "config.yaml"}, Dependencies{Serve: func(_ context.Context, path string) error {
+		called = path == "config.yaml"
+		return nil
+	}, Stdout: &out, Stderr: &errOut})
 	if exit != 0 || !called || out.Len() != 0 || errOut.Len() != 0 {
 		t.Fatalf("exit=%d called=%v stdout=%q stderr=%q", exit, called, out.String(), errOut.String())
 	}
@@ -101,6 +105,32 @@ func TestRunCTImportAndCollect(t *testing.T) {
 	var metrics ctlog.Metrics
 	if err := json.Unmarshal(out.Bytes(), &metrics); err != nil || metrics.EntriesFetched != 2 {
 		t.Fatalf("ct collect output=%q error=%v", out.String(), err)
+	}
+}
+
+func TestRunDatasetsCommands(t *testing.T) {
+	var out, errOut bytes.Buffer
+	dependencies := Dependencies{
+		Stdout: &out, Stderr: &errOut,
+		DatasetImport: func(_ context.Context, configPath, sourceDirectory string) (datasets.ValidationReport, error) {
+			if configPath != "config.yaml" || sourceDirectory != "sources" {
+				t.Fatalf("DatasetImport config=%q source=%q", configPath, sourceDirectory)
+			}
+			return datasets.ValidationReport{CandidateID: "bundle-sha256-fixture", Valid: true}, nil
+		},
+		DatasetActivate: func(_ context.Context, configPath, candidateID, approvalHash, action string) (datasets.Activation, error) {
+			if configPath != "config.yaml" || candidateID != "bundle-sha256-fixture" || approvalHash != "sha256:approval" || action != "rollback" {
+				t.Fatalf("DatasetActivate config=%q candidate=%q approval=%q action=%q", configPath, candidateID, approvalHash, action)
+			}
+			return datasets.Activation{BundleID: candidateID, Action: action}, nil
+		},
+	}
+	if exit := Run(context.Background(), []string{"datasets", "import", "--source-dir", "sources", "--config", "config.yaml"}, dependencies); exit != 0 {
+		t.Fatalf("datasets import exit=%d stderr=%q", exit, errOut.String())
+	}
+	out.Reset()
+	if exit := Run(context.Background(), []string{"datasets", "rollback", "--bundle", "bundle-sha256-fixture", "--approval-hash", "sha256:approval", "--config", "config.yaml"}, dependencies); exit != 0 {
+		t.Fatalf("datasets rollback exit=%d stderr=%q", exit, errOut.String())
 	}
 }
 

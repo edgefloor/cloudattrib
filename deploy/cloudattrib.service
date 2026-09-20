@@ -1,0 +1,26 @@
+[Unit]
+Description=cloudattrib attribution service
+After=network-online.target postgresql.service unbound.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cloudattrib
+Group=cloudattrib
+ExecStart=/usr/local/bin/cloudattrib serve --config /etc/cloudattrib/config.yaml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=20s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+ReadWritePaths=/var/lib/cloudattrib/bundles
+
+[Install]
+WantedBy=multi-user.target

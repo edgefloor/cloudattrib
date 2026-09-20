@@ -73,6 +73,10 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Submit() error = %v (cause: %v)", err, errors.Unwrap(err))
 	}
+	metrics, err := store.OperationalMetrics(ctx)
+	if err != nil || metrics.ReservedTargets != 1 || metrics.QueuedTargets != 1 || metrics.BundlePins != 1 || metrics.CTCheckpoints != 1 || metrics.ActiveBundleID != "fixture-bundle" {
+		t.Fatalf("OperationalMetrics() = %#v, %v", metrics, err)
+	}
 	pinned, err := store.BundlePinned(ctx, "fixture-bundle")
 	if err != nil || !pinned {
 		t.Fatalf("BundlePinned() = %v, %v", pinned, err)
@@ -106,6 +110,10 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	pinned, err = store.BundlePinned(ctx, "fixture-bundle")
 	if err != nil || pinned {
 		t.Fatalf("BundlePinned() after completion = %v, %v", pinned, err)
+	}
+	metrics, err = store.OperationalMetrics(ctx)
+	if err != nil || metrics.ReservedTargets != 0 || metrics.QueuedTargets != 0 || metrics.RunningTargets != 0 || metrics.BundlePins != 0 {
+		t.Fatalf("OperationalMetrics() after completion = %#v, %v", metrics, err)
 	}
 	replayJob, err := store.Submit(ctx, jobs.SubmitRequest{
 		OperatorID: "operator-a", IdempotencyKey: "replay-key", BundleID: "fixture-bundle",

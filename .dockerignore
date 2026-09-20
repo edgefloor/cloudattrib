@@ -1,0 +1,7 @@
+.git
+.cache
+.tools
+bin
+data
+secrets
+*.out

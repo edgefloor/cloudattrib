@@ -25,6 +25,7 @@ type API struct {
 	AuthenticationEnabled      bool              `json:"authentication_enabled" yaml:"authentication_enabled"`
 	AuthenticationMode         string            `json:"authentication_mode,omitempty" yaml:"authentication_mode,omitempty"`
 	Credentials                map[string]string `json:"credentials,omitempty" yaml:"credentials,omitempty"`
+	CredentialsFile            string            `json:"credentials_file,omitempty" yaml:"credentials_file,omitempty"`
 	TrustedProxyCIDRs          []string          `json:"trusted_proxy_cidrs,omitempty" yaml:"trusted_proxy_cidrs,omitempty"`
 	TrustedProxyIdentityHeader string            `json:"trusted_proxy_identity_header,omitempty" yaml:"trusted_proxy_identity_header,omitempty"`
 	LocalOperatorID            string            `json:"local_operator_id,omitempty" yaml:"local_operator_id,omitempty"`

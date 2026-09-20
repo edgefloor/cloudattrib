@@ -14,7 +14,17 @@ import (
 	"cloudattrib/internal/app"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/observability"
 )
+
+type fixtureMetricsProvider struct {
+	snapshot observability.Snapshot
+	err      error
+}
+
+func (p fixtureMetricsProvider) OperationalMetrics(context.Context) (observability.Snapshot, error) {
+	return p.snapshot, p.err
+}
 
 func TestAnalyzeReturnsReportAndOperator(t *testing.T) {
 	t.Parallel()
@@ -206,6 +216,45 @@ func TestJobsRejectOversizedBatchBeforeStoreAdmission(t *testing.T) {
 	recorder := serve(handler, http.MethodPost, "/v1/jobs", string(body), "127.0.0.1:1000", nil)
 	if recorder.Code != http.StatusUnprocessableEntity || decodeError(t, recorder).Code != model.CodeInvalidOptions {
 		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestMetricsExposeBoundedOperationalStateAndAdmissionRejections(t *testing.T) {
+	t.Parallel()
+
+	store := jobs.NewMemoryStore(1)
+	handler := mustHandler(t, Config{
+		Jobs: store,
+		Metrics: fixtureMetricsProvider{snapshot: observability.Snapshot{
+			ReservedTargets: 1, MaximumTargets: 10, QueuedTargets: 1, RunningTargets: 2,
+			BundlePins: 3, CTCheckpoints: 4, CTIngestionLagSeconds: 5.25, UnavailableSources: 2, OldestSourceAgeSeconds: 86400, ActiveBundleID: "bundle-fixture",
+		}},
+	})
+	first := serve(handler, http.MethodPost, "/v1/jobs", `{"idempotency_key":"first","targets":[{"target":"example.com","kind":"domain"}]}`, "127.0.0.1:1000", nil)
+	if first.Code != http.StatusAccepted {
+		t.Fatalf("first admission = %d %s", first.Code, first.Body.String())
+	}
+	rejected := serve(handler, http.MethodPost, "/v1/jobs", `{"idempotency_key":"second","targets":[{"target":"example.net","kind":"domain"}]}`, "127.0.0.1:1000", nil)
+	if rejected.Code != http.StatusTooManyRequests {
+		t.Fatalf("second admission = %d %s", rejected.Code, rejected.Body.String())
+	}
+	metrics := serve(handler, http.MethodGet, "/metrics", "", "127.0.0.1:1000", nil)
+	for _, expected := range []string{
+		"cloudattrib_admission_rejections_total 1",
+		"cloudattrib_queue_reserved_targets 1",
+		"cloudattrib_queue_maximum_targets 10",
+		"cloudattrib_queue_queued_targets 1",
+		"cloudattrib_queue_running_targets 2",
+		"cloudattrib_bundle_pins 3",
+		"cloudattrib_ct_checkpoints 4",
+		"cloudattrib_ct_ingestion_lag_seconds 5.250",
+		"cloudattrib_dataset_unavailable_sources 2",
+		"cloudattrib_dataset_oldest_source_age_seconds 86400.000",
+		`cloudattrib_bundle_info{bundle_id="bundle-fixture"} 1`,
+	} {
+		if !strings.Contains(metrics.Body.String(), expected) {
+			t.Fatalf("metrics missing %q:\n%s", expected, metrics.Body.String())
+		}
 	}
 }
 

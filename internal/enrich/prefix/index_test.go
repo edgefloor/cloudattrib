@@ -2,11 +2,31 @@ package prefix
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
 	"net/netip"
+	"slices"
 	"testing"
 
 	"cloudattrib/internal/model"
 )
+
+func BenchmarkLookupPrefixes(b *testing.B) {
+	associations := make([]model.Association, 0, 4096)
+	for index := 0; index < 4096; index++ {
+		prefix := netip.MustParsePrefix(fmt.Sprintf("10.%d.%d.0/24", index/256, index%256))
+		associations = append(associations, model.Association{ID: fmt.Sprintf("record-%d", index), Prefix: prefix, ProviderID: "fixture", Lifecycle: "active"})
+	}
+	index := New(associations)
+	request := model.IPLookupRequest{Address: netip.MustParseAddr("10.15.255.7"), Match: "all"}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, _, err := index.LookupPrefixes(context.Background(), request, model.AttributionView{}); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
 
 func TestLookupAllAndLongestPreserveTiesAndSkipRetired(t *testing.T) {
 	t.Parallel()
@@ -59,4 +79,72 @@ func TestIndexCopiesAssociations(t *testing.T) {
 	if second[0].ProviderID != "original" {
 		t.Fatalf("stored provider = %q, want original", second[0].ProviderID)
 	}
+}
+
+func TestIndexAgreesWithBruteForceOracle(t *testing.T) {
+	t.Parallel()
+
+	random := rand.New(rand.NewSource(20260920))
+	associations := make([]model.Association, 0, 500)
+	for number := range 500 {
+		var address netip.Addr
+		var bits int
+		if number%2 == 0 {
+			address = netip.AddrFrom4([4]byte{byte(random.Uint32()), byte(random.Uint32()), byte(random.Uint32()), byte(random.Uint32())})
+			bits = random.Intn(33)
+		} else {
+			var raw [16]byte
+			_, _ = random.Read(raw[:])
+			address = netip.AddrFrom16(raw)
+			bits = random.Intn(129)
+		}
+		associations = append(associations, model.Association{
+			ID: fmt.Sprintf("oracle-%03d", number), Prefix: netip.PrefixFrom(address, bits).Masked(),
+			ProviderID: "fixture", Lifecycle: "active",
+		})
+	}
+	index := New(associations)
+	for sample := range 1000 {
+		var address netip.Addr
+		if sample%2 == 0 {
+			address = netip.AddrFrom4([4]byte{byte(random.Uint32()), byte(random.Uint32()), byte(random.Uint32()), byte(random.Uint32())})
+		} else {
+			var raw [16]byte
+			_, _ = random.Read(raw[:])
+			address = netip.AddrFrom16(raw)
+		}
+		for _, mode := range []string{"all", "longest"} {
+			got, _, err := index.LookupPrefixes(context.Background(), model.IPLookupRequest{Address: address, Match: mode}, model.AttributionView{})
+			if err != nil {
+				t.Fatalf("sample %d mode %s: %v", sample, mode, err)
+			}
+			want := bruteForceIDs(associations, address, mode)
+			gotIDs := make([]string, len(got))
+			for position, association := range got {
+				gotIDs[position] = association.ID
+			}
+			slices.Sort(gotIDs)
+			if !slices.Equal(gotIDs, want) {
+				t.Fatalf("sample %d address %s mode %s: got %v, want %v", sample, address, mode, gotIDs, want)
+			}
+		}
+	}
+}
+
+func bruteForceIDs(associations []model.Association, address netip.Addr, mode string) []string {
+	longest := -1
+	for _, association := range associations {
+		if association.Prefix.Contains(address) && association.Prefix.Bits() > longest {
+			longest = association.Prefix.Bits()
+		}
+	}
+	var result []string
+	for _, association := range associations {
+		if !association.Prefix.Contains(address) || mode == "longest" && association.Prefix.Bits() != longest {
+			continue
+		}
+		result = append(result, association.ID)
+	}
+	slices.Sort(result)
+	return result
 }
