@@ -1,0 +1,1 @@
+{"cdn":{"example-cdn":["192.0.2.0/24","edge.example.test"]},"waf":{"example-waf":["198.51.100.0/24"]},"cloud":{"example-cloud":["2001:db8::/32"]},"common":{"example-common":["common.example.test"]}}
