@@ -62,6 +62,9 @@ func Run(ctx context.Context, args []string, dependencies Dependencies) int {
 			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "service wiring is unavailable", nil))
 		}
 		if err := dependencies.Serve(ctx, *configuration); err != nil && !errors.Is(err, context.Canceled) {
+			if model.ErrorCodeOf(err) != "" {
+				return diagnostic(streams.stderr, err)
+			}
 			return diagnostic(streams.stderr, model.NewError(model.CodePersistenceUnavailable, "service stopped", err))
 		}
 		return 0

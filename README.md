@@ -34,14 +34,38 @@ cloudattrib datasets status --config config/example.yaml
 
 The built-in execution view supports DNS, bounded HTTP, reviewed product rules, passive web
 fingerprints, and offline reinterpretation of a standalone report. Local prefix and ASN lookup
-require an activated dataset bundle; without one, `lookup-ip` returns
-`capability_unavailable` instead of an empty successful result. Reclassification preserves the
+loads the active bundle when one is present. Without an active bundle, it loads the configured
+`data.source_directory` (default `./data/sources`) directly. Reclassification preserves the
 original observations and collection coverage while recording a new classification time and
 bundle identity. It re-evaluates retained DNS addresses and actual HTTP peers, including external
 redirect peers, against the selected prefix and ASN data without making network requests.
 
-Set `CLOUDATTRIB_CONFIG` to load one strict YAML or JSON configuration for all CLI operations.
-Command-specific `--config` flags on `serve` and `datasets` override the path for that operation.
+## CLI setup
+
+The CLI reads `./data/sources` by default. Set `CLOUDATTRIB_CONFIG` to use a YAML or JSON config
+file, or pass `--config` to `datasets` commands. Set `CLOUDATTRIB_RESOLVER` to override the
+configured resolver address. The default is `127.0.0.1:53`.
+
+Place supported source files in the configured source directory. For local ASN lookup, provide
+`iptoasn-v4.tsv` and `iptoasn-v6.tsv`. Each file must contain five tab-separated fields per line:
+the inclusive start address, inclusive end address, unsigned decimal ASN, country code, and
+description. IPv4 uses unsigned integer start and end values. IPv6 uses literal IPv6 addresses.
+Intervals must be ordered and must not overlap.
+
+Run a local lookup or analysis with the configured sources and resolver:
+
+```sh
+cloudattrib lookup-ip 8.8.8.8 --match all
+CLOUDATTRIB_RESOLVER=127.0.0.1:53 cloudattrib analyze example.com --mode dns
+```
+
+An active bundle takes precedence over the configured source directory. The application does not
+download or refresh source data during startup or request processing. Missing source files reduce
+coverage. A lookup can return available associations with partial coverage; if no applicable source
+is usable, it returns `capability_unavailable`.
+
+Command-specific `--config` flags on `serve` and `datasets` override `CLOUDATTRIB_CONFIG` for that
+operation.
 
 Certificate Transparency support is optional and disabled by default. It uses a local PostgreSQL
 index and never performs request-time CT searches. See [CT operations](docs/ct-operations.md) for

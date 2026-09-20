@@ -14,6 +14,7 @@ import (
 	"cloudattrib/internal/config"
 	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/datasets"
+	"cloudattrib/internal/model"
 	localruntime "cloudattrib/internal/runtime"
 )
 
@@ -113,5 +114,9 @@ func resolveConfiguration(defaultConfiguration config.Config, path string) (conf
 	if path == "" {
 		return defaultConfiguration, nil
 	}
-	return config.Load(path)
+	configuration, err := config.Load(path)
+	if err != nil {
+		return config.Config{}, model.NewError(model.CodeInvalidSyntax, err.Error(), err)
+	}
+	return configuration, nil
 }

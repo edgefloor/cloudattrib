@@ -43,6 +43,11 @@ func (i *Index) LookupPrefixes(ctx context.Context, request model.IPLookupReques
 	if !address.IsValid() {
 		return nil, model.Coverage{}, model.NewError(model.CodeInvalidTarget, "IP address is invalid", nil)
 	}
+	switch request.Match {
+	case "", "all", "longest":
+	default:
+		return nil, model.Coverage{}, model.NewError(model.CodeInvalidOptions, fmt.Sprintf("unsupported prefix match mode %q", request.Match), nil)
+	}
 	bits := 128
 	if address.Is4() {
 		bits = 32
@@ -69,8 +74,6 @@ func (i *Index) LookupPrefixes(ctx context.Context, request model.IPLookupReques
 			}
 		}
 		matches = slices.DeleteFunc(matches, func(item match) bool { return item.prefix.Bits() != longest })
-	} else if request.Match != "" && request.Match != "all" {
-		return nil, model.Coverage{}, model.NewError(model.CodeInvalidOptions, fmt.Sprintf("unsupported prefix match mode %q", request.Match), nil)
 	}
 	slices.SortFunc(matches, func(a, b match) int {
 		if a.prefix.Bits() != b.prefix.Bits() {

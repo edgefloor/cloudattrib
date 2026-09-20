@@ -8,3 +8,5 @@ coverage.html
 .env.*
 !.env.example
 !.env.*.example
+/data/
+/secrets/

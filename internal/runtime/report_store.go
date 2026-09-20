@@ -43,6 +43,10 @@ func (standaloneReportStore) LoadReport(ctx context.Context, path string) (model
 	if err := decoder.Decode(&report); err != nil {
 		return model.Report{}, model.NewError(model.CodeInvalidSyntax, "decode standalone report", err)
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return model.Report{}, model.NewError(model.CodeInvalidSyntax, "standalone report contains trailing data", err)
+	}
 	if report.ID == "" {
 		return model.Report{}, model.NewError(model.CodeInvalidSyntax, "standalone report has no report ID", nil)
 	}

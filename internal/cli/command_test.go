@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"testing"
 	"time"
@@ -58,6 +59,34 @@ func TestRunServeUsesLifecycleDependency(t *testing.T) {
 	}, Stdout: &out, Stderr: &errOut})
 	if exit != 0 || !called || out.Len() != 0 || errOut.Len() != 0 {
 		t.Fatalf("exit=%d called=%v stdout=%q stderr=%q", exit, called, out.String(), errOut.String())
+	}
+}
+
+func TestRunServePreservesTypedError(t *testing.T) {
+	var errOut bytes.Buffer
+	exit := Run(t.Context(), []string{"serve", "--config", "missing.yaml"}, Dependencies{
+		Serve: func(context.Context, string) error {
+			return model.NewError(model.CodeInvalidSyntax, "load configuration", nil)
+		},
+		Stdout: io.Discard,
+		Stderr: &errOut,
+	})
+	if exit != 2 {
+		t.Fatalf("exit = %d, want 2; stderr = %q", exit, errOut.String())
+	}
+}
+
+func TestRunServeClassifiesUntypedStartupFailure(t *testing.T) {
+	var errOut bytes.Buffer
+	exit := Run(t.Context(), []string{"serve"}, Dependencies{
+		Serve: func(context.Context, string) error {
+			return errors.New("listen failed")
+		},
+		Stdout: io.Discard,
+		Stderr: &errOut,
+	})
+	if exit != 4 {
+		t.Fatalf("exit = %d, want 4; stderr = %q", exit, errOut.String())
 	}
 }
 func TestRunAnalyzeJSONLAddsInputIndex(t *testing.T) {

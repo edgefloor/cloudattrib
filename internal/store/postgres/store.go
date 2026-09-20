@@ -301,6 +301,7 @@ func (s *Store) Job(ctx context.Context, id string) (jobs.Job, error) {
 	if err != nil {
 		return jobs.Job{}, persistence("load job targets", err)
 	}
+	defer rows.Close()
 	reportIDs := make([]string, 0)
 	for rows.Next() {
 		var target jobs.Target

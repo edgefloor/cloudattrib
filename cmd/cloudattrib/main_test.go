@@ -1,6 +1,12 @@
 package main
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+
+	"cloudattrib/internal/config"
+	"cloudattrib/internal/model"
+)
 
 func TestRequiresLocalAnalyzer(t *testing.T) {
 	t.Parallel()
@@ -19,5 +25,14 @@ func TestRequiresLocalAnalyzer(t *testing.T) {
 		if got := requiresLocalAnalyzer(test.args); got != test.want {
 			t.Fatalf("requiresLocalAnalyzer(%v) = %v, want %v", test.args, got, test.want)
 		}
+	}
+}
+
+func TestResolveConfigurationClassifiesLoadFailure(t *testing.T) {
+	t.Parallel()
+
+	_, err := resolveConfiguration(config.Default(), filepath.Join(t.TempDir(), "missing.yaml"))
+	if got := model.ErrorCodeOf(err); got != model.CodeInvalidSyntax {
+		t.Fatalf("ErrorCodeOf(resolveConfiguration()) = %q, want %q", got, model.CodeInvalidSyntax)
 	}
 }

@@ -81,6 +81,44 @@ func TestIndexCopiesAssociations(t *testing.T) {
 	}
 }
 
+func TestLookupLongestWithoutEligibleMatches(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name         string
+		associations []model.Association
+	}{
+		{name: "empty index"},
+		{name: "nonmatching prefix", associations: []model.Association{{ID: "other", Prefix: netip.MustParsePrefix("203.0.113.0/24"), Lifecycle: "active"}}},
+		{name: "retired match excluded", associations: []model.Association{{ID: "retired", Prefix: netip.MustParsePrefix("198.51.100.0/24"), Lifecycle: "retired"}}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			index := New(test.associations)
+			matches, coverage, err := index.LookupPrefixes(context.Background(), model.IPLookupRequest{
+				Address: netip.MustParseAddr("198.51.100.7"), Match: "longest",
+			}, model.AttributionView{})
+			if err != nil {
+				t.Fatalf("LookupPrefixes(longest) error = %v", err)
+			}
+			if len(matches) != 0 || coverage.Status != model.CoverageComplete {
+				t.Fatalf("LookupPrefixes(longest) = %v, coverage = %v; want no matches and complete lookup coverage", matches, coverage)
+			}
+		})
+	}
+}
+
+func TestLookupPrefixesRejectsUnknownMatchMode(t *testing.T) {
+	t.Parallel()
+
+	index := New(nil)
+	_, _, err := index.LookupPrefixes(context.Background(), model.IPLookupRequest{
+		Address: netip.MustParseAddr("198.51.100.7"), Match: "shortest",
+	}, model.AttributionView{})
+	if model.ErrorCodeOf(err) != model.CodeInvalidOptions {
+		t.Fatalf("LookupPrefixes() error = %v, want invalid options", err)
+	}
+}
+
 func TestIndexAgreesWithBruteForceOracle(t *testing.T) {
 	t.Parallel()
 

@@ -57,6 +57,11 @@ Populate `data/sources` with any supported files:
 - `iptoasn-v4.tsv` and `iptoasn-v6.tsv`
 - primary provider JSON files below `cloudranges/json/`
 
+For local ASN lookup, `iptoasn-v4.tsv` and `iptoasn-v6.tsv` each contain five tab-separated fields
+per line: inclusive start address, inclusive end address, unsigned decimal ASN, country code, and
+description. IPv4 uses unsigned integer endpoints. IPv6 uses literal IPv6 endpoints. Intervals
+must be ordered and must not overlap.
+
 Keep the directory read-only to the service. Review each source's terms and retain its acquisition record outside the application. Stage a candidate with the isolated updater profile:
 
 ```sh
