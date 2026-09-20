@@ -1,0 +1,1 @@
+{"syncToken":"fixture-1","createDate":"2026-09-20T00:00:00Z","prefixes":[{"ip_prefix":"192.0.2.0/24","region":"us-test-1","service":"EC2","network_border_group":"us-test-1"}],"ipv6_prefixes":[]}
