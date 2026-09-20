@@ -1,0 +1,226 @@
+openapi: 3.1.0
+info:
+  title: cloudattrib API
+  version: "1"
+  description: |
+    The API accepts at most 1 MiB of JSON request data. The configured operator
+    authentication mode applies to every route. A loopback-only deployment uses
+    the local-operator identity. Bearer and trusted-proxy modes map each request
+    to a stable operator ID. Operator IDs scope idempotency and audit records,
+    not result visibility.
+servers:
+  - url: http://127.0.0.1:8080
+security:
+  - bearerAuth: []
+  - trustedProxyIdentity: []
+paths:
+  /v1/analyze:
+    post:
+      summary: Analyze one target synchronously.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: ./analyze-request.schema.json
+      responses:
+        "200":
+          description: A complete, partial, failed, or cancelled terminal report.
+          content:
+            application/json:
+              schema:
+                $ref: ./report.schema.json
+        "400":
+          $ref: "#/components/responses/InvalidSyntax"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/InputTooLarge"
+        "422":
+          $ref: "#/components/responses/InvalidTarget"
+        "503":
+          $ref: "#/components/responses/CapabilityUnavailable"
+  /v1/lookup/ip:
+    post:
+      summary: Look up local IP associations without DNS, HTTP, or persistence.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IPLookupRequest"
+      responses:
+        "200":
+          description: A complete or partial local lookup result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IPLookupResult"
+        "400":
+          $ref: "#/components/responses/InvalidSyntax"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "413":
+          $ref: "#/components/responses/InputTooLarge"
+        "422":
+          $ref: "#/components/responses/InvalidTarget"
+        "503":
+          $ref: "#/components/responses/CapabilityUnavailable"
+  /livez:
+    get:
+      summary: Return process liveness.
+      responses:
+        "200":
+          description: The process accepted the request.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Liveness"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /readyz:
+    get:
+      summary: Return enabled operation readiness.
+      responses:
+        "200":
+          description: At least one enabled public operation can execute.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "503":
+          description: No enabled public operation can execute.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Readiness"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: The configured bearer credential maps to a stable operator ID.
+    trustedProxyIdentity:
+      type: apiKey
+      in: header
+      name: X-Cloudattrib-Operator
+      description: |
+        Use only when the server is configured with a trusted proxy range. The
+        proxy removes client-supplied values before it sets this verified header.
+  responses:
+    InvalidSyntax:
+      description: The request body is malformed JSON or contains an unknown field.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: The request did not use the configured trusted-operator identity source.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InputTooLarge:
+      description: The request body exceeds 1 MiB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InvalidTarget:
+      description: The request is syntactically valid but has invalid target or option values.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    CapabilityUnavailable:
+      description: No necessary execution capability is available for the requested operation.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    IPLookupRequest:
+      type: object
+      additionalProperties: false
+      required: [address]
+      properties:
+        address:
+          type: string
+          format: ip
+        match:
+          type: string
+          enum: [all, longest]
+          default: all
+        include_retired:
+          type: boolean
+          default: false
+        categories:
+          type: array
+          items:
+            type: string
+    IPLookupResult:
+      type: object
+      required: [address, status, associations, asn, coverage]
+      properties:
+        address:
+          type: string
+          format: ip
+        status:
+          type: string
+          enum: [complete, partial]
+        associations:
+          type: array
+          items:
+            type: object
+        asn:
+          type: array
+          items:
+            type: object
+        coverage:
+          type: array
+          items:
+            type: object
+    Liveness:
+      type: object
+      required: [status]
+      properties:
+        status:
+          const: live
+    Readiness:
+      type: object
+      required: [state, operations]
+      properties:
+        state:
+          type: string
+          enum: [ready, degraded, unavailable]
+        operations:
+          type: array
+          items:
+            type: object
+            required: [name, state]
+            properties:
+              name:
+                type: string
+              state:
+                type: string
+                enum: [ready, degraded, unavailable]
+              capabilities:
+                type: array
+                items:
+                  type: object
+              reason:
+                type: string
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
