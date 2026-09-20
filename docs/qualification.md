@@ -1,8 +1,6 @@
 # Qualification report
 
-This report records release-candidate measurements from 2026-09-20 and the later acceptance repairs listed below. It evaluates attribution evidence, not lead quality, commercial adoption, spend, or savings.
-
-The controlled fixtures test defined behavior. The full-source import tests compatibility and scale. Neither establishes detection accuracy for arbitrary Internet domains, and the imported snapshot is not a redistributable artifact.
+This report records release-candidate checks from 2026-09-20 and the later repair checks. Controlled fixtures cover defined behavior. Full-source imports cover format compatibility and memory use.
 
 - [Test environment](#release-environment)
 - [Controlled corpus](#controlled-corpus-results)
@@ -32,10 +30,10 @@ E1 tested that DNS and HTTP evidence survived a missing prefix source. It also t
 
 Known evidence limits include:
 
-- generic provider ranges and ASNs do not identify a customer deployment or paid product;
+- generic provider ranges and ASNs produce provider-level network findings;
 - service tags retain upstream service and region claims, but empty Azure `systemService` values conservatively use the service-tag name and emit a warning;
-- verification records prove only domain association;
-- SPF expresses sending authorization, not inbound routing or subscription;
+- verification records produce `domain_verification`;
+- SPF produces `sending_authorization`;
 - gateway MX records do not reveal the mailbox backend;
 - external redirects remain external scope;
 - CT names are historical discovery candidates until ordinary collection produces current evidence.

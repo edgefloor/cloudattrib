@@ -6,11 +6,9 @@ Plan version: 2.2, dated 2026-09-20
 
 Behavior contract: [SPEC.md](SPEC.md)
 
-Execution rules: [Wave assignments, roles, and validation](docs/execution-plan.md)
+Development workflow: [docs/execution-plan.md](docs/execution-plan.md)
 
-This is the delivery and acceptance checklist used for implementation. The application now exists. The unchecked items below are retained acceptance requirements, not a current task-status ledger. Use the [qualification report](docs/qualification.md) for recorded evidence and known test limits.
-
-P0 through P11 define deliverables. Waves 0 through 7 define execution order and ownership. Those workflow settings belong in the execution plan, not `AGENTS.md`. New work still requires an implementation instruction.
+This checklist defines the work and acceptance cases for P0 through P11. It is not a progress tracker. The [qualification report](docs/qualification.md) records completed checks and untested combinations.
 
 ## Find a phase
 
@@ -35,9 +33,9 @@ P0 through P11 define deliverables. Waves 0 through 7 define execution order and
 
 ## 1. Delivery scope
 
-The application supplies attribution evidence for lead enrichment. Downstream users make qualification decisions. Qualification, scoring, spend estimates, and savings estimates remain outside scope.
+The application collects DNS, HTTP, TLS, certificate, and IP data, then reports the cloud and SaaS matches produced by local rules and datasets.
 
-Every specified capability is required for delivery. Runtime source failures follow SPEC section 14.2, which preserves useful evidence with explicit coverage limits.
+Every capability in SPEC section 1 is part of delivery. SPEC section 14.2 defines the result when a runtime source fails.
 
 Implement the complete pipeline agreed in the specification:
 
@@ -86,7 +84,7 @@ No time or staffing estimate is implied by this sequence.
 
 - [ ] Analyze one controlled domain through real DNS and bounded HTTP collectors, one local product detector, a small pinned enrichment dataset, and aggregation.
 - [ ] Produce a schema-valid report containing immutable observations, consulted dataset provenance, evidence references, typed findings, coverage, and separate collection/classification times.
-- [ ] Assert a supported product relationship and the absence of unsupported qualification, spend, subscription, and hidden-origin claims.
+- [ ] Assert the expected product and relationship. Reject findings for unrelated products, relations, and hidden origins.
 - [ ] Run variants with a missing enrichment source, mixed approved/prohibited addresses, and delayed or failed AAAA. HTTP must start through an approved public address without waiting for AAAA; prohibited addresses must never be dialed.
 - [ ] Validate the resulting complete/partial report and CLI exit contract without relying on live third-party services or requiring PostgreSQL.
 
@@ -94,101 +92,9 @@ E1 passes when an in-process fixture uses controlled DNS and HTTP services with 
 
 ## 2. Repository structure
 
-This is the original responsibility map. It includes proposed paths and artifacts, not a current file inventory. The [internal package map](internal/README.md) lists the implementation paths. Acceptance requires the behavior below even where the implementation groups it differently.
+The maintained [package map](internal/README.md) lists the implementation. [Architecture](docs/architecture.md) defines package ownership and the contracts that cross package boundaries.
 
-```text
-cmd/cloudattrib/
-  main.go
-internal/
-  app/                     Analyze, lookup, batch, reclassify orchestration
-  model/                   Targets, observations, evidence, findings, reports
-  target/                  IDNA, URL/IP normalization, explicit root scopes
-  policy/                  Destination policy, budgets, profile defaults
-  collect/
-    dns/                   Raw RR collection, chains, dependency context
-    http/                  Safe dialing, redirects, TLS and response capture
-  detect/
-    dnsrules/              Typed DNS and TXT/SPF rules
-    webtech/               Local wappalyzergo adapter
-    httprules/             Product-specific header/script rules
-    cdn/                   Local cdncheck-derived data adapter
-  enrich/
-    prefix/                BART wrapper and all/longest semantics
-    asn/                   Local interval indexes
-    network/               Observed-address enrichment coordinator
-  taxonomy/                Canonical provider/product aliases and roles
-  aggregate/               Deduplication, findings, conflicts, summaries
-  ingest/
-    cloudranges/           disposable/cloud-ip-ranges adapter
-    aws/                   Official AWS service ranges
-    gcp/                   Official GCP cloud ranges
-    azure/                 Downloadable Azure Service Tags
-    iptoasn/               IPv4 and IPv6 interval TSV
-    cdndata/               Pinned generated cdncheck data conversion
-  datasets/                Manifests, validation, bundles, activation, rollback
-  jobs/                    Admission, worker leases, retries, cancellation
-  store/postgres/          Migrations, repositories, immutable report writes
-  ct/                      Import, supported log reads, checkpoints, local index
-  api/                     HTTP handlers, authentication, pagination, errors
-  cli/                     Commands and JSON/JSONL rendering
-  observability/           Health, counters, structured logs
-  capture/                 Redaction and opt-in restricted raw artifacts
-api/
-  openapi.yaml
-schema/
-  analyze-request.schema.json
-  report.schema.json
-  observation.schema.json
-  evidence.schema.json
-  finding.schema.json
-  rule-bundle.schema.json
-  data-manifest.schema.json
-  ct-record.schema.json
-rules/
-  dns/
-  http/
-  technology-map.json
-  providers.json
-  products.json
-  coverage-matrix.md
-migrations/
-config/
-  example.yaml
-  ct-logs.example.yaml
-  source-selection.example.json
-deploy/
-  compose.yaml
-  Dockerfile
-  unbound.conf
-  systemd/
-testdata/
-  upstream/                Pinned small source-format fixtures
-  dns/                     Authoritative zones and query scenarios
-  http/                    Sanitized headers, HTML, redirects, TLS fixtures
-  ct/                      Synthetic log and certificate fixtures
-  scenarios/               Complete multi-vendor target scenarios
-  golden/                  Canonical report and interface outputs
-scripts/
-  offline-test.sh
-  integration-test.sh
-  reference-benchmark.sh
-  release-check.sh
-docs/
-  architecture.md
-  source-contracts.md
-  dependency-audit.md
-  rule-authoring.md
-  operations.md
-  api-examples.md
-  benchmark-results.md
-  accuracy-evaluation.md
-SPEC.md
-IMPLEMENTATION-PLAN.md
-go.mod
-go.sum
-```
-
-Keep BART, DNS-library, fingerprint-library, and PostgreSQL types out of the shared application model. Use internal packages until a real external Go consumer requires a stable public module. Do not split the system into microservices during this implementation.
+Keep dependency-specific types inside their adapters. Put reusable application code under `internal/` and keep `cmd/cloudattrib` limited to startup and wiring.
 
 ## 3. P0: verify contracts and build the test foundation
 
@@ -234,7 +140,7 @@ The selected APIs compile, source formats and provenance requirements are docume
 - [ ] Make `kind=ip` select local-IP behavior and reject incompatible live-collection options rather than silently initiating DNS or HTTP.
 - [ ] Define typed observations, evidence, findings, coverage, provider/product taxonomy, source metadata, and versioned report envelopes.
 - [ ] Keep immutable collected observations distinct from versioned dataset records consulted during classification. Define collection time, classification time, source publication/effective time, and unknown-time representation independently.
-- [ ] Define relationship and activity enums from the spec, including `sending_authorization` for appropriate SPF evidence. Keep sending authorization distinct from mail routing and paid adoption. Unknown products remain null; externally supplied organization labels remain unverified grouping metadata.
+- [ ] Define the relationship and activity enums from the spec. SPF uses `sending_authorization`; MX uses `mail_routing`. Unknown products remain null. Store `organization_label` as caller-supplied grouping data.
 - [ ] Define `DNSClient`, transport/dialer, collector, detector, ASN reader, prefix reader, snapshot reader, and result-store interfaces.
 - [ ] Define typed input, policy, source, timeout, budget, unavailable-data, and storage errors with stable external codes.
 - [ ] Define deterministic ordering, deduplication keys, canonical serialization, and content-ID generation. Separate observation time from bundle build/activation time.
@@ -422,10 +328,10 @@ Positive cases must cover a CNAME-based CDN, a hosting platform, authoritative D
 
 - TXT-only Google verification must not yield Google Workspace.
 - Cloudflare NS must not imply proxying.
-- An AWS ASN or generic EC2 range must not imply a direct EC2 customer deployment.
+- An AWS ASN or generic EC2 range yields a provider or service-range finding only.
 - A third-party mail gateway must not reveal a hidden mailbox backend.
-- A script reference and a paid SaaS subscription must not be treated as equivalent claims.
-- SPF authorization must yield `sending_authorization` at supported specificity, never imply inbound mail routing or paid adoption.
+- A script reference yields `web_integration` only.
+- SPF authorization yields `sending_authorization` only.
 - A technology found only on an external redirected site must not become an in-scope product.
 - Retired-only or CT-only historical evidence must not become active infrastructure.
 
@@ -437,7 +343,7 @@ Replay the same capture against bundles with different IP associations. Verify u
 
 The matrix passes SPEC section 8.5 for every required product family. Tests assert the expected product and relation and reject unsupported conclusions.
 
-Multi-vendor evidence produces separate relationships with supporting evidence, without inflated confidence or lead qualification claims. E1 must have passed before P3 through P6 are complete.
+Multi-vendor input produces separate relationships with referenced evidence. E1 must pass before P3 through P6 are complete.
 
 **References:** SPEC sections 8, 9. Sources S11–S15 for range/product limitations and examples.
 
@@ -475,7 +381,7 @@ The report must identify each relationship separately. It must not claim the ver
 
 Run a second variant where HTTP times out and a third where a narrower IP association is retired. Existing valid DNS findings and active covering-prefix associations must survive.
 
-Run the missing-ASN, missing-CDN, missing-provider, mixed-address, and failed-AAAA variants. Test IP partial zero-match versus wholly unavailable lookup and partial versus unavailable replay. Verify CLI exit codes and report coverage for every applicable decision-table row. Do not infer qualification, spend, or savings from any report.
+Run the missing-ASN, missing-CDN, missing-provider, mixed-address, and failed-AAAA variants. Test IP partial zero-match versus wholly unavailable lookup and partial versus unavailable replay. Verify CLI exit codes and report coverage for every applicable decision-table row.
 
 ### Exit gate
 
@@ -526,7 +432,7 @@ Test two operators reading shared results and cancelling each other's jobs while
 
 ### Exit gate
 
-Single-target and batch API workflows persist and retrieve complete evidence-backed reports. Job state and coverage expose crashes and partial collection. The API supports the same product discovery as the CLI.
+Single-target and batch API workflows persist reports with their observations and evidence references. Job state and coverage expose crashes and partial collection. The API returns the same findings as the CLI.
 
 **References:** SPEC sections 11, 12, 14. Source S18.
 
@@ -610,7 +516,7 @@ An operator can install, populate, run, monitor, update, recover, and back up th
 - [ ] Run network-denied startup/local lookup/reclassification tests and instrumented live-mode egress tests. Audit the full dependency graph again at the release revision.
 - [ ] Re-run the complete selected upstream import and official-feed compatibility suite. Publish source counts, lifecycle counts, method/role coverage, and validation exceptions.
 - [ ] Evaluate provider, product, and relationship accuracy on a labeled controlled corpus. Separate insufficient evidence from false conclusions and report dataset limitations.
-- [ ] Require every supported positive/negative fixture in SPEC section 8.5 to pass. Publish signal-specific unsupported cases; do not accept provider-only fallback for a product-identifying signal. Evaluation concerns attribution evidence, not lead qualification or commercial estimates.
+- [ ] Require every positive and negative fixture in SPEC section 8.5 to pass. Publish signal-specific unsupported cases. A product-identifying signal must produce the product finding.
 - [ ] Benchmark local prefix/ASN/CDN lookup, bundle build/load, memory, rules/fingerprints, and controlled end-to-end analysis independently.
 - [ ] Record hardware, corpus/source hashes, versions, concurrency, p50/p95/p99, allocations, and peak memory. Clearly distinguish measured results from initial targets.
 - [ ] Load-test queue admission, bounded concurrency, per-destination rate limits, cancellation, slow targets, oversized responses, and large CLI inputs.
@@ -633,7 +539,7 @@ Optional CT may be disabled at runtime, but its supported ingestion/discovery im
 | CDN + different DNS vendor + mail provider + SaaS script | Distinct typed findings with subject, relationship, and evidence. |
 | Cloudflare NS with non-Cloudflare website | DNS finding only; no inferred Cloudflare proxy. |
 | Google verification token only | Verification association; no Google Workspace claim. |
-| AWS-owned IP and generic EC2 service range | Network/range evidence; no proven direct EC2 customer deployment. |
+| AWS-owned IP and generic EC2 service range | Provider and service-range findings only. |
 | Several providers/services share one CIDR | All eligible ties preserved with source provenance. |
 | Retired narrower prefix and active broader prefix | Default result keeps active broader association. |
 | External landing-page redirect | Landing-page technologies keep external scope and do not contaminate root summary. |
@@ -667,7 +573,7 @@ Optional CT may be disabled at runtime, but its supported ingestion/discovery im
 
 | Requirement | Implemented in | Minimum acceptance evidence |
 | --- | --- | --- |
-| R01 Full attribution | E1, P7, P8, P11 | Early integrated fixture, then complete evidence reports supporting lead enrichment through CLI and API. |
+| R01 Full attribution | E1, P7, P8, P11 | Early integrated fixture, then reports with referenced evidence through CLI and API. |
 | R02 No proprietary APIs | P0, P3–P5, P9–P11 | Dependency audit and network-attempt tests without enrichment credentials. |
 | R03 Targets and scope | P1, P4, P5, P7, P9 | Normalization, boundary, redirect, and CT-scope fixtures. |
 | R04 DNS | P4, P7 | Raw records, chains, TTL, delegation, and failure-state tests. |
@@ -700,7 +606,7 @@ The following are fixed architectural constraints unless the specification is de
 - Keep `disposable/cloud-ip-ranges` for breadth and official service feeds for depth. Do not discard service/region enrichment to finish the IP component sooner.
 - Use exact prefix and interval matching, not embeddings. Preserve all covering associations before making relation-aware conclusions.
 - Store evidence and coverage, not just a flat technology list. Never hide ambiguity with invented confidence percentages.
-- Supply attribution evidence for lead enrichment; keep qualification, spend, and savings decisions outside the application.
+- Emit only the provider, product, and relationship supported by the matched input.
 - Validate addresses independently, start HTTP on an approved public address, and preserve later DNS failures/blocked addresses as coverage. Never dial prohibited addresses.
 - Treat missing enrichment as degraded capability, not a reason to erase useful evidence. Apply SPEC section 14.2 consistently, including IP lookup and replay.
 - Reclassification uses a selected bundle to reinterpret immutable captures, without reconstructing historical ownership. Keep source records and times distinct.

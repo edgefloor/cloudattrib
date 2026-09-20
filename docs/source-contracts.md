@@ -1,8 +1,8 @@
 # Source contracts
 
-This reference records the source formats reviewed on 2026-09-20. Importers read local files. Acquisition happens separately, through an operator-controlled download or mirror.
+These are the source formats reviewed on 2026-09-20. Importers read local files populated by an operator-controlled download or mirror.
 
-For each fetched artifact, retain the exact bytes, URL, HTTP metadata, SHA-256 digest, retrieval time, known publication time, adapter version, and activation time. File identity does not establish source trust or redistribution rights.
+For each artifact, retain the bytes, URL, HTTP metadata, SHA-256 digest, retrieval time, known publication time, adapter version, and activation time.
 
 ## Local file layout
 

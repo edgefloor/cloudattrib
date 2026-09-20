@@ -1,13 +1,11 @@
 # Certificate Transparency operations
 
-Certificate Transparency (CT) adds historical hostname candidates to domain analysis. Candidates come from a local PostgreSQL index. Analysis never contacts a public CT log or search service.
-
-A certificate name does not prove current DNS existence, product use, or ownership. Selected concrete names must pass the ordinary DNS and HTTP collection policy before supporting current findings. Discovery is not exhaustive.
+Certificate Transparency (CT) supplies historical hostnames from a local PostgreSQL index. Domain analysis checks selected names through the normal DNS and HTTP path. Only `ct collect` contacts a configured public log.
 
 - [Enable local discovery](#enable-local-discovery)
 - [Import JSONL records](#local-jsonl-import)
 - [Collect a bounded log increment](#bounded-rfc-6962-collection)
-- [Understand retention and measured costs](#retention-and-operating-envelope)
+- [Check retention and measured costs](#retention-and-operating-envelope)
 
 ## Enable local discovery
 

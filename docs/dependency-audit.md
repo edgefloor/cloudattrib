@@ -1,8 +1,8 @@
 # Dependency audit
 
-Audit baseline: `4b7a5030976f397aaab2a180a466d1e8e2c3bb0a`. Linked dependencies were checked again for the release candidate on 2026-09-20.
+Baseline `4b7a5030976f397aaab2a180a466d1e8e2c3bb0a`, checked again on 2026-09-20.
 
-This reference records version choices, network behavior, and adapter boundaries. The [SBOM](../sbom/cloudattrib.cdx.json) records artifact identities. [Third-party notices](../NOTICE.md) summarize licenses; data rights require separate review.
+The tables below record dependency versions, network behavior, and adapter boundaries. The [SBOM](../sbom/cloudattrib.cdx.json) contains artifact identities. [NOTICE.md](../NOTICE.md) contains license notices.
 
 Read the [open release questions](#open-release-questions) before redistributing source data or fingerprint assets.
 

@@ -6,9 +6,9 @@ Contract version: 2.1, dated 2026-09-20
 
 Delivery checklist: [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md)
 
-This document defines required behavior. It is not a claim that every requirement has passed acceptance. The [qualification report](docs/qualification.md) records test evidence and known limits. The [README](README.md) covers current setup and usage.
+This document defines required behavior. The [qualification report](docs/qualification.md) records completed checks. The [README](README.md) covers setup and usage.
 
-Requirements use direct instructions or "must." Rationale and dated source observations explain those requirements without changing them. Editorial changes preserve section numbers and the R01 through R23 identifiers.
+Preserve section numbers and the R01 through R23 identifiers when editing this contract.
 
 ## Navigate the contract
 
@@ -24,25 +24,21 @@ Requirements use direct instructions or "must." Rationale and dated source obser
 
 ## 1. Purpose and complete scope
 
-Build a self-hosted Go application that answers:
+Build a self-hosted Go application that checks a domain, hostname, URL, or IP address and reports the cloud and SaaS matches produced by its DNS, HTTP, certificate, and IP data.
 
-> Given a domain, hostname, URL, or IP address, which cloud infrastructure and SaaS products are publicly associated with it, and what evidence supports each association?
-
-The system collects attribution evidence for lead enrichment by a cloud optimization business. Downstream users decide whether a lead qualifies. Qualification, lead scoring, spend estimates, and savings estimates are outside scope.
-
-Preserve useful evidence when a collector or enrichment source is unavailable. Report the resulting coverage limits.
+Keep usable results when one collector or local source fails. Record the failed work in `coverage`.
 
 Delivery includes DNS collection, CNAME classification, bounded HTTP collection, local web fingerprints, cloud and CDN attribution, and local ASN enrichment. It also includes provider service and region metadata, evidence aggregation, persistent results, batch processing, and operations tooling.
 
 Certificate Transparency (CT) is a required discovery module with runtime use disabled by default. Local IP lookup alone does not satisfy the delivery scope.
 
-The system reports observed associations. It must not turn an AWS-hosted endpoint into a claim that the domain owner buys AWS directly, or turn a verification token into proof of a paid SaaS subscription.
+Findings name the relationship supported by the input. An AWS endpoint can produce `web_delivery`. A verification token can produce `domain_verification`.
 
 ### 1.1 Required capabilities
 
 | ID | Capability | Completion requirement |
 | --- | --- | --- |
-| R01 | End-to-end attribution | A domain produces a combined, evidence-backed infrastructure and product report. |
+| R01 | End-to-end attribution | A domain report contains infrastructure and product findings with references to the inputs that matched. |
 | R02 | No proprietary enrichment APIs | No commercial lookup service, vendor account, enrichment API key, or telemetry is required. |
 | R03 | Target normalization and scope | Support domains, hostnames, HTTP/HTTPS URLs, IPs, and bounded batches with explicit scope. |
 | R04 | DNS collection | Collect A, AAAA, CNAME, MX, NS, and TXT with record ownership, TTLs, chain relationships, and per-query outcomes. |
@@ -88,7 +84,7 @@ Upstream metadata can mention APIs used by the upstream crawler. Preserve those 
 
 ### 1.3 Non-goals
 
-No vulnerability assessment, port scanning, exploitation, SMTP interrogation, exhaustive subdomain brute force, authenticated website crawling, JavaScript execution, or browser automation. No inference of contracts, spend, employee counts, private architecture, or hidden origin servers. No promise to discover every product a company uses.
+Excluded operations are vulnerability assessment, port scanning, exploitation, SMTP interrogation, exhaustive subdomain brute force, authenticated crawling, JavaScript execution, and browser automation. Reports contain observed public relationships, not contracts, employee counts, private architecture, or hidden origin servers.
 
 No embedding model, vector index, distributed message broker, graph database, or Kubernetes requirement. A complete copy of every public CT log and a raw BGP collector are not prerequisites for the supported local CT and ASN paths.
 
@@ -107,7 +103,7 @@ domain, hostname, or URL
     -> return a report with provenance and coverage
 ```
 
-Each attempt uses one captured immutable view. Dataset updates build that view separately. Optional CT supplies seed names from a local index. IP lookup queries local indexes directly; reclassification interprets retained inputs without collection. The [README diagram](README.md#how-attribution-works) shows the domain-analysis path.
+Each attempt uses one captured immutable view. Dataset updates build that view separately. Optional CT supplies seed names from a local index. IP lookup queries local indexes directly. Reclassification interprets retained inputs without collection.
 
 ### 2.1 Selected components
 
@@ -447,9 +443,9 @@ A rule's relationship is constrained by the observed edge. A CloudFront match re
 
 ### 8.4 Required conservative mappings
 
-`google-site-verification` maps to Google domain-verification evidence, not automatically Google Workspace. A Microsoft verification token does not prove a Microsoft 365 subscription. An MX gateway identifies the visible routing layer, not necessarily the mailbox backend. A Cloudflare NS identifies authoritative DNS, not necessarily Cloudflare's reverse proxy.
+`google-site-verification` and Microsoft verification tokens map to `domain_verification`. MX gateways map to the visible `mail_routing` layer. Cloudflare nameservers map to `authoritative_dns`.
 
-A generic AWS, Azure, or Google-owned IP yields provider-level network evidence. A CDN's visible peer IP does not reveal its customer origin. A frontend framework does not prove the hosting vendor. An external script is an observed web integration, not proof that a subscription remains active.
+Generic AWS, Azure, and Google IP ranges map to provider-level network findings. CDN peer addresses map to the visible delivery layer. Frontend frameworks and external scripts map to `web_technology` and `web_integration`.
 
 ### 8.5 Product-and-relationship acceptance matrix
 
@@ -462,20 +458,20 @@ Unsupported cases must explain the missing or insufficient signal. They cannot w
 | Product or family | Required signal and relationship | Positive fixture | Negative fixture and justified limit |
 | --- | --- | --- | --- |
 | AWS CloudFront | Reviewed distribution CNAME; `web_delivery` | In-scope CNAME to a documented distribution name identifies CloudFront. | Lookalike suffix and mail-dependency context do not produce website delivery; hidden origin remains unknown. |
-| AWS ELB and S3 | Product-specific DNS endpoint pattern; `web_delivery` | Separate supported ELB and S3 endpoint fixtures identify the corresponding product. | Generic AWS IP/EC2 range alone does not identify ELB, S3, or a customer deployment. |
+| AWS ELB and S3 | Product-specific DNS endpoint pattern; `web_delivery` | Separate supported ELB and S3 endpoint fixtures identify the corresponding product. | Generic AWS IP and EC2 ranges stop at provider or service-range findings. |
 | AWS Route 53 | Reviewed authoritative NS pattern; `authoritative_dns` | NS fixture identifies Route 53 authoritative DNS. | AWS web IP or SPF signal does not establish Route 53 DNS. |
 | Azure App Service and Blob Storage | Product-specific DNS endpoint pattern; `web_delivery` | Separate supported App Service and Blob endpoint fixtures identify each product. | Generic Azure service ranges do not establish either product. |
 | Azure DNS | Reviewed authoritative NS pattern; `authoritative_dns` | NS fixture identifies Azure DNS. | Azure-hosted website alone does not establish its DNS provider. |
 | GCP infrastructure | Official range/ASN evidence; `service_range` or `network_provider` | Preserve raw service/scope and provider-level association. | Generic ranges cannot identify BigQuery, GKE, or Cloud Run; provider-only output is appropriate. |
 | Cloudflare | Reviewed NS and delivery signals; `authoritative_dns` and `web_delivery` separately | Separate DNS-only and independently supported delivery fixtures. | NS-only fixture must not yield proxying; no hidden-origin inference. |
 | Fastly, Vercel, and Netlify | Reviewed service CNAME or product-specific HTTP signal; `web_delivery` | One product-specific fixture for each provider's supported delivery signal. | Generic shared addresses and suffix lookalikes cannot replace product evidence. |
-| Google-hosted and Microsoft-hosted mail | Reviewed MX pattern; `mail_routing` | Separate fixtures identify the supported visible mail-routing product. | Verification-only TXT and SPF-only records do not establish mailbox hosting or subscriptions. |
+| Google-hosted and Microsoft-hosted mail | Reviewed MX pattern; `mail_routing` | Separate fixtures identify the supported visible mail-routing product. | TXT verification emits `domain_verification`; SPF emits `sending_authorization`. |
 | Proofpoint and Mimecast | Reviewed gateway MX pattern; `mail_routing` | Separate gateway fixtures identify each visible routing layer. | Do not infer the mailbox backend hidden behind the gateway. |
 | Reviewed SPF provider rules | Parsed provider-specific SPF authorization; `sending_authorization` | A documented authorization mechanism identifies the supported provider/product at the justified specificity. | Mere substring, unrelated TXT, or MX-only signal must not yield sending authorization; no paid-adoption claim. |
-| HubSpot, Segment, and Atlassian | Reviewed product-specific DNS or static HTTP integration signal; relation fixed by that signal | One supported product fixture per family, using a documented integration, endpoint, or verification signal. | External-redirect-only evidence stays external; verification remains `domain_verification`; script presence does not prove a subscription. |
+| HubSpot, Segment, and Atlassian | Reviewed product-specific DNS or static HTTP integration signal; relation fixed by that signal | One supported product fixture per family, using a documented integration, endpoint, or verification signal. | External redirects keep external scope. Verification emits `domain_verification`; scripts emit `web_integration`. |
 | Web frameworks such as React | Local fingerprint result; `web_technology` category | Captured response yields a raw technology label and canonical technology mapping. | Framework detection must not imply a cloud vendor or SaaS purchase. |
 
-Release acceptance requires every supported positive and negative fixture above to pass. Provider-only fallback is accepted only for documented signal limitations, such as generic cloud ranges. Broader corpus measurements in section 15.2 report accuracy and blind spots separately from these deterministic acceptance cases. Findings support lead enrichment; the matrix does not define lead qualification, spend, or savings decisions.
+Release acceptance requires every positive and negative fixture above to pass. Provider-only fallback applies only to signals such as generic cloud ranges. Section 15.2 measures broader corpus accuracy separately from these deterministic cases.
 
 ## 9. Evidence and aggregation
 
@@ -509,7 +505,7 @@ Provider-only evidence has a null product. Unknown fields, including source publ
 
 Use `strong`, `moderate`, and `weak` as documented evidence categories, not calibrated probabilities. Do not emit fabricated values such as 0.98. Do not add arbitrary weights from correlated detectors and present the sum as confidence.
 
-A product-specific configured CNAME can support a strong configuration finding. A published generic prefix or ASN usually supports a weaker network association. A service-range match can be strong evidence of range membership while remaining insufficient proof of a particular customer deployment.
+A product-specific CNAME can support a strong configuration finding. A published generic prefix or ASN supports a network association. A service-range match describes membership in that published range.
 
 Within the same `(subject, provider, product, relation)` group, start from the strongest applicable rule. Increase support only through explicitly reviewed combination rules. Deduplicate evidence that has the same underlying response, prefix source, or fingerprint. ASN, `cdncheck`, and official range matches may overlap in provenance and must not automatically count as three independent confirmations.
 
@@ -563,7 +559,7 @@ Newer log protocols can be added through this adapter boundary. Supporting every
 
 Build a local hostname index filtered to configured root scopes. During an analysis, read a consistent bounded candidate set, record the index/checkpoint identity, and pass those concrete hostnames through the ordinary DNS and HTTP policy.
 
-Deduplicate precertificate/certificate repeats. Do not expand wildcard names into invented hosts. A certificate name does not prove current DNS existence, current product use, or business ownership. It is a discovery lead until revalidated.
+Deduplicate precertificate and certificate repeats. Keep wildcard names as patterns. Treat each concrete certificate name as a candidate until the normal DNS and HTTP path checks it.
 
 Default to a maximum of 20 CT-derived hostnames per target, selected deterministically by most recent logged time and then hostname. Report the available, selected, and omitted counts. Do not query crt.sh or any commercial CT-search service.
 
@@ -708,8 +704,7 @@ This synthetic projection illustrates the required user-facing distinctions. The
       "relation": "web_delivery",
       "strength": "strong",
       "activity": "configured",
-      "evidence_ids": ["fixture-cname-cloudfront"],
-      "limitations": ["Does not identify the customer origin or contracting party."]
+      "evidence_ids": ["fixture-cname-cloudfront"]
     },
     {
       "subject": "example.com",
@@ -719,8 +714,7 @@ This synthetic projection illustrates the required user-facing distinctions. The
       "relation": "authoritative_dns",
       "strength": "strong",
       "activity": "configured",
-      "evidence_ids": ["fixture-ns-cloudflare"],
-      "limitations": ["Does not imply that the website uses Cloudflare proxying."]
+      "evidence_ids": ["fixture-ns-cloudflare"]
     },
     {
       "subject": "example.com",
@@ -730,8 +724,7 @@ This synthetic projection illustrates the required user-facing distinctions. The
       "relation": "domain_verification",
       "strength": "weak",
       "activity": "verification_only",
-      "evidence_ids": ["fixture-txt-google"],
-      "limitations": ["Does not establish Google Workspace use."]
+      "evidence_ids": ["fixture-txt-google"]
     }
   ]
 }
@@ -921,7 +914,7 @@ A controlled mixed-answer fixture must prove exact public-address dialing with c
 
 Rules require positive, negative, and misleading lookalike fixtures. Integration tests must cover a combined CDN + authoritative-DNS + mail-routing + SaaS-script report. Assertions must verify the absence of unsupported conclusions, not merely the presence of expected labels.
 
-Before completing all adapters, pass the E1 early integrated fixture milestone defined in the implementation plan: one controlled domain through DNS, bounded HTTP, local classification, and a schema-valid evidence-backed report. Use small pinned datasets and real collection/detection code for the selected path. Include a missing-source variant and an approved-public-address plus delayed/blocked-AAAA variant. This milestone validates the shared model early and does not reduce final delivery scope.
+Before completing all adapters, pass the E1 fixture from the implementation plan: one controlled domain through DNS, bounded HTTP, local classification, and a schema-valid report with evidence references. Use small pinned datasets and real collection and detection code. Include a missing-source case and an approved public address with delayed or blocked AAAA.
 
 Run tests that deny all external network access during application startup, local IP lookup, reclassification, and classifier execution. Live-mode tests allow only the configured local test services. Instrument DNS/dial attempts so unintended calls cannot hide behind a failed connection.
 
@@ -937,7 +930,7 @@ CT tests must pair valid signed checkpoints with altered entry bytes and require
 
 Maintain a labeled, consented or synthetic corpus with separate metrics for provider, product, and relationship detection. Report precision and recall on that corpus only, including unresolved/unsupported cases and per-signal error categories. Do not publish an overall "80–90% coverage" estimate without evidence.
 
-Section 8.5's per-product and per-relationship fixtures are the minimum deterministic acceptance criteria. Publish unsupported cases with signal-specific reasons. A provider-only result cannot pass a fixture whose supported signal establishes a product. Accuracy measurements describe evidence attribution, not lead quality or estimated commercial value.
+Section 8.5 defines the minimum deterministic acceptance cases. Publish unsupported cases with signal-specific reasons. A provider-only result fails a fixture whose signal identifies a product.
 
 Benchmark local lookup, dataset build, memory, and end-to-end controlled collection separately. Record hardware, Go/library versions, artifact sizes, input distribution, concurrency, p50/p95/p99 latency, allocations, and peak memory. Live Internet latency is not a stable classifier benchmark.
 
@@ -959,13 +952,13 @@ Completion requires every capability in section 1 to work together and pass the 
 
 1. A domain request collects DNS and HTTP once, runs local web fingerprints, enriches addresses with cloud/service/CDN/ASN data, and returns normalized product and infrastructure findings with provenance.
 2. A fixture using different vendors for DNS, CDN, mail, and web integrations produces those separate relationships without collapsing them into a single hosting vendor.
-3. Service/region adapters work, and unsupported service specificity remains unknown. Cloud-range matching alone cannot claim a commercial customer relationship.
+3. Service and region adapters work. Generic cloud ranges produce provider-level findings unless their source names a service.
 4. TXT-only verification, external redirects, retired prefixes, generic cloud ASNs, and historical CT names cannot produce unsupported active-product claims.
 5. Full analysis, DNS-only analysis, local IP lookup, batch jobs, stored report retrieval, and offline reclassification are implemented.
 6. Optional CT import/collection/discovery is usable when configured, reports its limits, and makes no proprietary search calls. The ordinary full pipeline works with CT disabled.
 7. Updates, rollback, restart, persistence, resource bounds, and dependency network audits pass their tests.
 8. CLI documentation, API schemas, deployment files, operations guides, rule coverage, and measured benchmark/accuracy reports are delivered.
-9. The product-and-relationship matrix passes with documented unsupported signals. Evidence supports downstream lead enrichment without producing qualification, spend, or savings estimates.
+9. The product-and-relationship matrix passes with documented unsupported signals and exact evidence references.
 10. Per-address collection and every degraded-operation decision-table case pass, including partial IP lookup and replay. Unavailable data never becomes a successful no-match.
 11. Pinned batches survive queue waits, activations, retries, and restart; admission/pruning races cannot lose an accepted bundle. Backlog admission is bounded and shared operator identity is enforced.
 12. CT verification distinguishes checkpoint signatures, continuity, and entry inclusion. The shipping collector has measured throughput, bandwidth, storage, and lag under documented budgets.

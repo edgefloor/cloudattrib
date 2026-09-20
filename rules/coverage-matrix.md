@@ -1,8 +1,8 @@
 # Rule coverage matrix
 
-Reviewed on 2026-09-20. The executable bundle is [builtin.json](../internal/rules/builtin.json), and [engine_test.go](../internal/rules/engine_test.go) contains its acceptance fixtures. Google Cloud range evidence also uses the importer and index fixtures listed below.
+Reviewed on 2026-09-20. [builtin.json](../internal/rules/builtin.json) contains the rules. [engine_test.go](../internal/rules/engine_test.go) contains their fixtures.
 
-Each row names a signal, the relationship it supports, and a boundary it must not cross. A supported rule does not mean every domain exposes that signal. Generic ranges may identify a provider without identifying a product or customer deployment.
+Each row names the input that matches, the emitted relationship, and the limit of that match.
 
 - [Web delivery](#web-delivery)
 - [Authoritative DNS and mail](#authoritative-dns-and-mail)
@@ -13,7 +13,7 @@ Each row names a signal, the relationship it supports, and a boundary it must no
 | Product | Supported signal | Emitted relation | Positive fixture | Negative boundary or limitation | Vendor reference |
 | --- | --- | --- | --- | --- | --- |
 | AWS CloudFront | Distribution CNAME below `cloudfront.net` | `web_delivery` | `d111111abcdef8.cloudfront.net` | Lookalikes and mail-dependency scope do not match. The origin remains unknown. | [CloudFront alternate names](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/CNAMEs.html) |
-| AWS Elastic Load Balancing | Documented ELB DNS-name shape | `web_delivery` | `app-123456.us-east-1.elb.amazonaws.com` | An AWS address or ASN does not identify an ELB or customer deployment. | [Route 53 alias to ELB](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-to-elb-load-balancer.html) |
+| AWS Elastic Load Balancing | Documented ELB DNS-name shape | `web_delivery` | `app-123456.us-east-1.elb.amazonaws.com` | Only the product-specific DNS shape matches ELB. | [Route 53 alias to ELB](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-to-elb-load-balancer.html) |
 | AWS S3 website hosting | Regional S3 website endpoint | `web_delivery` | `bucket.s3-website.eu-west-1.amazonaws.com` | Ordinary S3 API endpoints and generic AWS ranges are not website-hosting evidence. | [S3 website endpoints](https://docs.aws.amazon.com/AmazonS3/latest/userguide/WebsiteEndpoints.html) |
 | Azure App Service | CNAME below `azurewebsites.net` | `web_delivery` | `app.azurewebsites.net` | Generic Azure service tags cannot establish App Service. | [Azure domains](https://learn.microsoft.com/en-us/azure/security/fundamentals/azure-domains) |
 | Azure Blob Storage | CNAME below `blob.core.windows.net` | `web_delivery` | `account.blob.core.windows.net` | Generic Azure service tags cannot establish Blob Storage. | [Azure domains](https://learn.microsoft.com/en-us/azure/security/fundamentals/azure-domains) |
@@ -29,20 +29,20 @@ Each row names a signal, the relationship it supports, and a boundary it must no
 | Amazon Route 53 | Constrained Route 53 nameserver shape | `authoritative_dns` | `ns-123.awsdns-45.net` | AWS web delivery and SPF records do not establish the DNS operator. | [Hosted-zone nameservers](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/GetInfoAboutHostedZone.html) |
 | Azure DNS | Constrained Azure DNS nameserver shape | `authoritative_dns` | `ns1-01.azure-dns.com` | An Azure-hosted website does not establish its DNS operator. | [Delegate a domain to Azure DNS](https://learn.microsoft.com/en-us/azure/dns/dns-delegate-domain-azure-dns) |
 | Cloudflare DNS | Nameserver below `ns.cloudflare.com` | `authoritative_dns` | `ada.ns.cloudflare.com` | Nameserver evidence does not imply reverse proxying. | [Nameserver assignment](https://developers.cloudflare.com/dns/zone-setups/reference/nameserver-assignment/) |
-| Google-hosted mail | Documented Google MX exchange | `mail_routing` | `aspmx.l.google.com` | Verification and SPF-only records do not establish inbound routing or a subscription. | [Google Workspace MX](https://support.google.com/a/answer/174125) |
-| Microsoft-hosted mail | MX below `mail.protection.outlook.com` | `mail_routing` | `tenant.mail.protection.outlook.com` | Verification and SPF-only records do not establish inbound routing or a subscription. | [Microsoft 365 DNS records](https://learn.microsoft.com/en-us/microsoft-365/admin/dns/create-dns-records-at-any-dns-hosting-provider) |
+| Google-hosted mail | Documented Google MX exchange | `mail_routing` | `aspmx.l.google.com` | Only the MX pattern emits `mail_routing`; verification and SPF rules emit other relations. | [Google Workspace MX](https://support.google.com/a/answer/174125) |
+| Microsoft-hosted mail | MX below `mail.protection.outlook.com` | `mail_routing` | `tenant.mail.protection.outlook.com` | Only the MX pattern emits `mail_routing`; verification and SPF rules emit other relations. | [Microsoft 365 DNS records](https://learn.microsoft.com/en-us/microsoft-365/admin/dns/create-dns-records-at-any-dns-hosting-provider) |
 | Proofpoint | Gateway MX below `ppe-hosted.com` | `mail_routing` | `mx1-us1.ppe-hosted.com` | The mailbox backend behind the gateway remains unknown. | [Proofpoint inbound routing](https://help.proofpoint.com/Proofpoint_Essentials/Email_Security/Administrator_Topics/hostedemailservices/Configuring_Inbound_Delivery_Routing) |
 | Mimecast | Gateway MX below `mimecast.com` | `mail_routing` | `us-smtp-inbound-1.mimecast.com` | The mailbox backend behind the gateway remains unknown. | [Mimecast MX setup](https://mimecastsupport.zendesk.com/hc/en-us/articles/34000558291219) |
-| Google and Microsoft SPF | Parsed exact `include:` mechanisms | `sending_authorization` | `_spf.google.com`, `spf.protection.outlook.com` | Substrings, unrelated TXT, and MX-only signals do not match. Authorization is not paid adoption. | [Google SPF](https://support.google.com/a/answer/10685032), [Microsoft SPF](https://learn.microsoft.com/en-us/defender-office-365/email-authentication-spf-configure) |
+| Google and Microsoft SPF | Parsed exact `include:` mechanisms | `sending_authorization` | `_spf.google.com`, `spf.protection.outlook.com` | Substrings, unrelated TXT, and MX-only signals do not match. | [Google SPF](https://support.google.com/a/answer/10685032), [Microsoft SPF](https://learn.microsoft.com/en-us/defender-office-365/email-authentication-spf-configure) |
 
 ## Other associations
 
 | Product | Supported signal | Emitted relation | Positive fixture | Negative boundary or limitation | Vendor reference |
 | --- | --- | --- | --- | --- | --- |
-| Google Cloud infrastructure | Official provider/service prefix associations | `service_range` | Covered by prefix importer/index fixtures | A generic range does not identify BigQuery, GKE, Cloud Run, or a customer deployment. | [Google Cloud IP ranges](https://cloud.google.com/vpc/docs/configure-private-google-access#ip-addr) |
-| HubSpot | Script host `js.hs-scripts.com` | `web_integration` | Retained tracking-script URL | External-redirect-only evidence is excluded. Script presence does not prove a current subscription. | [HubSpot tracking code](https://knowledge.hubspot.com/reports/install-the-hubspot-tracking-code) |
-| Segment | Script host and `/analytics.js` path | `web_integration` | Retained Analytics.js URL | External-redirect-only evidence is excluded. Script presence does not prove a current subscription. | [Analytics.js quickstart](https://segment.com/docs/connections/sources/catalog/libraries/website/javascript/quickstart/) |
-| Atlassian | Exact TXT verification prefix | `domain_verification` | `atlassian-domain-verification=fixture` | Verification does not prove a product subscription. | [Verify an Atlassian domain](https://support.atlassian.com/user-management/docs/verify-a-domain-to-manage-accounts/) |
+| Google Cloud infrastructure | Official provider/service prefix associations | `service_range` | Covered by prefix importer/index fixtures | Generic ranges stop at the provider or published service label. | [Google Cloud IP ranges](https://cloud.google.com/vpc/docs/configure-private-google-access#ip-addr) |
+| HubSpot | Script host `js.hs-scripts.com` | `web_integration` | Retained tracking-script URL | External-redirect scope is excluded from the root summary. | [HubSpot tracking code](https://knowledge.hubspot.com/reports/install-the-hubspot-tracking-code) |
+| Segment | Script host and `/analytics.js` path | `web_integration` | Retained Analytics.js URL | External-redirect scope is excluded from the root summary. | [Analytics.js quickstart](https://segment.com/docs/connections/sources/catalog/libraries/website/javascript/quickstart/) |
+| Atlassian | Exact TXT verification prefix | `domain_verification` | `atlassian-domain-verification=fixture` | The rule emits only `domain_verification`. | [Verify an Atlassian domain](https://support.atlassian.com/user-management/docs/verify-a-domain-to-manage-accounts/) |
 | React | Raw passive detector label mapped locally | `web_integration`; category `web_technology` | `React` | Framework evidence has no cloud provider and does not imply hosting or purchase. | Pinned `wappalyzergo` detector contract |
 
 ## Shared matching rules

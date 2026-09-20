@@ -1,8 +1,8 @@
 # Operations guide
 
-Use this guide to install and operate the service. For a standalone CLI run, start with the [README](../README.md#run-your-first-analysis).
+This guide installs and runs the service. For the standalone CLI, start with the [README](../README.md#run-it).
 
-The service uses PostgreSQL for reports and jobs, Unbound for DNS, and local files for enrichment. It runs without root privileges. Startup and analysis never download enrichment data.
+The service uses PostgreSQL for reports and jobs, Unbound for DNS, and local source files. Operators populate those files before staging a data bundle.
 
 - [Install with Compose](#compose-installation)
 - [Import and activate data](#import-and-activate-data)

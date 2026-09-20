@@ -1,6 +1,6 @@
 # Internal package map
 
-Reusable application code lives under `internal/`. The executable in `cmd/cloudattrib` loads configuration and connects these packages.
+`cmd/cloudattrib` loads configuration and connects the packages under `internal/`.
 
 | Package | Responsibility |
 | --- | --- |
@@ -22,4 +22,4 @@ Reusable application code lives under `internal/`. The executable in `cmd/clouda
 
 Keep library-specific types inside their adapters. Shared models must not expose BART tables, DNS-library records, fingerprint-engine types, or PostgreSQL types. Add a public package only when an external Go consumer needs one.
 
-The [architecture contracts](../docs/architecture.md) explain ownership and lifecycle rules. The [implementation plan](../IMPLEMENTATION-PLAN.md) records required deliverables and acceptance cases.
+See [architecture](../docs/architecture.md) for cross-package contracts and [IMPLEMENTATION-PLAN.md](../IMPLEMENTATION-PLAN.md) for acceptance cases.

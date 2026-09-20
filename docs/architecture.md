@@ -1,6 +1,6 @@
 # Architecture contracts
 
-This reference defines package responsibilities and the contracts shared by collection, classification, jobs, and storage. It records the decisions made for SPEC 2.1. The [specification](../SPEC.md) is authoritative; the [qualification report](qualification.md) records what has been tested.
+This page maps package ownership and the contracts that cross package boundaries. [SPEC.md](../SPEC.md) defines the behavior. The [qualification report](qualification.md) lists the checks that have run.
 
 ## Package boundaries
 
@@ -11,7 +11,7 @@ This reference defines package responsibilities and the contracts shared by coll
 | `policy` | Address and port validation, collection budgets | Product attribution |
 | `collect/dns`, `collect/http` | Typed collection observations and outcomes | Product inference or relaxed scope rules |
 | `datasets` | Immutable bundle construction and publication | Changes to a view already captured by an attempt |
-| `app`, detectors, and enrichment adapters | Evidence from observations and consulted records | Lead qualification or spend estimates |
+| `app`, detectors, and enrichment adapters | Evidence from observations and consulted records | PostgreSQL transaction details |
 | `aggregate` | Findings grouped from evidence | New network collection |
 | `jobs` | Admission, reservations, leases, retries, cancellation, and pins | Database-specific transaction implementation |
 | `store/postgres` | Durable records and job transaction boundaries | Per-address prefix matching |
@@ -82,11 +82,9 @@ The service derives identity from configured credentials or a trusted proxy. The
 
 Cancellation stops new scheduling and propagates through collection, leases, and database calls. Already-started work may finish. Shared visibility remains unchanged. See SPEC sections [11.3](../SPEC.md#113-required-http-routes), [11.4](../SPEC.md#114-shared-trusted-operator-access), and [12.2](../SPEC.md#122-durable-job-execution).
 
-## Product and relationship coverage
+## Product relationships
 
-Findings supply evidence for lead enrichment. They do not qualify leads or estimate spend and savings.
-
-The relationship must match the signal. SPF uses `sending_authorization`; it does not establish inbound mail routing or paid adoption. Generic cloud ranges can support provider-only findings. A provider-only result cannot replace product detection when the supported signal identifies a product.
+Use the relationship named by the signal. SPF produces `sending_authorization`. MX records produce `mail_routing`. A generic cloud range produces a provider finding, while a product-specific CNAME can name the product.
 
 Every supported matrix row needs a dated source, canonical mapping, positive and negative fixtures, subject, scope, relation, and evidence reference. Unsupported cases must explain the missing or insufficient signal. See [rule coverage](../rules/coverage-matrix.md) and [SPEC section 8.5](../SPEC.md#85-product-and-relationship-acceptance-matrix).
 
