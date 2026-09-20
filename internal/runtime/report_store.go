@@ -26,11 +26,14 @@ func (standaloneReportStore) LoadReport(ctx context.Context, path string) (model
 	if err != nil {
 		return model.Report{}, model.NewError(model.CodePersistenceFailed, "open standalone report", err)
 	}
-	defer file.Close()
 	limited := io.LimitReader(file, maximumStandaloneReportBytes+1)
 	data, err := io.ReadAll(limited)
 	if err != nil {
+		_ = file.Close()
 		return model.Report{}, model.NewError(model.CodePersistenceFailed, "read standalone report", err)
+	}
+	if err := file.Close(); err != nil {
+		return model.Report{}, model.NewError(model.CodePersistenceFailed, "close standalone report", err)
 	}
 	if len(data) > maximumStandaloneReportBytes {
 		return model.Report{}, model.NewError(model.CodeInputTooLarge, "standalone report exceeds 64 MiB", nil)

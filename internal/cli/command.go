@@ -68,7 +68,7 @@ func runBatch(ctx context.Context, args []string, d Dependencies, s commandStrea
 		if err != nil {
 			return diagnostic(s.stderr, model.NewError(model.CodeInvalidSyntax, "open input: "+err.Error(), err))
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		reader = file
 	}
 	scanner := bufio.NewScanner(reader)
@@ -251,7 +251,7 @@ func runJSONL(ctx context.Context, path string, analyzer app.Analyzer, s command
 		if err != nil {
 			return diagnostic(s.stderr, model.NewError(model.CodeInvalidSyntax, "open input: "+err.Error(), err))
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		reader = file
 	}
 	scanner := bufio.NewScanner(reader)
@@ -355,7 +355,7 @@ func externalError(err error) *outputError {
 	return &outputError{Code: model.ErrorCodeOf(err), Message: err.Error()}
 }
 func diagnostic(writer io.Writer, err error) int {
-	fmt.Fprintf(writer, "cloudattrib: %s\n", err)
+	_, _ = fmt.Fprintf(writer, "cloudattrib: %s\n", err)
 	return model.CLIExit(err)
 }
 func combineExit(current, next int) int {
