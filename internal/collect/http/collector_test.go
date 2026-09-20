@@ -53,6 +53,9 @@ func TestRedirectResolvesAndValidatesEveryAddress(t *testing.T) {
 	if len(result.Observations) != 2 || result.Coverage.Status != model.CoveragePartial {
 		t.Fatalf("Collect() result = %#v", result)
 	}
+	if result.Observations[1].Scope != model.ScopeExternalRedirect {
+		t.Fatalf("redirect scope = %q, want external_redirect", result.Observations[1].Scope)
+	}
 	wantDials := []netip.Addr{first, second}
 	if got := dialer.Addresses(); !equalAddresses(got, wantDials) {
 		t.Fatalf("dial addresses = %v, want %v", got, wantDials)

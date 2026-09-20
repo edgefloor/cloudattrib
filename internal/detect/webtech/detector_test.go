@@ -19,6 +19,7 @@ func TestDetectUsesSuppliedResponse(t *testing.T) {
 		context.Background(),
 		"http-observation",
 		"example.com",
+		model.ScopeRoot,
 		http.Header{"Server": {"nginx"}},
 		[]byte("<html><body></body></html>"),
 		model.AttributionView{},

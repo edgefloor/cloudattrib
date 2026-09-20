@@ -165,7 +165,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		coverage = append(coverage, detectorCoverage...)
 	}
 	if s.webDetector != nil && httpErr == nil && httpStarted {
-		detected, detectorCoverage := s.webDetector.Detect(ctx, httpResult.Observation.ID, hostname, httpResult.Headers, httpResult.Body, s.view)
+		detected, detectorCoverage := s.webDetector.Detect(ctx, httpResult.Observation.ID, httpResult.Observation.Subject, httpResult.Observation.Scope, httpResult.Headers, httpResult.Body, s.view)
 		for i := range detected {
 			if detected[i].ClassifiedAt.IsZero() {
 				detected[i].ClassifiedAt = classifiedAt

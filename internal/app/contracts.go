@@ -45,7 +45,7 @@ type Detector interface {
 
 // WebDetector classifies one already-collected response without fetching it.
 type WebDetector interface {
-	Detect(context.Context, string, string, http.Header, []byte, model.AttributionView) ([]model.Evidence, model.Coverage)
+	Detect(context.Context, string, string, model.Scope, http.Header, []byte, model.AttributionView) ([]model.Evidence, model.Coverage)
 }
 
 // PrefixReader returns caller-owned local prefix associations.

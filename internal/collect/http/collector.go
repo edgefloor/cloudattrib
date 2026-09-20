@@ -82,7 +82,7 @@ func (c *Collector) Collect(ctx context.Context, scheme, hostname string, addres
 			return Result{Observations: observations, Coverage: coverage}, model.NewError(model.CodeLimitExceeded, "HTTP redirect limit exceeded", nil)
 		}
 		coverage.Attempted++
-		hopResult, location, collectErr := c.collectHop(ctx, currentURL, currentAddress, hop)
+		hopResult, location, collectErr := c.collectHop(ctx, currentURL, currentAddress, hop, hostname)
 		if collectErr != nil {
 			coverage.Status = model.CoveragePartial
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeCollectionFailed)
@@ -133,7 +133,7 @@ func (c *Collector) Collect(ctx context.Context, scheme, hostname string, addres
 	return finish(final, observations, coverage), nil
 }
 
-func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address netip.Addr, hop int) (Result, string, error) {
+func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address netip.Addr, hop int, originalHostname string) (Result, string, error) {
 	port := portForScheme(targetURL.Scheme)
 	if decision := c.policy.Check(address, port); !decision.Allowed {
 		return Result{}, "", model.NewError(model.CodePolicyBlocked, "HTTP destination is prohibited", nil)
@@ -180,7 +180,11 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 		coverage.Status = model.CoveragePartial
 		coverage.Truncated = 1
 	}
-	observation := model.Observation{ID: observationID(targetURL.Hostname(), address, hop), Type: "http_response", Subject: targetURL.Hostname(), Relation: model.RelationWebDelivery, Scope: model.ScopeRoot, ObservedAt: c.now(), Status: "responded", Payload: encoded, ContentHash: payload.BodyHash}
+	scope := model.ScopeRoot
+	if !strings.EqualFold(targetURL.Hostname(), originalHostname) {
+		scope = model.ScopeExternalRedirect
+	}
+	observation := model.Observation{ID: observationID(targetURL.Hostname(), address, hop), Type: "http_response", Subject: targetURL.Hostname(), Relation: model.RelationWebDelivery, Scope: scope, ObservedAt: c.now(), Status: "responded", Payload: encoded, ContentHash: payload.BodyHash}
 	return Result{Observation: observation, Coverage: coverage, PeerAddress: address, Headers: response.Header.Clone(), Body: slices.Clone(body)}, response.Header.Get("Location"), nil
 }
 

@@ -42,7 +42,7 @@ func New(mappings map[string]Mapping) (*Detector, error) {
 }
 
 // Detect fingerprints supplied response bytes and never performs a request.
-func (d *Detector) Detect(ctx context.Context, observationID, subject string, headers http.Header, body []byte, _ model.AttributionView) ([]model.Evidence, model.Coverage) {
+func (d *Detector) Detect(ctx context.Context, observationID, subject string, scope model.Scope, headers http.Header, body []byte, _ model.AttributionView) ([]model.Evidence, model.Coverage) {
 	if err := ctx.Err(); err != nil {
 		return nil, model.Coverage{Capability: "webtech", Status: model.CoveragePartial, ErrorCodes: []model.ErrorCode{model.CodeCancelled}}
 	}
@@ -70,7 +70,7 @@ func (d *Detector) Detect(ctx context.Context, observationID, subject string, he
 			Relation:       mapping.Relation,
 			Strength:       model.StrengthModerate,
 			Activity:       model.ActivityResponding,
-			Scope:          model.ScopeRoot,
+			Scope:          scope,
 			Explanation:    "passive detector result: " + name,
 		})
 	}

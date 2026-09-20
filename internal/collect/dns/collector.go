@@ -166,7 +166,7 @@ func marshalPayload(value any) model.JSONValue {
 }
 
 func errorCode(err error) model.ErrorCode {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) {
 		return model.CodeCancelled
 	}
 	return model.CodeTimeout
