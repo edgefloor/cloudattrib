@@ -34,6 +34,8 @@ func Run(ctx context.Context, args []string, dependencies Dependencies) int {
 	switch args[0] {
 	case "analyze":
 		return runAnalyze(ctx, args[1:], dependencies, streams)
+	case "batch":
+		return runBatch(ctx, args[1:], dependencies, streams)
 	case "lookup-ip":
 		return runLookupIP(ctx, args[1:], dependencies, streams)
 	case "reclassify":
@@ -41,6 +43,127 @@ func Run(ctx context.Context, args []string, dependencies Dependencies) int {
 	default:
 		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, fmt.Sprintf("unknown subcommand %q", args[0]), nil))
 	}
+}
+
+func runBatch(ctx context.Context, args []string, d Dependencies, s commandStreams) int {
+	flags := flag.NewFlagSet("batch", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	input := flags.String("input", "", "")
+	format := flags.String("format", "jsonl", "")
+	kind := flags.String("kind", "domain", "")
+	mode := flags.String("mode", "full", "")
+	unordered := flags.Bool("unordered", false, "")
+	if err := flags.Parse(args); err != nil {
+		return diagnostic(s.stderr, model.NewError(model.CodeInvalidSyntax, err.Error(), err))
+	}
+	if flags.NArg() != 0 || *input == "" || *format != "jsonl" {
+		return diagnostic(s.stderr, model.NewError(model.CodeInvalidSyntax, "batch requires --input and --format jsonl", nil))
+	}
+	if err := requireAnalyzer(d.Analyzer); err != nil {
+		return diagnostic(s.stderr, err)
+	}
+	reader := s.stdin
+	if *input != "-" {
+		file, err := os.Open(*input)
+		if err != nil {
+			return diagnostic(s.stderr, model.NewError(model.CodeInvalidSyntax, "open input: "+err.Error(), err))
+		}
+		defer file.Close()
+		reader = file
+	}
+	scanner := bufio.NewScanner(reader)
+	scanner.Buffer(make([]byte, 4096), 1<<20)
+	requests := make([]model.AnalyzeRequest, 0)
+	for scanner.Scan() {
+		target := strings.TrimSpace(scanner.Text())
+		if target == "" {
+			continue
+		}
+		if len(requests) >= maxJSONLRows {
+			return diagnostic(s.stderr, model.NewError(model.CodeInputTooLarge, "batch input exceeds 1000 rows", nil))
+		}
+		requests = append(requests, model.AnalyzeRequest{Target: target, Kind: model.TargetKind(*kind), Mode: model.Mode(*mode)})
+	}
+	if err := scanner.Err(); err != nil {
+		return diagnostic(s.stderr, model.NewError(model.CodeInputTooLarge, "read batch input", err))
+	}
+	if !*unordered {
+		return emitOrderedBatch(ctx, requests, d.Analyzer, s)
+	}
+	return emitUnorderedBatch(ctx, requests, d.Analyzer, s)
+}
+
+func emitOrderedBatch(ctx context.Context, requests []model.AnalyzeRequest, analyzer app.Analyzer, streams commandStreams) int {
+	exit := 0
+	for index, request := range requests {
+		item, rowExit := analyzeEnvelope(ctx, analyzer, index, request)
+		if err := writeEnvelope(streams.stdout, item); err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		exit = combineExit(exit, rowExit)
+	}
+	return exit
+}
+
+func emitUnorderedBatch(ctx context.Context, requests []model.AnalyzeRequest, analyzer app.Analyzer, streams commandStreams) int {
+	type job struct {
+		index   int
+		request model.AnalyzeRequest
+	}
+	type outcome struct {
+		item envelope
+		exit int
+	}
+	jobs := make(chan job)
+	results := make(chan outcome)
+	workers := 4
+	if len(requests) < workers {
+		workers = len(requests)
+	}
+	for range workers {
+		go func() {
+			for queued := range jobs {
+				item, rowExit := analyzeEnvelope(ctx, analyzer, queued.index, queued.request)
+				results <- outcome{item: item, exit: rowExit}
+			}
+		}()
+	}
+	go func() {
+		for index, request := range requests {
+			jobs <- job{index: index, request: request}
+		}
+		close(jobs)
+	}()
+	exit := 0
+	for range requests {
+		result := <-results
+		if err := writeEnvelope(streams.stdout, result.item); err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		exit = combineExit(exit, result.exit)
+	}
+	return exit
+}
+
+func analyzeEnvelope(ctx context.Context, analyzer app.Analyzer, index int, request model.AnalyzeRequest) (envelope, int) {
+	report, err := analyzer.Analyze(ctx, request)
+	if err != nil {
+		return envelope{InputIndex: index, Error: externalError(err)}, model.CLIExit(err)
+	}
+	_, exit, err := RenderReport(report)
+	if err != nil {
+		return envelope{InputIndex: index, Error: externalError(err)}, model.CLIExit(err)
+	}
+	return envelope{InputIndex: index, Result: report}, exit
+}
+
+func writeEnvelope(writer io.Writer, item envelope) error {
+	encoded, err := json.Marshal(item)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(writer, string(encoded))
+	return err
 }
 
 type commandStreams struct {

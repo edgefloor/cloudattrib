@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -50,6 +51,27 @@ func TestReclassifyRequiresUsableReplayPath(t *testing.T) {
 	}
 }
 
+func TestReclassifyReusesRetainedRawTechnologyLabel(t *testing.T) {
+	t.Parallel()
+
+	payload, _ := json.Marshal(model.TechnologyPayload{Name: "Vue.js", DetectorID: "wappalyzergo-v0.3.2"})
+	original := model.Report{
+		ID: "technology-report", Target: model.Target{Canonical: "example.com", Kind: model.TargetDomain},
+		Observations: []model.Observation{{ID: "tech-1", Type: "technology", Subject: "example.com", Scope: model.ScopeRoot, Status: "detected", Payload: payload}},
+	}
+	service := NewService(Dependencies{
+		Detectors: []Detector{emptyReplayDetector{}}, Store: fixtureResultStore{report: original},
+		View: model.NewAttributionView("bundle", "policy", nil, nil),
+	})
+	replayed, err := service.Reclassify(context.Background(), model.ReclassifyRequest{ReportID: original.ID, BundleID: "bundle"})
+	if err != nil {
+		t.Fatalf("Reclassify() error = %v", err)
+	}
+	if len(replayed.Evidence) != 1 || replayed.Evidence[0].ProductID != "webtech.vue-js" || replayed.Evidence[0].ObservationIDs[0] != "tech-1" {
+		t.Fatalf("replayed evidence = %#v", replayed.Evidence)
+	}
+}
+
 type fixtureResultStore struct{ report model.Report }
 
 func (s fixtureResultStore) SaveReport(context.Context, model.Report) error { return nil }
@@ -65,4 +87,10 @@ func (fixtureReplayDetector) Detect(_ context.Context, observations []model.Obse
 		ProductID: "fixture.product", Relation: model.RelationDomainVerification, Strength: model.StrengthWeak, Activity: model.ActivityVerificationOnly,
 		DatasetRecords: []model.DatasetRecord{{SourceID: "fixture", Revision: "new-revision", Digest: "sha256:new", RecordRef: "fixture#/1"}},
 	}}, []model.Coverage{{Capability: "fixture-replay", Status: model.CoverageComplete, Attempted: 1, Completed: 1}}
+}
+
+type emptyReplayDetector struct{}
+
+func (emptyReplayDetector) Detect(context.Context, []model.Observation, model.AttributionView) ([]model.Evidence, []model.Coverage) {
+	return nil, []model.Coverage{{Capability: "rules", Status: model.CoverageComplete}}
 }

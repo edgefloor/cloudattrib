@@ -55,3 +55,15 @@ func TestRunAnalyzeJSONLAddsInputIndex(t *testing.T) {
 		t.Fatalf("stdout = %s", got)
 	}
 }
+
+func TestRunBatchReadsPlainTargetsAndAddsInputIndex(t *testing.T) {
+	var out, errOut bytes.Buffer
+	input := bytes.NewBufferString("one.test\ntwo.test\n")
+	exit := Run(context.Background(), []string{"batch", "--input", "-", "--format", "jsonl", "--unordered"}, Dependencies{Analyzer: analyzerStub{}, Stdin: input, Stdout: &out, Stderr: &errOut})
+	if exit != 0 {
+		t.Fatalf("exit = %d: %s", exit, errOut.String())
+	}
+	if got := out.String(); !bytes.Contains([]byte(got), []byte("\"input_index\":0")) || !bytes.Contains([]byte(got), []byte("\"input_index\":1")) {
+		t.Fatalf("stdout = %s", got)
+	}
+}

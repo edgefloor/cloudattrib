@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"net/url"
 	"slices"
+	"strings"
 	"time"
 
 	"cloudattrib/internal/aggregate"
@@ -19,30 +21,32 @@ import (
 
 // Dependencies contains the settled E1 application seams.
 type Dependencies struct {
-	DNS         *collectdns.Collector
-	HTTP        *collecthttp.Collector
-	Detectors   []Detector
-	WebDetector WebDetector
-	Prefixes    PrefixReader
-	ASN         ASNReader
-	Store       ResultStore
-	View        model.AttributionView
-	HTTPScheme  string
-	Now         func() time.Time
+	DNS           *collectdns.Collector
+	HTTP          *collecthttp.Collector
+	Detectors     []Detector
+	WebDetector   WebDetector
+	Prefixes      PrefixReader
+	ASN           ASNReader
+	Store         ResultStore
+	View          model.AttributionView
+	HTTPScheme    string
+	Now           func() time.Time
+	TargetTimeout time.Duration
 }
 
 // Service coordinates one immutable view through collection and classification.
 type Service struct {
-	dns         *collectdns.Collector
-	http        *collecthttp.Collector
-	detectors   []Detector
-	webDetector WebDetector
-	prefixes    PrefixReader
-	asn         ASNReader
-	store       ResultStore
-	view        model.AttributionView
-	httpScheme  string
-	now         func() time.Time
+	dns           *collectdns.Collector
+	http          *collecthttp.Collector
+	detectors     []Detector
+	webDetector   WebDetector
+	prefixes      PrefixReader
+	asn           ASNReader
+	store         ResultStore
+	view          model.AttributionView
+	httpScheme    string
+	now           func() time.Time
+	targetTimeout time.Duration
 }
 
 // NewService constructs the analyzer without starting background work.
@@ -56,21 +60,27 @@ func NewService(dependencies Dependencies) *Service {
 		scheme = "https"
 	}
 	return &Service{
-		dns:         dependencies.DNS,
-		http:        dependencies.HTTP,
-		detectors:   slices.Clone(dependencies.Detectors),
-		webDetector: dependencies.WebDetector,
-		prefixes:    dependencies.Prefixes,
-		asn:         dependencies.ASN,
-		store:       dependencies.Store,
-		view:        dependencies.View,
-		httpScheme:  scheme,
-		now:         now,
+		dns:           dependencies.DNS,
+		http:          dependencies.HTTP,
+		detectors:     slices.Clone(dependencies.Detectors),
+		webDetector:   dependencies.WebDetector,
+		prefixes:      dependencies.Prefixes,
+		asn:           dependencies.ASN,
+		store:         dependencies.Store,
+		view:          dependencies.View,
+		httpScheme:    scheme,
+		now:           now,
+		targetTimeout: dependencies.TargetTimeout,
 	}
 }
 
 // Analyze runs the early domain-to-report pipeline against one captured view.
 func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (model.Report, error) {
+	if s.targetTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.targetTimeout)
+		defer cancel()
+	}
 	startedAt := s.now()
 	normalized, err := target.Normalize(request)
 	if err != nil {
@@ -85,10 +95,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 
 	hostname := normalized.SeedHostnames[0]
 	collectHTTP := normalized.Mode == model.ModeFull && s.http != nil
-	port := uint16(443)
-	if s.httpScheme == "http" {
-		port = 80
-	}
+	port := seedPort(normalized, hostname, s.httpScheme)
 	type dnsOutcome struct {
 		result collectdns.Result
 	}
@@ -121,7 +128,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 			}
 			httpStarted = true
 			go func() {
-				result, collectErr := s.http.Collect(ctx, s.httpScheme, candidate.Hostname, candidate.Address)
+				result, collectErr := s.http.CollectTarget(ctx, seedURL(normalized, candidate.Hostname, s.httpScheme), candidate.Address)
 				httpDone <- httpOutcome{result: result, err: collectErr}
 			}()
 		case outcome := <-dnsDone:
@@ -132,7 +139,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 				case candidate := <-candidates:
 					httpStarted = true
 					go func() {
-						result, collectErr := s.http.Collect(ctx, s.httpScheme, candidate.Hostname, candidate.Address)
+						result, collectErr := s.http.CollectTarget(ctx, seedURL(normalized, candidate.Hostname, s.httpScheme), candidate.Address)
 						httpDone <- httpOutcome{result: result, err: collectErr}
 					}()
 				default:
@@ -164,14 +171,15 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	}
 	for _, seed := range normalized.SeedHostnames[1:] {
 		var selected collectdns.Candidate
-		result := s.dns.Collect(ctx, seed, port, func(candidate collectdns.Candidate) {
+		portForSeed := seedPort(normalized, seed, s.httpScheme)
+		result := s.dns.Collect(ctx, seed, portForSeed, func(candidate collectdns.Candidate) {
 			if !selected.Address.IsValid() {
 				selected = candidate
 			}
 		})
 		dnsRuns = append(dnsRuns, dnsRun{hostname: seed, result: result})
 		if collectHTTP && selected.Address.IsValid() {
-			result, collectErr := s.http.Collect(ctx, s.httpScheme, selected.Hostname, selected.Address)
+			result, collectErr := s.http.CollectTarget(ctx, seedURL(normalized, selected.Hostname, s.httpScheme), selected.Address)
 			httpRuns = append(httpRuns, httpRun{hostname: seed, result: result, err: collectErr})
 		}
 	}
@@ -193,13 +201,11 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	}
 	for _, run := range httpRuns {
 		coverage = append(coverage, run.result.Coverage)
-		if run.err == nil {
-			for _, observation := range run.result.Observations {
-				if observation.Scope != model.ScopeExternalRedirect {
-					observation.Scope = scopeForSeed(run.hostname, normalized.ScopeRoots)
-				}
-				observations = append(observations, observation)
+		for _, observation := range run.result.Observations {
+			if observation.Scope != model.ScopeExternalRedirect {
+				observation.Scope = scopeForSeed(run.hostname, normalized.ScopeRoots)
 			}
+			observations = append(observations, observation)
 		}
 	}
 
@@ -228,6 +234,9 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 			for i := range detected {
 				if detected[i].ClassifiedAt.IsZero() {
 					detected[i].ClassifiedAt = classifiedAt
+				}
+				if technology, ok := technologyObservation(detected[i], run.result.Observation); ok {
+					observations = append(observations, technology)
 				}
 			}
 			evidence = append(evidence, detected...)
@@ -260,15 +269,40 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 				}
 			}
 		}
+	} else {
+		coverage = append(coverage, model.Coverage{Capability: "prefix", Status: model.CoverageUnavailable, Reason: "prefix source is unavailable"})
 	}
 
-	status := model.StatusComplete
-	for _, item := range coverage {
-		if item.Status == model.CoveragePartial || item.Status == model.CoverageUnavailable {
-			status = model.StatusPartial
-			break
+	if s.asn != nil {
+		seen := make(map[string]struct{})
+		for _, run := range dnsRuns {
+			for _, address := range run.result.Addresses {
+				address = address.Unmap()
+				lookupKey := run.hostname + "\x00" + address.String()
+				if _, exists := seen[lookupKey]; exists {
+					continue
+				}
+				seen[lookupKey] = struct{}{}
+				records, asnCoverage, lookupErr := s.asn.LookupASN(ctx, address, s.view)
+				if lookupErr != nil {
+					asnCoverage.Status = model.CoverageUnavailable
+					asnCoverage.ErrorCodes = append(asnCoverage.ErrorCodes, model.ErrorCodeOf(lookupErr))
+				}
+				coverage = append(coverage, asnCoverage)
+				for _, record := range records {
+					item, evidenceErr := asnEvidence(run.hostname, scopeForSeed(run.hostname, normalized.ScopeRoots), address, record, classifiedAt, observations)
+					if evidenceErr != nil {
+						return model.Report{}, evidenceErr
+					}
+					evidence = append(evidence, item)
+				}
+			}
 		}
+	} else {
+		coverage = append(coverage, model.Coverage{Capability: "asn", Status: model.CoverageUnavailable, Reason: "ASN source is unavailable"})
 	}
+
+	status := reportStatus(ctx, observations, coverage)
 	report := model.Report{
 		SchemaVersion: model.SchemaVersion,
 		Target:        normalized.Target,
@@ -366,8 +400,11 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 	classifiedAt := s.now()
 	observations := slices.Clone(original.Observations)
 	evidence := make([]model.Evidence, 0)
-	coverage := make([]model.Coverage, 0, len(original.Coverage)+len(s.detectors)+1)
-	coverage = append(coverage, original.Coverage...)
+	coverage := make([]model.Coverage, 0, len(original.Coverage)+len(s.detectors)+2)
+	for _, originalCoverage := range original.Coverage {
+		originalCoverage.Capability = "original_collection/" + originalCoverage.Capability
+		coverage = append(coverage, originalCoverage)
+	}
 	for _, detector := range s.detectors {
 		detected, detectorCoverage := detector.Detect(ctx, observations, s.view)
 		for index := range detected {
@@ -375,6 +412,35 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 		}
 		evidence = append(evidence, detected...)
 		coverage = append(coverage, detectorCoverage...)
+	}
+	replayedTechnology := 0
+	for _, observation := range observations {
+		if observation.Type != "technology" || evidenceReferences(observation.ID, evidence) {
+			continue
+		}
+		var payload model.TechnologyPayload
+		if json.Unmarshal(observation.Payload, &payload) != nil || payload.Name == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte("technology-replay-v1\x00" + observation.ID + "\x00" + payload.Name))
+		evidence = append(evidence, model.Evidence{
+			ID: "evidence-technology-" + hex.EncodeToString(sum[:12]), ObservationIDs: []string{observation.ID}, ClassifiedAt: classifiedAt,
+			DetectorID: payload.DetectorID, Subject: observation.Subject, ProductID: "webtech." + normalizeTechnologyID(payload.Name), Category: "web_technology",
+			Relation: model.RelationWebIntegration, Strength: model.StrengthModerate, Activity: model.ActivityResponding, Scope: observation.Scope,
+			Explanation: "replayed passive detector result: " + payload.Name,
+		})
+		replayedTechnology++
+	}
+	if replayedTechnology > 0 {
+		coverage = append(coverage, model.Coverage{Capability: "technology_replay", Status: model.CoverageComplete, Attempted: replayedTechnology, Completed: replayedTechnology})
+	}
+	hasHTTP, hasTechnology := false, false
+	for _, observation := range observations {
+		hasHTTP = hasHTTP || observation.Type == "http_response"
+		hasTechnology = hasTechnology || observation.Type == "technology"
+	}
+	if s.webDetector != nil && hasHTTP && !hasTechnology {
+		coverage = append(coverage, model.Coverage{Capability: "replay_webtech", Status: model.CoverageUnavailable, Reason: "raw response bytes and raw technology labels were not retained"})
 	}
 	if s.prefixes != nil {
 		for _, observation := range observations {
@@ -402,6 +468,9 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 	}
 	status := model.StatusComplete
 	for _, item := range coverage {
+		if strings.HasPrefix(item.Capability, "original_collection/") {
+			continue
+		}
 		if item.Status == model.CoveragePartial || item.Status == model.CoverageUnavailable {
 			status = model.StatusPartial
 			break
@@ -420,6 +489,43 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 		return model.Report{}, fmt.Errorf("validate reclassified report references: %w", err)
 	}
 	return report, nil
+}
+
+func technologyObservation(item model.Evidence, source model.Observation) (model.Observation, bool) {
+	const prefix = "passive detector result: "
+	name, ok := strings.CutPrefix(item.Explanation, prefix)
+	if !ok || name == "" {
+		return model.Observation{}, false
+	}
+	payload, err := json.Marshal(model.TechnologyPayload{Name: name, DetectorID: item.DetectorID})
+	if err != nil {
+		return model.Observation{}, false
+	}
+	sum := sha256.Sum256([]byte(item.DetectorID + "\x00" + source.ID + "\x00" + name))
+	return model.Observation{
+		ID: "technology-" + hex.EncodeToString(sum[:12]), Type: "technology", Subject: item.Subject, Relation: model.RelationWebIntegration,
+		Scope: item.Scope, ObservedAt: source.ObservedAt, CollectorVersion: item.DetectorID, Status: "detected", Payload: payload,
+	}, true
+}
+
+func evidenceReferences(observationID string, evidence []model.Evidence) bool {
+	for _, item := range evidence {
+		if slices.Contains(item.ObservationIDs, observationID) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeTechnologyID(value string) string {
+	value = strings.ToLower(value)
+	value = strings.Map(func(char rune) rune {
+		if char >= 'a' && char <= 'z' || char >= '0' && char <= '9' {
+			return char
+		}
+		return '-'
+	}, value)
+	return strings.Trim(value, "-")
 }
 
 func prefixEvidence(subject string, scope model.Scope, address netip.Addr, association model.Association, classifiedAt time.Time, observations []model.Observation) (model.Evidence, error) {
@@ -457,11 +563,83 @@ func prefixEvidence(subject string, scope model.Scope, address netip.Addr, assoc
 	}, nil
 }
 
+func asnEvidence(subject string, scope model.Scope, address netip.Addr, record model.ASNRecord, classifiedAt time.Time, observations []model.Observation) (model.Evidence, error) {
+	fields, err := json.Marshal(record)
+	if err != nil {
+		return model.Evidence{}, fmt.Errorf("encode ASN record: %w", err)
+	}
+	observationID := addressObservationID(subject, address, observations)
+	if observationID == "" {
+		return model.Evidence{}, fmt.Errorf("find address observation for %s", address)
+	}
+	key := fmt.Sprintf("%d\x00%s\x00%s", record.ASN, record.RecordRef, observationID)
+	sum := sha256.Sum256([]byte(key))
+	return model.Evidence{
+		ID: "evidence-asn-" + hex.EncodeToString(sum[:12]), ObservationIDs: []string{observationID},
+		DatasetRecords: []model.DatasetRecord{{SourceID: record.SourceID, Revision: record.SourceRevision, Digest: record.SourceDigest, RecordRef: record.RecordRef, Fields: fields}},
+		ClassifiedAt:   classifiedAt, DetectorID: "asn-v1", Subject: subject, ProviderID: fmt.Sprintf("asn:%d", record.ASN), Category: "network",
+		Relation: model.RelationNetworkProvider, Strength: model.StrengthWeak, Activity: model.ActivityUnknown, Scope: scope,
+		Explanation: "address is contained by a local ASN interval; organization attribution is not a product claim",
+	}, nil
+}
+
 func scopeForSeed(hostname string, roots []string) model.Scope {
 	if slices.Contains(roots, hostname) {
 		return model.ScopeRoot
 	}
 	return model.ScopeSubdomain
+}
+
+func reportStatus(ctx context.Context, observations []model.Observation, coverage []model.Coverage) model.ReportStatus {
+	if ctx.Err() != nil {
+		return model.StatusCancelled
+	}
+	useful := false
+	for _, observation := range observations {
+		if observation.Status == "answered" || observation.Status == "responded" || observation.Status == "policy_blocked" {
+			useful = true
+			break
+		}
+	}
+	partial := false
+	for _, item := range coverage {
+		if item.Status == model.CoveragePartial || item.Status == model.CoverageUnavailable {
+			partial = true
+		}
+	}
+	if !useful && partial {
+		return model.StatusFailed
+	}
+	if partial {
+		return model.StatusPartial
+	}
+	return model.StatusComplete
+}
+
+func seedURL(request model.NormalizedRequest, hostname, fallbackScheme string) string {
+	if request.Target.Kind == model.TargetURL {
+		parsed, err := url.Parse(request.Target.Canonical)
+		if err == nil && parsed.Hostname() == hostname {
+			return parsed.String()
+		}
+	}
+	return fallbackScheme + "://" + hostname + "/"
+}
+
+func seedPort(request model.NormalizedRequest, hostname, fallbackScheme string) uint16 {
+	parsed, err := url.Parse(seedURL(request, hostname, fallbackScheme))
+	if err == nil {
+		if parsed.Port() == "80" {
+			return 80
+		}
+		if parsed.Port() == "443" {
+			return 443
+		}
+		if parsed.Scheme == "http" {
+			return 80
+		}
+	}
+	return 443
 }
 
 func addressObservationID(subject string, address netip.Addr, observations []model.Observation) string {

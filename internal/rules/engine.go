@@ -183,6 +183,12 @@ func validateRule(rule *Rule, providers map[string]struct{}, products map[string
 	if rule.Emit.Strength != model.StrengthStrong && rule.Emit.Strength != model.StrengthModerate && rule.Emit.Strength != model.StrengthWeak {
 		return fmt.Errorf("invalid strength %q", rule.Emit.Strength)
 	}
+	if rule.Emit.Activity != model.ActivityConfigured && rule.Emit.Activity != model.ActivityResponding && rule.Emit.Activity != model.ActivityVerificationOnly && rule.Emit.Activity != model.ActivityHistorical && rule.Emit.Activity != model.ActivityUnknown {
+		return fmt.Errorf("invalid activity %q", rule.Emit.Activity)
+	}
+	if !validID(rule.Emit.Category) {
+		return fmt.Errorf("invalid category %q", rule.Emit.Category)
+	}
 	operations := 0
 	for _, value := range []string{rule.Match.Exact, rule.Match.FQDNSuffix, rule.Match.Regex, rule.Match.TXTPrefix, rule.Match.SPFInclude, rule.Match.HeaderContains, rule.Match.ScriptHostSuffix, rule.Match.TechnologyAlias} {
 		if value != "" {
@@ -204,6 +210,23 @@ func validateRule(rule *Rule, providers map[string]struct{}, products map[string
 	}
 	if rule.Match.HeaderContains != "" && rule.Match.HeaderName == "" {
 		return fmt.Errorf("header name is required")
+	}
+	switch rule.Signal {
+	case "dns":
+		if rule.RRType == "" || rule.Match.HeaderContains != "" || rule.Match.ScriptHostSuffix != "" || rule.Match.TechnologyAlias != "" {
+			return fmt.Errorf("DNS rule has an incompatible operation")
+		}
+		if (rule.Match.TXTPrefix != "" || rule.Match.SPFInclude != "") && !strings.EqualFold(rule.RRType, "TXT") {
+			return fmt.Errorf("TXT operation requires TXT rrtype")
+		}
+	case "http":
+		if rule.RRType != "" || rule.Match.HeaderContains == "" && rule.Match.ScriptHostSuffix == "" {
+			return fmt.Errorf("HTTP rule has an incompatible operation")
+		}
+	case "technology":
+		if rule.RRType != "" || rule.Match.TechnologyAlias == "" {
+			return fmt.Errorf("technology rule has an incompatible operation")
+		}
 	}
 	return nil
 }

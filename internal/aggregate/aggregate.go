@@ -4,6 +4,7 @@ package aggregate
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"slices"
 	"strings"
 
@@ -49,6 +50,7 @@ func Build(evidence []model.Evidence) []model.Finding {
 		}
 		findings = append(findings, finding)
 	}
+	linkConflicts(findings)
 	slices.SortFunc(findings, func(a, b model.Finding) int { return strings.Compare(a.ID, b.ID) })
 	return findings
 }
@@ -65,7 +67,7 @@ func deduplicate(items []model.Evidence) []model.Evidence {
 	for _, item := range byID {
 		observationIDs := slices.Clone(item.ObservationIDs)
 		slices.Sort(observationIDs)
-		provenance := strings.Join([]string{item.DetectorID, item.RuleID, strings.Join(observationIDs, ",")}, "\x00")
+		provenance := provenanceKey(item, observationIDs)
 		current, ok := byProvenance[provenance]
 		if !ok || strengthRank(item.Strength) > strengthRank(current.Strength) || strengthRank(item.Strength) == strengthRank(current.Strength) && item.ID < current.ID {
 			byProvenance[provenance] = item
@@ -77,6 +79,43 @@ func deduplicate(items []model.Evidence) []model.Evidence {
 	}
 	slices.SortFunc(result, func(a, b model.Evidence) int { return strings.Compare(a.ID, b.ID) })
 	return result
+}
+
+func provenanceKey(item model.Evidence, observationIDs []string) string {
+	if len(item.DatasetRecords) == 0 {
+		return strings.Join([]string{item.DetectorID, item.RuleID, strings.Join(observationIDs, ",")}, "\x00")
+	}
+	records := make([]string, 0, len(item.DatasetRecords))
+	for _, record := range item.DatasetRecords {
+		var fields struct {
+			ProvenanceGroup string `json:"provenance_group"`
+		}
+		if json.Unmarshal(record.Fields, &fields) == nil && fields.ProvenanceGroup != "" {
+			records = append(records, record.SourceID+"/group/"+fields.ProvenanceGroup)
+			continue
+		}
+		records = append(records, strings.Join([]string{record.SourceID, record.Revision, record.Digest, record.RecordRef}, "/"))
+	}
+	slices.Sort(records)
+	return strings.Join([]string{strings.Join(observationIDs, ","), strings.Join(records, ",")}, "\x00")
+}
+
+func linkConflicts(findings []model.Finding) {
+	for left := range findings {
+		if findings[left].Relation != model.RelationNetworkProvider && findings[left].Relation != model.RelationNetworkOrigin && findings[left].Relation != model.RelationServiceRange {
+			continue
+		}
+		for right := range findings {
+			if left == right || findings[left].Subject != findings[right].Subject || findings[left].Relation != findings[right].Relation || findings[left].Scope != findings[right].Scope {
+				continue
+			}
+			if findings[left].ProviderID == findings[right].ProviderID && findings[left].ProductID == findings[right].ProductID {
+				continue
+			}
+			findings[left].ConflictIDs = append(findings[left].ConflictIDs, findings[right].ID)
+		}
+		slices.Sort(findings[left].ConflictIDs)
+	}
 }
 
 func findingID(value key) string {

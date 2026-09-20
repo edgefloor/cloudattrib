@@ -22,12 +22,17 @@ addresses returned by that resolver and apply the public-destination policy.
 ```sh
 cloudattrib analyze example.com --mode dns
 cloudattrib analyze example.com
+cloudattrib batch --input domains.txt --format jsonl
 cloudattrib lookup-ip 198.51.100.7 --match all
+cloudattrib reclassify --report report.json --bundle builtin-rules-v1
 ```
 
-The built-in execution view supports DNS, bounded HTTP, reviewed product rules, and passive web
-fingerprints. Local prefix and ASN lookup require an activated dataset bundle; without one,
-`lookup-ip` returns `capability_unavailable` instead of an empty successful result.
+The built-in execution view supports DNS, bounded HTTP, reviewed product rules, passive web
+fingerprints, and offline reinterpretation of a standalone report. Local prefix and ASN lookup
+require an activated dataset bundle; without one, `lookup-ip` returns
+`capability_unavailable` instead of an empty successful result. Reclassification preserves the
+original observations and collection coverage while recording a new classification time and
+bundle identity.
 
 ## Agent skills
 

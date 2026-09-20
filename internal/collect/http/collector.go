@@ -37,6 +37,11 @@ func WithRedirectResolver(resolve ResolveFunc) Option {
 	return func(collector *Collector) { collector.resolve = resolve }
 }
 
+// WithRequestTimeout bounds each request within the caller's target deadline.
+func WithRequestTimeout(timeout time.Duration) Option {
+	return func(collector *Collector) { collector.requestTimeout = timeout }
+}
+
 // Result contains response observations and the final passive detector input.
 type Result struct {
 	Observation  model.Observation
@@ -49,17 +54,18 @@ type Result struct {
 
 // Collector owns the application HTTP transport settings.
 type Collector struct {
-	dial         DialFunc
-	resolve      ResolveFunc
-	policy       policy.DestinationPolicy
-	maxBody      int64
-	maxRedirects int
-	now          func() time.Time
+	dial           DialFunc
+	resolve        ResolveFunc
+	policy         policy.DestinationPolicy
+	maxBody        int64
+	maxRedirects   int
+	requestTimeout time.Duration
+	now            func() time.Time
 }
 
 // New constructs a bounded collector without environment proxy behavior.
 func New(dial DialFunc, destinationPolicy policy.DestinationPolicy, maxBody int64, options ...Option) *Collector {
-	collector := &Collector{dial: dial, policy: destinationPolicy, maxBody: maxBody, maxRedirects: 5, now: time.Now}
+	collector := &Collector{dial: dial, policy: destinationPolicy, maxBody: maxBody, maxRedirects: 5, requestTimeout: 10 * time.Second, now: time.Now}
 	for _, option := range options {
 		option(collector)
 	}
@@ -69,11 +75,23 @@ func New(dial DialFunc, destinationPolicy policy.DestinationPolicy, maxBody int6
 // Collect fetches one root document and its bounded redirect chain. Each hop
 // resolves and validates its concrete destination before dialing.
 func (c *Collector) Collect(ctx context.Context, scheme, hostname string, address netip.Addr) (Result, error) {
-	currentURL, err := url.Parse(scheme + "://" + hostname + "/")
+	return c.CollectTarget(ctx, scheme+"://"+hostname+"/", address)
+}
+
+// CollectTarget fetches one normalized HTTP URL through an approved address.
+func (c *Collector) CollectTarget(ctx context.Context, rawURL string, address netip.Addr) (Result, error) {
+	currentURL, err := url.Parse(rawURL)
 	if err != nil {
 		return Result{}, fmt.Errorf("parse HTTP target: %w", err)
 	}
+	if currentURL.User != nil || currentURL.Hostname() == "" || (currentURL.Scheme != "http" && currentURL.Scheme != "https") {
+		return Result{}, model.NewError(model.CodeInvalidTarget, "HTTP target is invalid", nil)
+	}
+	if currentURL.Port() != "" && currentURL.Port() != "80" && currentURL.Port() != "443" {
+		return Result{}, model.NewError(model.CodePolicyBlocked, "HTTP target port is prohibited", nil)
+	}
 	currentAddress := address.Unmap()
+	originalHostname := currentURL.Hostname()
 	coverage := model.Coverage{Capability: "http", Status: model.CoverageComplete}
 	var observations []model.Observation
 	var final Result
@@ -85,7 +103,13 @@ func (c *Collector) Collect(ctx context.Context, scheme, hostname string, addres
 			return Result{Observations: observations, Coverage: coverage}, model.NewError(model.CodeLimitExceeded, "HTTP redirect limit exceeded", nil)
 		}
 		coverage.Attempted++
-		hopResult, location, collectErr := c.collectHop(ctx, currentURL, currentAddress, hop, hostname)
+		requestCtx := ctx
+		cancel := func() {}
+		if c.requestTimeout > 0 {
+			requestCtx, cancel = context.WithTimeout(ctx, c.requestTimeout)
+		}
+		hopResult, location, collectErr := c.collectHop(requestCtx, currentURL, currentAddress, hop, originalHostname)
+		cancel()
 		if collectErr != nil {
 			coverage.Status = model.CoveragePartial
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeCollectionFailed)
@@ -120,7 +144,7 @@ func (c *Collector) Collect(ctx context.Context, scheme, hostname string, addres
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeTimeout)
 			return finish(final, observations, coverage), nil
 		}
-		approved, blocked := c.firstApproved(addresses, portForScheme(nextURL.Scheme))
+		approved, blocked := c.firstApproved(addresses, portForURL(nextURL))
 		if blocked {
 			coverage.Status = model.CoveragePartial
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodePolicyBlocked)
@@ -137,7 +161,7 @@ func (c *Collector) Collect(ctx context.Context, scheme, hostname string, addres
 }
 
 func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address netip.Addr, hop int, originalHostname string) (Result, string, error) {
-	port := portForScheme(targetURL.Scheme)
+	port := portForURL(targetURL)
 	if decision := c.policy.Check(address, port); !decision.Allowed {
 		return Result{}, "", model.NewError(model.CodePolicyBlocked, "HTTP destination is prohibited", nil)
 	}
@@ -267,6 +291,16 @@ func portForScheme(scheme string) uint16 {
 		return 80
 	}
 	return 443
+}
+
+func portForURL(value *url.URL) uint16 {
+	if value.Port() == "80" {
+		return 80
+	}
+	if value.Port() == "443" {
+		return 443
+	}
+	return portForScheme(value.Scheme)
 }
 
 func redactQuery(value *url.URL) string {

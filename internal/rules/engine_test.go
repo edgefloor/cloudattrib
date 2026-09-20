@@ -95,6 +95,7 @@ func TestLoadRejectsUnknownProductAndUnanchoredRegex(t *testing.T) {
 	for _, input := range []string{
 		`{"schema_version":1,"providers":[],"products":[],"rules":[{"id":"bad.product","signal":"dns","rrtype":"CNAME","field":"rdata.target","match":{"exact":"x.example"},"emit":{"product_id":"missing","relation":"web_delivery","strength":"strong","activity":"configured"},"source_refs":["fixture"],"reviewed_at":"2026-09-20"}]}`,
 		`{"schema_version":1,"providers":[{"id":"p"}],"products":[{"id":"p.x","provider_id":"p","relations":["web_delivery"]}],"rules":[{"id":"bad.regex","signal":"dns","rrtype":"CNAME","field":"rdata.target","match":{"regex":"x.*"},"emit":{"provider_id":"p","product_id":"p.x","relation":"web_delivery","strength":"strong","activity":"configured"},"source_refs":["fixture"],"reviewed_at":"2026-09-20"}]}`,
+		`{"schema_version":1,"providers":[{"id":"p"}],"products":[{"id":"p.x","provider_id":"p","relations":["web_delivery"]}],"rules":[{"id":"bad.http-op","signal":"http","field":"url","match":{"exact":"https://example.com"},"emit":{"provider_id":"p","product_id":"p.x","category":"hosting","relation":"web_delivery","strength":"strong","activity":"configured"},"source_refs":["fixture"],"reviewed_at":"2026-09-20"}]}`,
 	} {
 		if _, err := Load([]byte(input)); err == nil {
 			t.Fatalf("Load(%s) succeeded, want error", input)

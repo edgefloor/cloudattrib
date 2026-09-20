@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"sync"
 	"testing"
+	"time"
 
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/policy"
@@ -33,6 +34,54 @@ func TestCollectRetainsSanitizedScriptURLsForOfflineRules(t *testing.T) {
 	}
 	if len(payload.ScriptURLs) != 1 || payload.ScriptURLs[0] != "https://cdn.segment.com/analytics.js/v1/key.js" {
 		t.Fatalf("ScriptURLs = %#v", payload.ScriptURLs)
+	}
+}
+
+func TestCollectTargetPreservesRequestURLAndRedactsObservedQuery(t *testing.T) {
+	t.Parallel()
+
+	requestURI := make(chan string, 1)
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, request *stdhttp.Request) {
+		requestURI <- request.RequestURI
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := New((&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext, policy.PublicDestinationPolicy(), 2<<20)
+	result, err := collector.CollectTarget(context.Background(), "http://example.com/status?probe=secret", address)
+	if err != nil {
+		t.Fatalf("CollectTarget() error = %v", err)
+	}
+	if got := <-requestURI; got != "/status?probe=secret" {
+		t.Fatalf("request URI = %q", got)
+	}
+	var payload model.HTTPPayload
+	if err := json.Unmarshal(result.Observation.Payload, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if payload.URL != "http://example.com/status?redacted" {
+		t.Fatalf("observed URL = %q", payload.URL)
+	}
+}
+
+func TestCollectRequestTimeoutCancelsSlowHeaders(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(_ stdhttp.ResponseWriter, request *stdhttp.Request) {
+		<-request.Context().Done()
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := New(
+		(&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext,
+		policy.PublicDestinationPolicy(), 2<<20, WithRequestTimeout(20*time.Millisecond),
+	)
+	started := time.Now()
+	if _, err := collector.Collect(context.Background(), "http", "example.com", address); err == nil {
+		t.Fatal("Collect() succeeded, want timeout")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("Collect() elapsed = %s, want bounded request", elapsed)
 	}
 }
 

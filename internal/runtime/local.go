@@ -69,10 +69,12 @@ func NewLocal(configuration config.Config) (app.Analyzer, error) {
 		},
 	)
 	return app.NewService(app.Dependencies{
-		DNS:         collectdns.New(dnsClient.Query, destinationPolicy),
-		HTTP:        collecthttp.New(dial, destinationPolicy, configuration.Limits.Target.HTTPDocumentBytes, collecthttp.WithRedirectResolver(resolver)),
-		Detectors:   []app.Detector{dnsrules.NewDefault()},
-		WebDetector: webDetector,
-		View:        view,
+		DNS:           collectdns.New(dnsClient.Query, destinationPolicy),
+		HTTP:          collecthttp.New(dial, destinationPolicy, configuration.Limits.Target.HTTPDocumentBytes, collecthttp.WithRedirectResolver(resolver), collecthttp.WithRequestTimeout(configuration.Limits.Target.HTTPRequestTimeout)),
+		Detectors:     []app.Detector{dnsrules.NewDefault()},
+		WebDetector:   webDetector,
+		View:          view,
+		Store:         standaloneReportStore{},
+		TargetTimeout: configuration.Limits.Target.TargetDeadline,
 	}), nil
 }
