@@ -4,6 +4,60 @@
 
 The behavior and delivery boundaries live in [SPEC.md](SPEC.md). The staged repository structure and implementation gates live in [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md).
 
+## How attribution works
+
+Domain analysis combines live observations with local rules and datasets to produce evidence for lead enrichment.
+
+```mermaid
+flowchart TB
+	accTitle: Cloudattrib domain analysis
+	accDescr: DNS and bounded HTTP collection produce observations. Local rules and datasets turn those observations into evidence-backed findings with explicit coverage. Reports are returned through the CLI or API and stored by the service in PostgreSQL. Optional CT discovery reads a local index.
+
+	input["Domain, hostname, or URL<br/>CLI or HTTP API"] --> plan["Normalize target<br/>Bound scope and collection budgets"]
+	ct[("Optional local CT index")] -. "additional seed names" .-> plan
+
+	subgraph collection["Live collection"]
+		dns["DNS records and query outcomes<br/>Configured recursive resolver"]
+		http["HTTP and TLS · full mode<br/>Headers, redirects, HTML, and peer IPs"]
+		dns -->|"validated public address"| http
+	end
+
+	plan --> dns
+	dns --> observations["Immutable observations<br/>Collection times and outcomes"]
+	http --> observations
+
+	subgraph local["Local interpretation"]
+		classify["Product rules and web fingerprints<br/>Cloud, CDN, service, and ASN lookups"]
+		aggregate["Evidence aggregation<br/>Provider, product, relationship, and strength"]
+		classify --> aggregate
+	end
+
+	observations --> classify
+	sources["Operator-supplied source files"] --> bundle[("Versioned local data<br/>Captured bundle per target attempt")]
+	bundle -. "classification data" .-> classify
+	aggregate --> report["Attribution report<br/>Findings, evidence, provenance, and coverage"]
+	report --> output["CLI JSON or JSONL<br/>HTTP API response"]
+	report --> storage[("PostgreSQL<br/>Service reports and durable jobs")]
+
+	classDef collect fill:#e8f1fc,stroke:#4878a8,color:#142d47
+	classDef interpret fill:#e7f4ed,stroke:#488265,color:#183c2b
+	classDef data fill:#f0ebfa,stroke:#8065a8,color:#36264e
+	classDef result fill:#fff3da,stroke:#ac8439,color:#493712
+	class dns,http collect
+	class classify,aggregate interpret
+	class ct,sources,bundle,storage data
+	class report,output result
+	style collection fill:#f6f8fa,stroke:#a8b4c0,color:#24292f
+	style local fill:#f6f8fa,stroke:#a8b4c0,color:#24292f
+```
+
+HTTP starts when an approved public address becomes available while remaining DNS queries continue.
+Connections use that exact address with the original Host and TLS SNI; redirects receive the same destination checks.
+Missing sources remain visible in coverage, and useful evidence survives in a partial report.
+
+`lookup-ip` uses local indexes without collection. `reclassify` interprets retained observations with a selected bundle without making network requests.
+Dataset updates and optional CT ingestion run separately from analysis. See the [architecture contracts](docs/architecture.md) for lifecycle and provenance details.
+
 ## Development
 
 Install Go 1.25 or later and Make. Run the full local check with:
