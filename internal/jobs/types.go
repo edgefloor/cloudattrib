@@ -13,11 +13,16 @@ type JobStatus string
 
 const (
 	// JobQueued means no target in the accepted batch has started.
-	JobQueued    JobStatus = "queued"
-	JobRunning   JobStatus = "running"
+	JobQueued JobStatus = "queued"
+	// JobRunning means at least one target is running or remains nonterminal.
+	JobRunning JobStatus = "running"
+	// JobCompleted means every target completed successfully.
 	JobCompleted JobStatus = "completed"
-	JobPartial   JobStatus = "partial"
-	JobFailed    JobStatus = "failed"
+	// JobPartial means terminal target outcomes include useful and incomplete results.
+	JobPartial JobStatus = "partial"
+	// JobFailed means all useful work failed.
+	JobFailed JobStatus = "failed"
+	// JobCancelled means every target was cancelled.
 	JobCancelled JobStatus = "cancelled"
 )
 
@@ -26,11 +31,16 @@ type TargetStatus string
 
 const (
 	// TargetQueued means the target is admitted and available for a worker claim.
-	TargetQueued    TargetStatus = "queued"
-	TargetRunning   TargetStatus = "running"
+	TargetQueued TargetStatus = "queued"
+	// TargetRunning means one worker owns the current leased attempt.
+	TargetRunning TargetStatus = "running"
+	// TargetCompleted means analysis completed with full requested coverage.
 	TargetCompleted TargetStatus = "completed"
-	TargetPartial   TargetStatus = "partial"
-	TargetFailed    TargetStatus = "failed"
+	// TargetPartial means analysis retained useful but incomplete results.
+	TargetPartial TargetStatus = "partial"
+	// TargetFailed means the target produced no useful result.
+	TargetFailed TargetStatus = "failed"
+	// TargetCancelled means execution was cancelled before a useful result completed.
 	TargetCancelled TargetStatus = "cancelled"
 )
 
