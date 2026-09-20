@@ -1,0 +1,6 @@
+interface:
+  display_name: "Go Security"
+  short_description: "Review concrete Go security boundaries"
+  default_prompt: "Use $golang-security to review this Go trust boundary and report concrete, evidenced risks."
+policy:
+  allow_implicit_invocation: true

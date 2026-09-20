@@ -1,0 +1,10 @@
+# The primary task remains the working implementation owner.
+model = "gpt-5.6-sol"
+model_reasoning_effort = "medium"
+
+[agents]
+# This counts spawned agents, excluding the primary task.
+# docs/execution-plan.md applies stricter limits to individual waves.
+max_concurrent_threads_per_session = 2
+default_subagent_model = "gpt-5.6-terra"
+default_subagent_reasoning_effort = "medium"

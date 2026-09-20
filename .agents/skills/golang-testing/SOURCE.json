@@ -1,0 +1,8 @@
+{
+  "license": "MIT",
+  "normalizationVersion": 1,
+  "source": "samber/cc-skills-golang",
+  "sourceCommit": "bac46b0bed2677f840837e16be2c790341bda2df",
+  "sourcePath": "skills/golang-testing/SKILL.md",
+  "upstreamLocalHash": "8dc90b6844c55a1bf424fbc86e51e63d22a2c2443950e52e041a62f2bc58ebc8"
+}
