@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"cloudattrib/internal/app"
+	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/model"
 )
 
@@ -20,11 +21,13 @@ const maxJSONLRows = 1000
 
 // Dependencies supplies application behavior and testable command streams.
 type Dependencies struct {
-	Analyzer app.Analyzer
-	Serve    func(context.Context) error
-	Stdin    io.Reader
-	Stdout   io.Writer
-	Stderr   io.Writer
+	Analyzer  app.Analyzer
+	Serve     func(context.Context) error
+	CTImport  func(context.Context, io.Reader, []string) (int, error)
+	CTCollect func(context.Context, string) (ctlog.Metrics, error)
+	Stdin     io.Reader
+	Stdout    io.Writer
+	Stderr    io.Writer
 }
 
 // Run executes a command and returns its process exit status.
@@ -53,9 +56,75 @@ func Run(ctx context.Context, args []string, dependencies Dependencies) int {
 			return diagnostic(streams.stderr, model.NewError(model.CodePersistenceUnavailable, "service stopped", err))
 		}
 		return 0
+	case "ct":
+		return runCT(ctx, args[1:], dependencies, streams)
 	default:
 		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, fmt.Sprintf("unknown subcommand %q", args[0]), nil))
 	}
+}
+
+func runCT(ctx context.Context, args []string, dependencies Dependencies, streams commandStreams) int {
+	if len(args) == 0 {
+		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "ct requires import or collect", nil))
+	}
+	switch args[0] {
+	case "import":
+		flags := flag.NewFlagSet("ct import", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		input := flags.String("input", "", "")
+		scope := flags.String("scope", "", "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *input == "" || *scope == "" {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "ct import requires --input and --scope", err))
+		}
+		if dependencies.CTImport == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "CT import wiring is unavailable", nil))
+		}
+		reader := streams.stdin
+		if *input != "-" {
+			file, err := os.Open(*input)
+			if err != nil {
+				return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "open CT input", err))
+			}
+			defer func() { _ = file.Close() }()
+			reader = file
+		}
+		roots := strings.Split(*scope, ",")
+		count, err := dependencies.CTImport(ctx, reader, roots)
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		return writeCommandJSON(streams, struct {
+			Imported int `json:"imported"`
+		}{Imported: count})
+	case "collect":
+		flags := flag.NewFlagSet("ct collect", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		configuration := flags.String("config", "", "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *configuration == "" {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "ct collect requires --config", err))
+		}
+		if dependencies.CTCollect == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "CT collection wiring is unavailable", nil))
+		}
+		metrics, err := dependencies.CTCollect(ctx, *configuration)
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		return writeCommandJSON(streams, metrics)
+	default:
+		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, fmt.Sprintf("unknown ct subcommand %q", args[0]), nil))
+	}
+}
+
+func writeCommandJSON(streams commandStreams, value any) int {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return diagnostic(streams.stderr, err)
+	}
+	if _, err := fmt.Fprintln(streams.stdout, string(encoded)); err != nil {
+		return diagnostic(streams.stderr, err)
+	}
+	return 0
 }
 
 func runBatch(ctx context.Context, args []string, d Dependencies, s commandStreams) int {

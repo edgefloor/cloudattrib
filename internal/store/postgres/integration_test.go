@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"cloudattrib/internal/app"
+	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 )
@@ -24,11 +25,29 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 		t.Fatalf("Open() error = %v", err)
 	}
 	t.Cleanup(store.Close)
-	if _, err := store.pool.Exec(ctx, `TRUNCATE finding_evidence,findings,evidence,observations,job_targets,reports,bundle_pins,jobs,dataset_bundles RESTART IDENTITY CASCADE; UPDATE queue_capacity SET reserved_targets=0,maximum_targets=4 WHERE singleton=true`); err != nil {
+	if _, err := store.pool.Exec(ctx, `TRUNCATE ct_records,ct_checkpoints,finding_evidence,findings,evidence,observations,job_targets,reports,bundle_pins,jobs,dataset_bundles RESTART IDENTITY CASCADE; UPDATE queue_capacity SET reserved_targets=0,maximum_targets=4 WHERE singleton=true`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}
 	if err := store.RegisterBundle(ctx, "fixture-bundle", []byte(`{"schema_version":1}`), true); err != nil {
 		t.Fatalf("RegisterBundle() error = %v", err)
+	}
+	ctPassed := model.CTVerificationCheck{Status: model.CTCheckPassed, Procedure: "rfc6962-sha256", ProcedureVersion: "1"}
+	ctRecord := ctlog.Record{
+		Name: "api.example.com", CertificateHash: "fixture-certificate", LoggedAt: time.Unix(10, 0).UTC(), SourceID: "fixture-log",
+		Provenance:   ctlog.ProvenanceVerifiedLog,
+		Verification: model.CTVerification{CheckpointSignature: ctPassed, Continuity: ctPassed, EntryInclusion: ctPassed},
+	}
+	checkpoint := ctlog.Checkpoint{LogID: "sha256:fixture-log", NextIndex: 1, VerifiedTreeSize: 1, VerifiedRootHash: make([]byte, 32), KeyIdentity: "sha256:fixture-key"}
+	if err := store.CommitCollection(ctx, []ctlog.Record{ctRecord}, checkpoint); err != nil {
+		t.Fatalf("CommitCollection() error = %v", err)
+	}
+	discovered, err := store.Discover(ctx, "example.com", 20)
+	if err != nil || len(discovered.Candidates) != 1 || discovered.Candidates[0].Hostname != "api.example.com" {
+		t.Fatalf("Discover() = %#v, %v", discovered, err)
+	}
+	loadedCheckpoint, err := store.LoadCheckpoint(ctx, checkpoint.LogID)
+	if err != nil || loadedCheckpoint.NextIndex != 1 || loadedCheckpoint.VerifiedTreeSize != 1 {
+		t.Fatalf("LoadCheckpoint() = %#v, %v", loadedCheckpoint, err)
 	}
 	if err := store.RecordBundleActivation(ctx, "fixture-bundle"); err != nil {
 		t.Fatalf("RecordBundleActivation() error = %v", err)

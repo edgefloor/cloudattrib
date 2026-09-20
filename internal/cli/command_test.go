@@ -3,9 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"testing"
 	"time"
 
+	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/model"
 )
 
@@ -62,6 +65,42 @@ func TestRunAnalyzeJSONLAddsInputIndex(t *testing.T) {
 	}
 	if got := out.String(); !bytes.Contains([]byte(got), []byte("\"input_index\":0")) || !bytes.Contains([]byte(got), []byte("\"input_index\":1")) {
 		t.Fatalf("stdout = %s", got)
+	}
+}
+
+func TestRunCTImportAndCollect(t *testing.T) {
+	var out, errOut bytes.Buffer
+	input := bytes.NewBufferString("fixture\n")
+	dependencies := Dependencies{
+		Stdin: input, Stdout: &out, Stderr: &errOut,
+		CTImport: func(_ context.Context, reader io.Reader, roots []string) (int, error) {
+			content, _ := io.ReadAll(reader)
+			if string(content) != "fixture\n" || len(roots) != 1 || roots[0] != "example.com" {
+				t.Fatalf("CTImport input=%q roots=%v", content, roots)
+			}
+			return 1, nil
+		},
+		CTCollect: func(_ context.Context, path string) (ctlog.Metrics, error) {
+			if path != "ct.json" {
+				t.Fatalf("CTCollect path=%q", path)
+			}
+			return ctlog.Metrics{EntriesFetched: 2}, nil
+		},
+	}
+	if exit := Run(context.Background(), []string{"ct", "import", "--input", "-", "--scope", "example.com"}, dependencies); exit != 0 {
+		t.Fatalf("ct import exit=%d stderr=%q", exit, errOut.String())
+	}
+	var imported map[string]int
+	if err := json.Unmarshal(out.Bytes(), &imported); err != nil || imported["imported"] != 1 {
+		t.Fatalf("ct import output=%q error=%v", out.String(), err)
+	}
+	out.Reset()
+	if exit := Run(context.Background(), []string{"ct", "collect", "--config", "ct.json"}, dependencies); exit != 0 {
+		t.Fatalf("ct collect exit=%d stderr=%q", exit, errOut.String())
+	}
+	var metrics ctlog.Metrics
+	if err := json.Unmarshal(out.Bytes(), &metrics); err != nil || metrics.EntriesFetched != 2 {
+		t.Fatalf("ct collect output=%q error=%v", out.String(), err)
 	}
 }
 

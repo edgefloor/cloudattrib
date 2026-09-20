@@ -8,6 +8,7 @@ require (
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/miekg/dns v1.1.73
 	github.com/projectdiscovery/wappalyzergo v0.3.2
+	github.com/transparency-dev/merkle v0.0.2
 	golang.org/x/net v0.58.0
 )
 

@@ -15,6 +15,7 @@ import (
 	"cloudattrib/internal/aggregate"
 	collectdns "cloudattrib/internal/collect/dns"
 	collecthttp "cloudattrib/internal/collect/http"
+	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/target"
 )
@@ -28,6 +29,9 @@ type Dependencies struct {
 	Prefixes      PrefixReader
 	ASN           ASNReader
 	Store         ResultStore
+	CT            ctlog.Reader
+	CTEnabled     bool
+	CTMaximumSeed int
 	View          model.AttributionView
 	HTTPScheme    string
 	Now           func() time.Time
@@ -43,6 +47,9 @@ type Service struct {
 	prefixes      PrefixReader
 	asn           ASNReader
 	store         ResultStore
+	ct            ctlog.Reader
+	ctEnabled     bool
+	ctMaximumSeed int
 	view          model.AttributionView
 	httpScheme    string
 	now           func() time.Time
@@ -67,6 +74,9 @@ func NewService(dependencies Dependencies) *Service {
 		prefixes:      dependencies.Prefixes,
 		asn:           dependencies.ASN,
 		store:         dependencies.Store,
+		ct:            dependencies.CT,
+		ctEnabled:     dependencies.CTEnabled,
+		ctMaximumSeed: dependencies.CTMaximumSeed,
 		view:          dependencies.View,
 		httpScheme:    scheme,
 		now:           now,
@@ -92,6 +102,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	if s.dns == nil {
 		return model.Report{}, model.NewError(model.CodeCapabilityUnavailable, "DNS collector is unavailable", nil)
 	}
+	ctObservations, ctCoverage := s.planCTDiscovery(ctx, &normalized)
 
 	hostname := normalized.SeedHostnames[0]
 	collectHTTP := normalized.Mode == model.ModeFull && s.http != nil
@@ -184,8 +195,11 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		}
 	}
 
-	observations := make([]model.Observation, 0)
-	coverage := make([]model.Coverage, 0, len(dnsRuns)+len(httpRuns))
+	observations := slices.Clone(ctObservations)
+	coverage := make([]model.Coverage, 0, len(dnsRuns)+len(httpRuns)+1)
+	if ctCoverage != nil {
+		coverage = append(coverage, *ctCoverage)
+	}
 	for _, run := range dnsRuns {
 		scope := scopeForSeed(run.hostname, normalized.ScopeRoots)
 		for _, observation := range run.result.Observations {
@@ -328,6 +342,89 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		return model.Report{}, fmt.Errorf("validate report references: %w", err)
 	}
 	return report, nil
+}
+
+func (s *Service) planCTDiscovery(ctx context.Context, request *model.NormalizedRequest) ([]model.Observation, *model.Coverage) {
+	if !request.CTDiscovery {
+		return nil, nil
+	}
+	coverage := &model.Coverage{Capability: "ct_discovery"}
+	if !s.ctEnabled {
+		coverage.Status = model.CoverageSkipped
+		coverage.Reason = "disabled"
+		return nil, coverage
+	}
+	if s.ct == nil {
+		coverage.Status = model.CoverageUnavailable
+		coverage.Reason = "local CT index is unavailable"
+		return nil, coverage
+	}
+	limit := s.ctMaximumSeed
+	if limit <= 0 {
+		limit = 20
+	}
+	if remaining := 32 - len(request.SeedHostnames); limit > remaining {
+		limit = remaining
+	}
+	if limit <= 0 {
+		coverage.Status = model.CoveragePartial
+		coverage.Reason = "seed hostname limit reached"
+		return nil, coverage
+	}
+	seen := make(map[string]struct{}, len(request.SeedHostnames))
+	for _, hostname := range request.SeedHostnames {
+		seen[hostname] = struct{}{}
+	}
+	observations := make([]model.Observation, 0, limit)
+	identities := make([]string, 0, len(request.ScopeRoots))
+	partial := false
+	for _, root := range request.ScopeRoots {
+		if limit <= 0 {
+			break
+		}
+		result, err := s.ct.Discover(ctx, root, limit)
+		if err != nil {
+			coverage.Status = model.CoverageUnavailable
+			coverage.Reason = "query local CT index: " + err.Error()
+			return observations, coverage
+		}
+		coverage.Attempted += result.Available
+		coverage.Omitted += result.Omitted
+		partial = partial || result.Partial
+		identities = append(identities, result.IndexIdentity)
+		for _, candidate := range result.Candidates {
+			if _, duplicate := seen[candidate.Hostname]; duplicate {
+				continue
+			}
+			seen[candidate.Hostname] = struct{}{}
+			request.SeedHostnames = append(request.SeedHostnames, candidate.Hostname)
+			payload, err := json.Marshal(candidate)
+			if err != nil {
+				continue
+			}
+			digest := sha256.Sum256(append([]byte("ct-name-v1\x00"), payload...))
+			observations = append(observations, model.Observation{
+				ID: "ct-name-" + hex.EncodeToString(digest[:12]), Type: "ct_name", Subject: candidate.Hostname, Scope: model.ScopeSubdomain,
+				ObservedAt: candidate.LoggedAt, CollectorVersion: "ct-index-v1", Status: "historical_discovery", Payload: payload,
+				ContentHash: "sha256:" + hex.EncodeToString(digest[:]),
+			})
+			limit--
+		}
+	}
+	coverage.Completed = len(observations)
+	coverage.Reason = strings.Join(identities, ",")
+	switch {
+	case coverage.Attempted == 0:
+		coverage.Status = model.CoverageComplete
+		coverage.Reason = "empty_index"
+	case partial:
+		coverage.Status = model.CoveragePartial
+	case coverage.Omitted > 0:
+		coverage.Status = model.CoveragePartial
+	default:
+		coverage.Status = model.CoverageComplete
+	}
+	return observations, coverage
 }
 
 // LookupIP performs local prefix lookup without DNS, HTTP, or storage.

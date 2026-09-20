@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"cloudattrib/internal/app"
+	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 )
@@ -673,6 +674,130 @@ func (s *Store) ProtectedBundles(ctx context.Context, limit int) ([]string, erro
 	return bundles, nil
 }
 
+// Import atomically adds normalized CT records to the local index.
+func (s *Store) Import(ctx context.Context, records []ctlog.Record) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return persistence("begin CT import", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := insertCTRecords(ctx, tx, records); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return persistence("commit CT import", err)
+	}
+	return nil
+}
+
+// LoadCheckpoint returns the durable ingestion and verification positions for a log.
+func (s *Store) LoadCheckpoint(ctx context.Context, logID string) (ctlog.Checkpoint, error) {
+	var checkpoint ctlog.Checkpoint
+	var treeTimestamp *time.Time
+	err := s.pool.QueryRow(ctx, `SELECT log_id,next_index,verified_tree_size,verified_root_hash,tree_timestamp,tree_identity,key_identity FROM ct_checkpoints WHERE log_id=$1`, logID).Scan(
+		&checkpoint.LogID, &checkpoint.NextIndex, &checkpoint.VerifiedTreeSize, &checkpoint.VerifiedRootHash, &treeTimestamp, &checkpoint.TreeIdentity, &checkpoint.KeyIdentity,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ctlog.Checkpoint{}, nil
+	}
+	if err != nil {
+		return ctlog.Checkpoint{}, persistence("load CT checkpoint", err)
+	}
+	if treeTimestamp != nil {
+		checkpoint.TreeTimestamp = *treeTimestamp
+	}
+	return checkpoint, nil
+}
+
+// CommitCollection atomically stores CT records and collector progress.
+func (s *Store) CommitCollection(ctx context.Context, records []ctlog.Record, checkpoint ctlog.Checkpoint) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return persistence("begin CT collection commit", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := insertCTRecords(ctx, tx, records); err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `INSERT INTO ct_checkpoints(log_id,next_index,verified_tree_size,verified_root_hash,tree_timestamp,tree_identity,key_identity)
+		VALUES($1,$2,$3,$4,$5,$6,$7)
+		ON CONFLICT (log_id) DO UPDATE SET next_index=EXCLUDED.next_index,verified_tree_size=EXCLUDED.verified_tree_size,
+		verified_root_hash=EXCLUDED.verified_root_hash,tree_timestamp=EXCLUDED.tree_timestamp,tree_identity=EXCLUDED.tree_identity,
+		key_identity=EXCLUDED.key_identity,updated_at=clock_timestamp()
+		WHERE EXCLUDED.next_index > ct_checkpoints.next_index OR
+			(EXCLUDED.next_index = ct_checkpoints.next_index AND EXCLUDED.verified_tree_size >= ct_checkpoints.verified_tree_size)`, checkpoint.LogID,
+		checkpoint.NextIndex, checkpoint.VerifiedTreeSize, checkpoint.VerifiedRootHash, nullTime(checkpoint.TreeTimestamp), checkpoint.TreeIdentity, checkpoint.KeyIdentity)
+	if err != nil {
+		return persistence("store CT checkpoint", err)
+	}
+	if result.RowsAffected() != 1 {
+		return model.NewError(model.CodeIdempotencyConflict, "CT checkpoint would regress", nil)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return persistence("commit CT collection", err)
+	}
+	return nil
+}
+
+// Discover returns deterministic recent concrete hostnames from the local CT index.
+func (s *Store) Discover(ctx context.Context, root string, limit int) (ctlog.QueryResult, error) {
+	if limit < 1 {
+		return ctlog.QueryResult{}, model.NewError(model.CodeInvalidOptions, "CT discovery limit must be positive", nil)
+	}
+	rows, err := s.pool.Query(ctx, `WITH ranked AS (
+		SELECT document,provenance,row_number() OVER (PARTITION BY name ORDER BY logged_at DESC,certificate_hash,source_id) AS ordinal
+		FROM ct_records WHERE NOT wildcard AND (name=$1 OR name LIKE '%.' || $1)
+	), selected AS (
+		SELECT document,provenance FROM ranked WHERE ordinal=1
+	)
+	SELECT document,count(*) OVER (),bool_or(provenance <> 'verified_log') OVER ()
+	FROM selected ORDER BY (document->>'logged_at')::timestamptz DESC,document->>'name' LIMIT $2`, root, limit)
+	if err != nil {
+		return ctlog.QueryResult{}, persistence("query CT index", err)
+	}
+	defer rows.Close()
+	result := ctlog.QueryResult{}
+	for rows.Next() {
+		var document []byte
+		if err := rows.Scan(&document, &result.Available, &result.Partial); err != nil {
+			return ctlog.QueryResult{}, persistence("scan CT candidate", err)
+		}
+		var record ctlog.Record
+		if err := json.Unmarshal(document, &record); err != nil {
+			return ctlog.QueryResult{}, persistence("decode CT candidate", err)
+		}
+		result.Candidates = append(result.Candidates, ctlog.Candidate{
+			Hostname: record.Name, CertificateHash: record.CertificateHash, LoggedAt: record.LoggedAt, SourceID: record.SourceID,
+			Provenance: record.Provenance, Verification: record.Verification, CheckpointID: record.CheckpointID,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return ctlog.QueryResult{}, persistence("iterate CT candidates", err)
+	}
+	result.Omitted = result.Available - len(result.Candidates)
+	identity := sha256.New()
+	for _, candidate := range result.Candidates {
+		_, _ = fmt.Fprintf(identity, "%s\x00%s\x00%s\n", candidate.Hostname, candidate.CertificateHash, candidate.CheckpointID)
+	}
+	result.IndexIdentity = "sha256:" + hex.EncodeToString(identity.Sum(nil))
+	return result, nil
+}
+
+func insertCTRecords(ctx context.Context, tx pgx.Tx, records []ctlog.Record) error {
+	for _, record := range records {
+		document, err := json.Marshal(record)
+		if err != nil {
+			return fmt.Errorf("encode CT record: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO ct_records(name,certificate_hash,source_id,wildcard,logged_at,provenance,document)
+			VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (name,certificate_hash,source_id) DO NOTHING`, record.Name, record.CertificateHash,
+			record.SourceID, record.Wildcard, record.LoggedAt, record.Provenance, document); err != nil {
+			return persistence("insert CT record", err)
+		}
+	}
+	return nil
+}
+
 func finalizeJob(ctx context.Context, tx pgx.Tx, jobID string) error {
 	var queued, running, completed, partial, failed, cancelled int
 	if err := tx.QueryRow(ctx, `SELECT count(*) FILTER (WHERE status='queued'),count(*) FILTER (WHERE status='running'),count(*) FILTER (WHERE status='completed'),count(*) FILTER (WHERE status='partial'),count(*) FILTER (WHERE status='failed'),count(*) FILTER (WHERE status='cancelled') FROM job_targets WHERE job_id=$1`, jobID).Scan(&queued, &running, &completed, &partial, &failed, &cancelled); err != nil {
@@ -837,3 +962,5 @@ func persistence(operation string, err error) error {
 }
 
 var _ jobs.Store = (*Store)(nil)
+var _ ctlog.Store = (*Store)(nil)
+var _ ctlog.Reader = (*Store)(nil)

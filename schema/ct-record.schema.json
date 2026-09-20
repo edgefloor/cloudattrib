@@ -15,6 +15,7 @@
     "not_before": {"type": "string", "format": "date-time"},
     "not_after": {"type": "string", "format": "date-time"},
     "source_id": {"type": "string"},
+    "checkpoint_id": {"type": "string"},
     "provenance": {"enum": ["verified_log", "log_unverified", "imported_unverified"]},
     "verification": {
       "type": "object",

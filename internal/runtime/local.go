@@ -11,15 +11,39 @@ import (
 	collectdns "cloudattrib/internal/collect/dns"
 	collecthttp "cloudattrib/internal/collect/http"
 	"cloudattrib/internal/config"
+	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/detect/dnsrules"
 	"cloudattrib/internal/detect/webtech"
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/policy"
+	"cloudattrib/internal/store/postgres"
 )
 
 // NewLocal constructs the collection-only local analyzer without downloading data.
 func NewLocal(configuration config.Config) (app.Analyzer, error) {
 	return newAnalyzer(configuration, standaloneReportStore{})
+}
+
+// OpenLocal constructs a CLI analyzer and opens durable CT storage only when CT is enabled.
+func OpenLocal(ctx context.Context, configuration config.Config) (app.Analyzer, func(), error) {
+	if !configuration.CT.Enabled {
+		analyzer, err := NewLocal(configuration)
+		return analyzer, func() {}, err
+	}
+	dsn, err := readDSN(configuration.Storage.PostgresDSNFile)
+	if err != nil {
+		return nil, nil, err
+	}
+	store, err := postgres.Open(ctx, dsn, configuration.Limits.MaximumBacklogTargets)
+	if err != nil {
+		return nil, nil, err
+	}
+	analyzer, err := newAnalyzer(configuration, store)
+	if err != nil {
+		store.Close()
+		return nil, nil, err
+	}
+	return analyzer, store.Close, nil
 }
 
 func newAnalyzer(configuration config.Config, store app.ResultStore) (app.Analyzer, error) {
@@ -72,6 +96,10 @@ func newAnalyzer(configuration config.Config, store app.ResultStore) (app.Analyz
 			{Name: "asn", Status: model.CoverageUnavailable, Reason: "no active local bundle"},
 		},
 	)
+	var ctReader ctlog.Reader
+	if configuration.CT.Enabled {
+		ctReader, _ = store.(ctlog.Reader)
+	}
 	return app.NewService(app.Dependencies{
 		DNS:           collectdns.New(dnsClient.Query, destinationPolicy),
 		HTTP:          collecthttp.New(dial, destinationPolicy, configuration.Limits.Target.HTTPDocumentBytes, collecthttp.WithRedirectResolver(resolver), collecthttp.WithRequestTimeout(configuration.Limits.Target.HTTPRequestTimeout)),
@@ -79,6 +107,9 @@ func newAnalyzer(configuration config.Config, store app.ResultStore) (app.Analyz
 		WebDetector:   webDetector,
 		View:          view,
 		Store:         store,
+		CT:            ctReader,
+		CTEnabled:     configuration.CT.Enabled,
+		CTMaximumSeed: configuration.CT.MaximumSeedNames,
 		TargetTimeout: configuration.Limits.Target.TargetDeadline,
 	}), nil
 }
