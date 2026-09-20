@@ -1,6 +1,7 @@
 package datasets
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -22,6 +23,55 @@ func TestFailedActivationKeepsLastKnownGood(t *testing.T) {
 	if got := manager.Capture().View.BundleID(); got != "bundle-a" {
 		t.Fatalf("active bundle = %q, want bundle-a", got)
 	}
+}
+
+func TestPruneHonorsLastKnownGoodReadersAndDurablePins(t *testing.T) {
+	t.Parallel()
+
+	references := &fixtureReferences{pinned: map[string]bool{"bundle-a": true}}
+	manager, err := NewManager(candidate("bundle-a", "build-a"), "build-a", WithReferenceStore(references))
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+	for _, bundleID := range []string{"bundle-b", "bundle-c"} {
+		if err := manager.Activate(candidate(bundleID, "build-a")); err != nil {
+			t.Fatalf("Activate(%s) error = %v", bundleID, err)
+		}
+	}
+	removed := false
+	if ok, err := manager.Prune(context.Background(), "bundle-a", func() error { removed = true; return nil }); err != nil || ok || removed {
+		t.Fatalf("Prune(pinned) = %v, %v, removed=%v", ok, err, removed)
+	}
+	references.pinned["bundle-a"] = false
+	if ok, err := manager.Prune(context.Background(), "bundle-a", func() error { removed = true; return nil }); err != nil || !ok || !removed {
+		t.Fatalf("Prune(unpinned) = %v, %v, removed=%v", ok, err, removed)
+	}
+	if ok, err := manager.Prune(context.Background(), "bundle-b", func() error { return nil }); err != nil || ok {
+		t.Fatalf("Prune(last-known-good) = %v, %v", ok, err)
+	}
+
+	acquired, release := manager.Acquire()
+	if acquired.Manifest.BundleID != "bundle-c" {
+		t.Fatalf("Acquire() bundle = %q", acquired.Manifest.BundleID)
+	}
+	for _, bundleID := range []string{"bundle-d", "bundle-e"} {
+		if err := manager.Activate(candidate(bundleID, "build-a")); err != nil {
+			t.Fatalf("Activate(%s) error = %v", bundleID, err)
+		}
+	}
+	if ok, err := manager.Prune(context.Background(), "bundle-c", func() error { return nil }); err != nil || ok {
+		t.Fatalf("Prune(active-reader) = %v, %v", ok, err)
+	}
+	release()
+	if ok, err := manager.Prune(context.Background(), "bundle-c", func() error { return nil }); err != nil || !ok {
+		t.Fatalf("Prune(released-reader) = %v, %v", ok, err)
+	}
+}
+
+type fixtureReferences struct{ pinned map[string]bool }
+
+func (f *fixtureReferences) WithBundlePruneLock(_ context.Context, bundleID string, action func(bool) error) error {
+	return action(f.pinned[bundleID])
 }
 
 func TestParallelReadersCaptureCoherentViewsDuringActivation(t *testing.T) {

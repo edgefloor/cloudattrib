@@ -2,6 +2,7 @@
 package datasets
 
 import (
+	"context"
 	"fmt"
 	"slices"
 	"sync"
@@ -49,14 +50,33 @@ type Snapshot struct {
 
 // Manager serializes activation and publishes immutable snapshots atomically.
 type Manager struct {
-	buildID string
-	mu      sync.Mutex
-	active  atomic.Pointer[Snapshot]
+	buildID       string
+	mu            sync.Mutex
+	active        atomic.Pointer[Snapshot]
+	references    ReferenceStore
+	lastKnownGood []string
+	readers       map[string]int
+}
+
+// ReferenceStore coordinates durable job pins with bundle pruning.
+type ReferenceStore interface {
+	WithBundlePruneLock(context.Context, string, func(bool) error) error
+}
+
+// Option configures bundle lifecycle integration.
+type Option func(*Manager)
+
+// WithReferenceStore enables durable pruning checks. Without it, pruning fails closed.
+func WithReferenceStore(store ReferenceStore) Option {
+	return func(manager *Manager) { manager.references = store }
 }
 
 // NewManager validates and publishes the initial last-known-good candidate.
-func NewManager(initial Candidate, buildID string) (*Manager, error) {
-	manager := &Manager{buildID: buildID}
+func NewManager(initial Candidate, buildID string, options ...Option) (*Manager, error) {
+	manager := &Manager{buildID: buildID, readers: make(map[string]int)}
+	for _, option := range options {
+		option(manager)
+	}
 	if err := manager.Activate(initial); err != nil {
 		return nil, err
 	}
@@ -72,6 +92,11 @@ func (m *Manager) Activate(candidate Candidate) error {
 	}
 	snapshot := &Snapshot{Manifest: cloneManifest(candidate.Manifest), View: candidate.View}
 	m.active.Store(snapshot)
+	m.lastKnownGood = append([]string{candidate.Manifest.BundleID}, m.lastKnownGood...)
+	m.lastKnownGood = slices.Compact(m.lastKnownGood)
+	if len(m.lastKnownGood) > 2 {
+		m.lastKnownGood = m.lastKnownGood[:2]
+	}
 	return nil
 }
 
@@ -82,6 +107,60 @@ func (m *Manager) Capture() Snapshot {
 		return Snapshot{}
 	}
 	return Snapshot{Manifest: cloneManifest(snapshot.Manifest), View: snapshot.View}
+}
+
+// Acquire captures a view and protects its bundle until release is called.
+func (m *Manager) Acquire() (Snapshot, func()) {
+	m.mu.Lock()
+	snapshot := m.active.Load()
+	if snapshot == nil {
+		m.mu.Unlock()
+		return Snapshot{}, func() {}
+	}
+	bundleID := snapshot.Manifest.BundleID
+	m.readers[bundleID]++
+	result := Snapshot{Manifest: cloneManifest(snapshot.Manifest), View: snapshot.View}
+	m.mu.Unlock()
+	var once sync.Once
+	return result, func() {
+		once.Do(func() {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			m.readers[bundleID]--
+			if m.readers[bundleID] == 0 {
+				delete(m.readers, bundleID)
+			}
+		})
+	}
+}
+
+// Prune runs removal only when local and durable protections permit it.
+func (m *Manager) Prune(ctx context.Context, bundleID string, remove func() error) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if bundleID == "" || remove == nil {
+		return false, fmt.Errorf("bundle ID and removal callback are required")
+	}
+	if slices.Contains(m.lastKnownGood, bundleID) || m.readers[bundleID] > 0 {
+		return false, nil
+	}
+	if m.references == nil {
+		return false, model.NewError(model.CodePersistenceUnavailable, "durable bundle references cannot be checked", nil)
+	}
+	removed := false
+	if err := m.references.WithBundlePruneLock(ctx, bundleID, func(pinned bool) error {
+		if pinned {
+			return nil
+		}
+		if err := remove(); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	return removed, nil
 }
 
 func validateCandidate(candidate Candidate, buildID string) error {
