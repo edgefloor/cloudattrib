@@ -51,3 +51,62 @@ func TestSupervisorRecoversAndExecutesDurableWork(t *testing.T) {
 		t.Fatalf("Run() error = %v", err)
 	}
 }
+
+func TestSupervisorJoinsWorkerTerminalCommitOnShutdown(t *testing.T) {
+	t.Parallel()
+
+	memory := NewMemoryStore(1)
+	if _, err := memory.Submit(t.Context(), SubmitRequest{OperatorID: "operator", IdempotencyKey: "shutdown", Targets: []model.AnalyzeRequest{{Target: "example.com", Kind: model.TargetDomain}}}); err != nil {
+		t.Fatal(err)
+	}
+	store := &blockingCompleteStore{MemoryStore: memory, started: make(chan struct{}), release: make(chan struct{})}
+	analysisStarted := make(chan struct{})
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	supervisor := Supervisor{
+		Runner:  Runner{Store: store, Factory: blockingAnalyzerFactory{started: analysisStarted}, WorkerID: "worker", Lease: time.Second, CommitTimeout: time.Second},
+		Workers: 1, PollInterval: time.Millisecond, RecoveryInterval: time.Second, MaximumAttempts: 3,
+	}
+	go func() { done <- supervisor.Run(ctx) }()
+	select {
+	case <-analysisStarted:
+	case <-time.After(time.Second):
+		t.Fatal("analysis did not start")
+	}
+	cancel()
+	select {
+	case <-store.started:
+	case <-time.After(time.Second):
+		t.Fatal("terminal commit did not start")
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("supervisor returned before terminal commit finished: %v", err)
+	default:
+	}
+	close(store.release)
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("supervisor did not return after terminal commit")
+	}
+}
+
+type blockingCompleteStore struct {
+	*MemoryStore
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingCompleteStore) Complete(ctx context.Context, targetID, token string, report model.Report, status TargetStatus, reason string) error {
+	close(s.started)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-s.release:
+		return s.MemoryStore.Complete(ctx, targetID, token, report, status, reason)
+	}
+}

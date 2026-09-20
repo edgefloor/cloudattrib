@@ -74,7 +74,7 @@ docker compose exec app /usr/local/bin/cloudattrib datasets status \
   --config /etc/cloudattrib/config.yaml
 ```
 
-Each process loads the desired bundle off-path and then swaps its active analyzer. A failed load records a process-load failure and retains the last-known-good analyzer. Accepted pinned jobs retain their historical analyzer and durable prune protection.
+Each process loads the desired bundle off-path and then swaps its active analyzer. A failed load records a process-load failure and retains the last-known-good analyzer. Accepted pinned jobs retain their historical analyzer and durable prune protection, including the built-in bundle after a process restart. Activation and pruning use the same filesystem-to-database lock order, so a candidate cannot be pruned between validation and durable publication.
 
 Rollback uses the same review-bound hash:
 
@@ -121,7 +121,7 @@ Reports and raw retained observations have no automatic age-based deletion. Defi
 - A corrupt or incompatible candidate fails validation or process loading. The last-known-good analyzer remains active.
 - Writer contention rejects the second updater instead of allowing concurrent publication.
 - PostgreSQL admission and report commits fail explicitly. The service does not return an unstored success.
-- `SIGTERM` stops admission, cancels workers, allows up to 10 seconds for HTTP shutdown, and leaves leases recoverable on restart.
+- `SIGTERM` stops admission, cancels workers, allows up to 10 seconds for HTTP shutdown, and waits for owned worker and reloader goroutines while PostgreSQL remains open. Worker terminal commits have a five-second shutdown bound; unfinished leases remain recoverable on restart.
 - Expired work leases are recovered at startup. Reservations and bundle pins remain durable through restart and retry.
 
 If a process stops after desired-bundle publication but before reload, it loads that desired candidate on restart. If loading fails, inspect `datasets status`, correct or roll back the desired pointer, and restart or wait for the reload loop.

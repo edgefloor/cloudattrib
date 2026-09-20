@@ -3,9 +3,13 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"net/netip"
 	"testing"
 	"time"
 
+	"cloudattrib/internal/enrich/asn"
+	"cloudattrib/internal/enrich/prefix"
+	"cloudattrib/internal/ingest/iptoasn"
 	"cloudattrib/internal/model"
 )
 
@@ -51,6 +55,20 @@ func TestReclassifyRequiresUsableReplayPath(t *testing.T) {
 	}
 }
 
+func TestReclassifyRejectsFindingsWithoutRetainedInputs(t *testing.T) {
+	t.Parallel()
+
+	original := model.Report{ID: "findings-only", Evidence: []model.Evidence{{ID: "old-evidence"}}}
+	service := NewService(Dependencies{
+		Detectors: []Detector{emptyReplayDetector{}}, Store: fixtureResultStore{report: original},
+		View: model.NewAttributionView("bundle", "policy", nil, nil),
+	})
+	_, err := service.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: original.ID, BundleID: "bundle"})
+	if model.ErrorCodeOf(err) != model.CodeCapabilityUnavailable {
+		t.Fatalf("Reclassify() error = %v, want capability_unavailable", err)
+	}
+}
+
 func TestReclassifyReusesRetainedRawTechnologyLabel(t *testing.T) {
 	t.Parallel()
 
@@ -69,6 +87,54 @@ func TestReclassifyReusesRetainedRawTechnologyLabel(t *testing.T) {
 	}
 	if len(replayed.Evidence) != 1 || replayed.Evidence[0].ProductID != "webtech.vue-js" || replayed.Evidence[0].ObservationIDs[0] != "tech-1" {
 		t.Fatalf("replayed evidence = %#v", replayed.Evidence)
+	}
+}
+
+func TestReclassifyEnrichesHTTPRedirectPeerWithNewPrefixAndASNData(t *testing.T) {
+	t.Parallel()
+
+	address := netip.MustParseAddr("203.0.113.9")
+	payload, _ := json.Marshal(model.HTTPPayload{URL: "https://redirect.example/", StatusCode: 200, PeerAddress: address})
+	original := model.Report{
+		ID: "redirect-report", Target: model.Target{Canonical: "example.com", Kind: model.TargetDomain},
+		Observations: []model.Observation{{ID: "http-redirect", Type: "http_response", Subject: "redirect.example", Scope: model.ScopeExternalRedirect, Status: "responded", Payload: payload}},
+	}
+	prefixIndex := prefix.New([]model.Association{{
+		ID: "new-prefix", Prefix: netip.MustParsePrefix("203.0.113.0/24"), ProviderID: "new-cloud", Lifecycle: "active",
+		SourceID: "new-prefix-source", SourceRevision: "new-prefix-revision", SourceDigest: "sha256:new-prefix", RecordRef: "prefix/1",
+	}})
+	asnIndex, err := asn.New([]iptoasn.Interval{{
+		Start: netip.MustParseAddr("203.0.113.0"), End: netip.MustParseAddr("203.0.113.255"), ASN: 64512,
+		SourceID: "iptoasn-v4", Revision: "new-asn-revision", Digest: "sha256:new-asn", RecordRef: "1",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(Dependencies{
+		Store: fixtureResultStore{report: original}, Prefixes: prefixIndex, ASN: asnIndex,
+		View: model.NewAttributionView("new-bundle", "policy", nil, []model.CapabilityState{
+			{Name: "prefix_source/new", Status: model.CoverageComplete}, {Name: "asn_source/ipv4", Status: model.CoverageComplete},
+		}),
+	})
+	replayed, err := service.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: original.ID, BundleID: "new-bundle"})
+	if err != nil {
+		t.Fatalf("Reclassify() error = %v", err)
+	}
+	if len(replayed.Evidence) != 2 {
+		t.Fatalf("replayed evidence = %#v", replayed.Evidence)
+	}
+	for _, item := range replayed.Evidence {
+		if item.Subject != "redirect.example" || item.Scope != model.ScopeExternalRedirect || len(item.ObservationIDs) != 1 || item.ObservationIDs[0] != "http-redirect" {
+			t.Fatalf("redirect evidence = %#v", item)
+		}
+	}
+	if replayed.Evidence[1].DatasetRecords[0].Revision != "new-asn-revision" && replayed.Evidence[0].DatasetRecords[0].Revision != "new-asn-revision" {
+		t.Fatalf("ASN evidence did not use selected bundle: %#v", replayed.Evidence)
+	}
+	for _, finding := range replayed.Findings {
+		if finding.Scope == model.ScopeRoot {
+			t.Fatalf("redirect peer contaminated root findings: %#v", replayed.Findings)
+		}
 	}
 }
 

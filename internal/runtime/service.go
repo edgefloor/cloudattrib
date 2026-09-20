@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -25,8 +26,10 @@ import (
 )
 
 const (
-	builtinBundleID = "builtin-rules-v1"
-	detectorBuildID = "cloudattrib-runtime-v1"
+	builtinBundleID      = "builtin-rules-v1"
+	detectorBuildID      = "cloudattrib-runtime-v1"
+	serviceShutdownGrace = 10 * time.Second
+	workerCommitTimeout  = 5 * time.Second
 )
 
 // Serve runs the durable API, worker pool, and lease recovery under one lifecycle.
@@ -43,7 +46,7 @@ func Serve(ctx context.Context, configuration config.Config) error {
 		return err
 	}
 	defer store.Close()
-	analyzer, activeBundleID, manifest, lookup, err := newAnalyzerDetails(configuration, store)
+	analyzer, activeBundleID, manifest, lookup, err := newAnalyzerDetails(ctx, configuration, store)
 	if err != nil {
 		return err
 	}
@@ -69,16 +72,19 @@ func Serve(ctx context.Context, configuration config.Config) error {
 			bootstrap = &report
 		}
 	}
-	if err := store.RegisterBundle(ctx, activeBundleID, manifest, true); err != nil {
-		return fmt.Errorf("register active bundle: %w", err)
-	}
 	if bootstrap != nil {
-		if _, err := repository.Activate(ctx, bootstrap.CandidateID, bootstrap.CandidateHash, "bootstrap"); err != nil {
+		if _, err := repository.ActivateCoordinated(ctx, bootstrap.CandidateID, bootstrap.CandidateHash, "bootstrap", func(candidate datasets.Manifest, candidateBytes []byte, publish func() error) error {
+			return store.ActivateBundle(ctx, candidate.BundleID, candidateBytes, true, publish)
+		}); err != nil {
 			return fmt.Errorf("activate initial service bundle: %w", err)
 		}
-	}
-	if err := store.RecordBundleActivation(ctx, activeBundleID); err != nil {
-		return fmt.Errorf("record active bundle: %w", err)
+	} else {
+		if err := store.RegisterBundle(ctx, activeBundleID, manifest, true); err != nil {
+			return fmt.Errorf("register active bundle: %w", err)
+		}
+		if err := store.RecordBundleActivation(ctx, activeBundleID); err != nil {
+			return fmt.Errorf("record active bundle: %w", err)
+		}
 	}
 	analyzerFactory := &bundleAnalyzerFactory{
 		configuration: configuration, store: store, active: analyzer, activeBundleID: activeBundleID, activeLookup: lookup,
@@ -107,14 +113,21 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	defer func() { _ = listener.Close() }()
 
 	supervisor := jobs.Supervisor{
-		Runner:  jobs.Runner{Store: store, Factory: analyzerFactory, WorkerID: "service-worker", Lease: configuration.Storage.LeaseDuration},
+		Runner: jobs.Runner{
+			Store: store, Factory: analyzerFactory, WorkerID: "service-worker", Lease: configuration.Storage.LeaseDuration,
+			CommitTimeout: workerCommitTimeout,
+		},
 		Workers: configuration.Limits.ConcurrentTargets, PollInterval: 100 * time.Millisecond,
 		RecoveryInterval: max(configuration.Storage.LeaseDuration/2, time.Second), MaximumAttempts: configuration.Storage.MaximumAttempts,
 		OnError: func(workerErr error) { log.Printf("cloudattrib worker: %v", workerErr) },
 	}
 	workerCtx, stopWorkers := context.WithCancel(ctx)
 	defer stopWorkers()
-	go analyzerFactory.reloadLoop(workerCtx, time.Second, func(reloadErr error) { log.Printf("cloudattrib bundle reload: %v", reloadErr) })
+	reloadDone := make(chan struct{})
+	go func() {
+		defer close(reloadDone)
+		analyzerFactory.reloadLoop(workerCtx, time.Second, func(reloadErr error) { log.Printf("cloudattrib bundle reload: %v", reloadErr) })
+	}()
 	workerErr := make(chan error, 1)
 	go func() { workerErr <- supervisor.Run(workerCtx) }()
 
@@ -128,23 +141,41 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	go func() { serverErr <- server.Serve(listener) }()
 
 	var runErr error
+	workerStopped := false
+	serverStopped := false
 	select {
 	case <-ctx.Done():
 		runErr = ctx.Err()
 	case err := <-workerErr:
+		workerStopped = true
 		if !errors.Is(err, context.Canceled) {
 			runErr = fmt.Errorf("job supervisor stopped: %w", err)
 		}
 	case err := <-serverErr:
+		serverStopped = true
 		if !errors.Is(err, http.ErrServerClosed) {
 			runErr = fmt.Errorf("serve API: %w", err)
 		}
 	}
 	stopWorkers()
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), serviceShutdownGrace)
 	defer cancel()
-	if err := server.Shutdown(shutdownCtx); err != nil && runErr == nil {
-		runErr = fmt.Errorf("shut down API: %w", err)
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		_ = server.Close()
+		if runErr == nil {
+			runErr = fmt.Errorf("shut down API: %w", err)
+		}
+	}
+	if !workerStopped {
+		if err := <-workerErr; !errors.Is(err, context.Canceled) && runErr == nil {
+			runErr = fmt.Errorf("job supervisor stopped: %w", err)
+		}
+	}
+	<-reloadDone
+	if !serverStopped {
+		if err := <-serverErr; !errors.Is(err, http.ErrServerClosed) && runErr == nil {
+			runErr = fmt.Errorf("serve API: %w", err)
+		}
 	}
 	return runErr
 }
@@ -158,34 +189,86 @@ type bundleAnalyzerFactory struct {
 	mu             sync.Mutex
 	analyzers      map[string]app.Analyzer
 	lookup         map[string]lookupAvailability
+	loads          map[string]*bundleLoad
+	load           func(context.Context, string) (app.Analyzer, lookupAvailability, error)
 }
 
-func (f *bundleAnalyzerFactory) AnalyzerForBundle(_ context.Context, bundleID string) (app.Analyzer, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if bundleID == "" || bundleID == f.activeBundleID {
-		return f.active, nil
+type bundleLoad struct {
+	done     chan struct{}
+	analyzer app.Analyzer
+	lookup   lookupAvailability
+	err      error
+}
+
+func (f *bundleAnalyzerFactory) AnalyzerForBundle(ctx context.Context, bundleID string) (app.Analyzer, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	return f.loadBundleLocked(bundleID)
-}
-
-func (f *bundleAnalyzerFactory) loadBundleLocked(bundleID string) (app.Analyzer, error) {
-	if analyzer := f.analyzers[bundleID]; analyzer != nil {
+	f.mu.Lock()
+	if bundleID == "" || bundleID == f.activeBundleID {
+		analyzer := f.active
+		f.mu.Unlock()
 		return analyzer, nil
 	}
-	if !strings.HasPrefix(bundleID, "bundle-sha256-") {
-		return nil, model.NewError(model.CodeBundleUnavailable, "bundle is unavailable to this detector build", nil)
+	if analyzer := f.analyzers[bundleID]; analyzer != nil {
+		f.mu.Unlock()
+		return analyzer, nil
 	}
+	if pending := f.loads[bundleID]; pending != nil {
+		f.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-pending.done:
+			return pending.analyzer, pending.err
+		}
+	}
+	if f.loads == nil {
+		f.loads = make(map[string]*bundleLoad)
+	}
+	pending := &bundleLoad{done: make(chan struct{})}
+	f.loads[bundleID] = pending
+	f.mu.Unlock()
+
+	loader := f.load
+	if loader == nil {
+		loader = f.loadBundle
+	}
+	pending.analyzer, pending.lookup, pending.err = loader(ctx, bundleID)
+	f.mu.Lock()
+	if pending.err == nil {
+		if f.analyzers == nil {
+			f.analyzers = make(map[string]app.Analyzer)
+		}
+		if f.lookup == nil {
+			f.lookup = make(map[string]lookupAvailability)
+		}
+		f.analyzers[bundleID] = pending.analyzer
+		f.lookup[bundleID] = pending.lookup
+	}
+	delete(f.loads, bundleID)
+	close(pending.done)
+	f.mu.Unlock()
+	return pending.analyzer, pending.err
+}
+
+func (f *bundleAnalyzerFactory) loadBundle(ctx context.Context, bundleID string) (app.Analyzer, lookupAvailability, error) {
 	configuration := f.configuration
-	configuration.Data.SourceDirectory = filepath.Join(configuration.Data.BundleDirectory, "candidates", bundleID, "sources")
-	configuration.Data.BundleDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", bundleID)
-	analyzer, loadedBundleID, _, lookup, err := newAnalyzerDetails(configuration, f.store)
-	if err != nil || loadedBundleID != bundleID {
-		return nil, model.NewError(model.CodeBundleUnavailable, "bundle is unavailable to this detector build", err)
+	if bundleID == builtinBundleID {
+		configuration.Data.SourceDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", builtinBundleID, "absent")
+		configuration.Data.BundleDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", builtinBundleID)
+	} else {
+		if !strings.HasPrefix(bundleID, "bundle-sha256-") {
+			return nil, lookupAvailability{}, model.NewError(model.CodeBundleUnavailable, "bundle is unavailable to this detector build", nil)
+		}
+		configuration.Data.SourceDirectory = filepath.Join(configuration.Data.BundleDirectory, "candidates", bundleID, "sources")
+		configuration.Data.BundleDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", bundleID)
 	}
-	f.analyzers[bundleID] = analyzer
-	f.lookup[bundleID] = lookup
-	return analyzer, nil
+	analyzer, loadedBundleID, _, lookup, err := newAnalyzerDetails(ctx, configuration, f.store)
+	if err != nil || loadedBundleID != bundleID {
+		return nil, lookupAvailability{}, model.NewError(model.CodeBundleUnavailable, "bundle is unavailable to this detector build", err)
+	}
+	return analyzer, lookup, nil
 }
 
 func (f *bundleAnalyzerFactory) localLookupAvailability() lookupAvailability {
@@ -255,18 +338,21 @@ func (f *bundleAnalyzerFactory) reloadDesired() error {
 		return err
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if activation.BundleID == f.activeBundleID {
+		f.mu.Unlock()
 		return nil
 	}
-	analyzer, err := f.loadBundleLocked(activation.BundleID)
+	f.mu.Unlock()
+	analyzer, err := f.AnalyzerForBundle(context.Background(), activation.BundleID)
 	if err != nil {
 		_ = repository.RecordLoad(activation.BundleID, "failed", err.Error())
 		return err
 	}
+	f.mu.Lock()
 	f.active = analyzer
 	f.activeBundleID = activation.BundleID
 	f.activeLookup = f.lookup[activation.BundleID]
+	f.mu.Unlock()
 	return repository.RecordLoad(activation.BundleID, "loaded", "")
 }
 
@@ -321,6 +407,9 @@ func serviceReadinessSnapshot(persistenceReady bool, lookup lookupAvailability) 
 }
 
 func localLookupCapabilities(availability lookupAvailability) []model.CapabilityState {
+	if len(availability.data) > 0 {
+		return slices.Clone(availability.data)
+	}
 	prefix := model.CapabilityState{Name: "prefix", Status: model.CoverageComplete}
 	if !availability.prefix {
 		prefix = model.CapabilityState{Name: "prefix", Status: model.CoverageUnavailable, Reason: "no active local prefix bundle"}

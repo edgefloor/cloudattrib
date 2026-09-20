@@ -36,33 +36,17 @@ func ActivateDataset(ctx context.Context, configuration config.Config, candidate
 	if err != nil {
 		return datasets.Activation{}, err
 	}
-	report, err := repository.Validate(ctx, candidateID)
-	if err != nil {
-		return datasets.Activation{}, err
-	}
-	if approvalHash == "" || approvalHash != report.CandidateHash {
-		return datasets.Activation{}, fmt.Errorf("approval hash does not match the validated candidate")
-	}
-	manifest, manifestBytes, err := repository.Manifest(candidateID)
-	if err != nil {
-		return datasets.Activation{}, err
-	}
 	store, err := openDatasetStore(ctx, configuration)
 	if err != nil {
 		return datasets.Activation{}, err
 	}
 	defer store.Close()
-	if err := store.RegisterBundle(ctx, manifest.BundleID, manifestBytes, true); err != nil {
-		return datasets.Activation{}, fmt.Errorf("register dataset candidate: %w", err)
-	}
-	activation, err := repository.Activate(ctx, candidateID, approvalHash, action)
-	if err != nil {
-		return datasets.Activation{}, err
-	}
-	if err := store.RecordBundleActivation(ctx, candidateID); err != nil {
-		return activation, fmt.Errorf("record durable dataset activation: %w", err)
-	}
-	return activation, nil
+	return repository.ActivateCoordinated(ctx, candidateID, approvalHash, action, func(manifest datasets.Manifest, manifestBytes []byte, publish func() error) error {
+		if err := store.ActivateBundle(ctx, manifest.BundleID, manifestBytes, true, publish); err != nil {
+			return fmt.Errorf("coordinate dataset activation: %w", err)
+		}
+		return nil
+	})
 }
 
 // DatasetStatus returns desired, candidate, and process-load state.

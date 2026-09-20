@@ -17,10 +17,11 @@ type AnalyzerFactory interface {
 
 // Runner executes one claimed target while renewing its bounded lease.
 type Runner struct {
-	Store    Store
-	Factory  AnalyzerFactory
-	WorkerID string
-	Lease    time.Duration
+	Store         Store
+	Factory       AnalyzerFactory
+	WorkerID      string
+	Lease         time.Duration
+	CommitTimeout time.Duration
 }
 
 // RunOnce claims and terminalizes at most one target.
@@ -32,14 +33,6 @@ func (r Runner) RunOnce(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("claim target: %w", err)
 	}
-	analyzer, err := r.Factory.AnalyzerForBundle(ctx, claim.BundleID)
-	if err != nil {
-		completeErr := r.Store.Complete(ctx, claim.TargetID, claim.AttemptToken, model.Report{}, TargetFailed, "capture attribution bundle: "+err.Error())
-		if completeErr != nil {
-			return fmt.Errorf("capture bundle: %v; terminalize target: %w", err, completeErr)
-		}
-		return fmt.Errorf("capture attribution bundle: %w", err)
-	}
 	analysisCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	analysisDone := make(chan struct{})
@@ -47,10 +40,15 @@ func (r Runner) RunOnce(ctx context.Context) error {
 	go r.renewLease(analysisCtx, cancel, analysisDone, renewResult, claim)
 	var report model.Report
 	var analyzeErr error
-	if claim.Reclassify != nil {
-		report, analyzeErr = analyzer.Reclassify(analysisCtx, *claim.Reclassify)
+	analyzer, captureErr := r.Factory.AnalyzerForBundle(analysisCtx, claim.BundleID)
+	if captureErr == nil {
+		if claim.Reclassify != nil {
+			report, analyzeErr = analyzer.Reclassify(analysisCtx, *claim.Reclassify)
+		} else {
+			report, analyzeErr = analyzer.Analyze(analysisCtx, claim.Request)
+		}
 	} else {
-		report, analyzeErr = analyzer.Analyze(analysisCtx, claim.Request)
+		analyzeErr = fmt.Errorf("capture attribution bundle: %w", captureErr)
 	}
 	close(analysisDone)
 	renewErr := <-renewResult
@@ -68,10 +66,17 @@ func (r Runner) RunOnce(ctx context.Context) error {
 		reason = "lease renewal failed: " + renewErr.Error()
 		report = model.Report{}
 	}
-	commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), r.Lease)
+	commitTimeout := r.CommitTimeout
+	if commitTimeout <= 0 {
+		commitTimeout = r.Lease
+	}
+	commitCtx, commitCancel := context.WithTimeout(context.WithoutCancel(ctx), commitTimeout)
 	defer commitCancel()
 	if err := r.Store.Complete(commitCtx, claim.TargetID, claim.AttemptToken, report, status, reason); err != nil {
 		return fmt.Errorf("commit target result: %w", err)
+	}
+	if captureErr != nil {
+		return fmt.Errorf("capture attribution bundle: %w", captureErr)
 	}
 	if analyzeErr != nil {
 		return fmt.Errorf("analyze target: %w", analyzeErr)

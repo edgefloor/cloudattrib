@@ -2,6 +2,7 @@ package datasets
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -91,6 +92,63 @@ func TestRepositoryRejectsConcurrentWriter(t *testing.T) {
 	close(release)
 	if err := <-done; err != nil {
 		t.Fatalf("lock holder error = %v", err)
+	}
+}
+
+func TestActivateCoordinatedExcludesPruneAndRestoresPointerOnFailure(t *testing.T) {
+	t.Parallel()
+
+	repository, err := NewRepository(filepath.Join(t.TempDir(), "bundles"), "build-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := repository.Import(t.Context(), fixtureSourceDirectory(t, "coordinated-first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Activate(t.Context(), first.CandidateID, first.CandidateHash, "activate"); err != nil {
+		t.Fatal(err)
+	}
+	second, err := repository.Import(t.Context(), fixtureSourceDirectory(t, "coordinated-second"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	coordinating := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		_, activateErr := repository.ActivateCoordinated(t.Context(), second.CandidateID, second.CandidateHash, "activate", func(_ Manifest, _ []byte, publish func() error) error {
+			close(coordinating)
+			<-release
+			return publish()
+		})
+		done <- activateErr
+	}()
+	<-coordinating
+	if removed, err := repository.Prune(second.CandidateID, func(string) (bool, error) { return false, nil }); err == nil || removed {
+		t.Fatalf("Prune() while activation owns writer lock = %v, %v", removed, err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("ActivateCoordinated() error = %v", err)
+	}
+	active, err := repository.Active()
+	if err != nil || active == nil || active.BundleID != second.CandidateID {
+		t.Fatalf("Active() = %#v, %v", active, err)
+	}
+
+	failure := errors.New("durable activation failed")
+	if _, err := repository.ActivateCoordinated(t.Context(), first.CandidateID, first.CandidateHash, "rollback", func(_ Manifest, _ []byte, publish func() error) error {
+		if err := publish(); err != nil {
+			return err
+		}
+		return failure
+	}); !errors.Is(err, failure) {
+		t.Fatalf("ActivateCoordinated(failure) error = %v", err)
+	}
+	active, err = repository.Active()
+	if err != nil || active == nil || active.BundleID != second.CandidateID {
+		t.Fatalf("Active() after rollback = %#v, %v", active, err)
 	}
 }
 

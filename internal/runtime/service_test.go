@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"cloudattrib/internal/api"
 	"cloudattrib/internal/app"
@@ -77,7 +78,7 @@ func TestNewAnalyzerLoadsOfflinePrefixAndASNData(t *testing.T) {
 	configuration := config.Default()
 	configuration.Data.SourceDirectory = runtimeFixtureSources(t, "runtime-source")
 	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
-	analyzer, bundleID, _, lookup, err := newAnalyzerDetails(configuration, standaloneReportStore{})
+	analyzer, bundleID, _, lookup, err := newAnalyzerDetails(t.Context(), configuration, standaloneReportStore{})
 	if err != nil {
 		t.Fatalf("newAnalyzerDetails() error = %v", err)
 	}
@@ -104,7 +105,7 @@ func TestNewAnalyzerTreatsMissingASNAsDegradedNotAvailable(t *testing.T) {
 	configuration := config.Default()
 	configuration.Data.SourceDirectory = sources
 	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
-	analyzer, _, _, lookup, err := newAnalyzerDetails(configuration, standaloneReportStore{})
+	analyzer, _, _, lookup, err := newAnalyzerDetails(t.Context(), configuration, standaloneReportStore{})
 	if err != nil {
 		t.Fatalf("newAnalyzerDetails() error = %v", err)
 	}
@@ -117,6 +118,58 @@ func TestNewAnalyzerTreatsMissingASNAsDegradedNotAvailable(t *testing.T) {
 	}
 	if result.Status != model.StatusPartial || len(result.Associations) == 0 || len(result.ASN) != 0 {
 		t.Fatalf("LookupIP() = %#v", result)
+	}
+}
+
+func TestLookupIPIsPartialWhenConfiguredProviderFeedsAreMissing(t *testing.T) {
+	t.Parallel()
+
+	sources := runtimeFixtureSources(t, "missing-provider-feeds")
+	for _, name := range []string{"gcp-cloud.json", "azure-service-tags.json", "cdncheck-sources-data.json"} {
+		if err := os.Remove(filepath.Join(sources, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configuration := config.Default()
+	configuration.Data.SourceDirectory = sources
+	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
+	analyzer, _, _, lookup, err := newAnalyzerDetails(t.Context(), configuration, standaloneReportStore{})
+	if err != nil {
+		t.Fatalf("newAnalyzerDetails() error = %v", err)
+	}
+	if lookup.complete() {
+		t.Fatalf("lookup availability = %#v, want degraded", lookup)
+	}
+	result, err := analyzer.LookupIP(t.Context(), model.IPLookupRequest{Address: netip.MustParseAddr("8.8.8.8"), Match: "all"})
+	if err != nil {
+		t.Fatalf("LookupIP() error = %v", err)
+	}
+	if result.Status != model.StatusPartial {
+		t.Fatalf("LookupIP() status = %q, coverage = %#v", result.Status, result.Coverage)
+	}
+}
+
+func TestLookupIPRejectsAddressFamilyWithNoUsableSource(t *testing.T) {
+	t.Parallel()
+
+	sources := t.TempDir()
+	data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "upstream", "iptoasn-v6.tsv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sources, "iptoasn-v6.tsv"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration := config.Default()
+	configuration.Data.SourceDirectory = sources
+	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
+	analyzer, _, _, _, err := newAnalyzerDetails(t.Context(), configuration, standaloneReportStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = analyzer.LookupIP(t.Context(), model.IPLookupRequest{Address: netip.MustParseAddr("8.8.8.8"), Match: "all"})
+	if model.ErrorCodeOf(err) != model.CodeCapabilityUnavailable {
+		t.Fatalf("LookupIP() error = %v, want capability_unavailable", err)
 	}
 }
 
@@ -138,7 +191,7 @@ func TestBundleAnalyzerFactoryReloadsDesiredAndRetainsPinnedBundle(t *testing.T)
 		t.Fatalf("Activate(first) error = %v", err)
 	}
 	store := standaloneReportStore{}
-	analyzer, bundleID, _, lookup, err := newAnalyzerDetails(configuration, store)
+	analyzer, bundleID, _, lookup, err := newAnalyzerDetails(t.Context(), configuration, store)
 	if err != nil {
 		t.Fatalf("newAnalyzerDetails() error = %v", err)
 	}
@@ -170,6 +223,94 @@ func TestBundleAnalyzerFactoryReloadsDesiredAndRetainsPinnedBundle(t *testing.T)
 	if _, err := factory.AnalyzerForBundle(context.Background(), first.CandidateID); err != nil {
 		t.Fatalf("AnalyzerForBundle(first) error = %v", err)
 	}
+}
+
+func TestBundleAnalyzerFactoryReconstructsBuiltinAfterDatasetActivation(t *testing.T) {
+	t.Parallel()
+
+	configuration := config.Default()
+	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
+	configuration.Data.SourceDirectory = filepath.Join(t.TempDir(), "absent")
+	repository, err := datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := repository.Import(t.Context(), runtimeFixtureSources(t, "active-dataset"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Activate(t.Context(), report.CandidateID, report.CandidateHash, "activate"); err != nil {
+		t.Fatal(err)
+	}
+	store := standaloneReportStore{}
+	active, bundleID, _, lookup, err := newAnalyzerDetails(t.Context(), configuration, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &bundleAnalyzerFactory{
+		configuration: configuration, store: store, active: active, activeBundleID: bundleID, activeLookup: lookup,
+		analyzers: map[string]app.Analyzer{bundleID: active}, lookup: map[string]lookupAvailability{bundleID: lookup},
+	}
+	builtin, err := factory.AnalyzerForBundle(t.Context(), builtinBundleID)
+	if err != nil || builtin == nil {
+		t.Fatalf("AnalyzerForBundle(%q) = %T, %v", builtinBundleID, builtin, err)
+	}
+}
+
+func TestBundleAnalyzerFactoryLoadsDifferentBundlesConcurrently(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	factory := &bundleAnalyzerFactory{
+		analyzers: make(map[string]app.Analyzer), lookup: make(map[string]lookupAvailability),
+		load: func(ctx context.Context, bundleID string) (app.Analyzer, lookupAvailability, error) {
+			started <- bundleID
+			select {
+			case <-ctx.Done():
+				return nil, lookupAvailability{}, ctx.Err()
+			case <-release:
+				return runtimeFixtureAnalyzer{bundleID: bundleID}, lookupAvailability{}, nil
+			}
+		},
+	}
+	done := make(chan error, 2)
+	for _, bundleID := range []string{"bundle-a", "bundle-b"} {
+		go func() {
+			_, err := factory.AnalyzerForBundle(t.Context(), bundleID)
+			done <- err
+		}()
+	}
+	seen := map[string]bool{}
+	for range 2 {
+		select {
+		case bundleID := <-started:
+			seen[bundleID] = true
+		case <-time.After(time.Second):
+			t.Fatal("bundle loads did not start concurrently")
+		}
+	}
+	close(release)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !seen["bundle-a"] || !seen["bundle-b"] {
+		t.Fatalf("started loads = %#v", seen)
+	}
+}
+
+type runtimeFixtureAnalyzer struct{ bundleID string }
+
+func (a runtimeFixtureAnalyzer) Analyze(context.Context, model.AnalyzeRequest) (model.Report, error) {
+	return model.Report{BundleID: a.bundleID, Status: model.StatusComplete}, nil
+}
+func (runtimeFixtureAnalyzer) LookupIP(context.Context, model.IPLookupRequest) (model.IPLookupResult, error) {
+	return model.IPLookupResult{}, nil
+}
+func (a runtimeFixtureAnalyzer) Reclassify(context.Context, model.ReclassifyRequest) (model.Report, error) {
+	return model.Report{BundleID: a.bundleID, Status: model.StatusComplete}, nil
 }
 
 func TestServiceReadinessReportsMissingLocalLookupData(t *testing.T) {
@@ -247,6 +388,13 @@ func runtimeFixtureSources(t *testing.T, syncToken string) string {
 		if err := os.WriteFile(filepath.Join(directory, target), data, 0o600); err != nil {
 			t.Fatalf("write fixture %s: %v", target, err)
 		}
+	}
+	cloudRanges := filepath.Join(directory, "cloudranges", "json")
+	if err := os.MkdirAll(cloudRanges, 0o700); err != nil {
+		t.Fatalf("create cloudranges fixture: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cloudRanges, "fixture.json"), []byte(`{"provider":"Fixture","provider_id":"fixture","method":"published_list","ipv4":["203.0.113.0/24"],"ipv6":["2001:db8::/32"]}`), 0o600); err != nil {
+		t.Fatalf("write cloudranges fixture: %v", err)
 	}
 	return directory
 }

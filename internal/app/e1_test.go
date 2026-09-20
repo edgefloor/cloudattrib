@@ -106,6 +106,18 @@ func TestE1DomainAnalysisStartsHTTPBeforeAAAAAndKeepsPartialEvidence(t *testing.
 	if !hasProductRelation(report.Findings, "example.compute", model.RelationServiceRange) {
 		t.Fatalf("report findings do not contain fixture range: %#v", report.Findings)
 	}
+	httpLinked := false
+	for _, item := range report.Evidence {
+		if item.DetectorID != "prefix-v1" {
+			continue
+		}
+		for _, observationID := range item.ObservationIDs {
+			httpLinked = httpLinked || strings.HasPrefix(observationID, "http-response-")
+		}
+	}
+	if !httpLinked {
+		t.Fatalf("prefix evidence did not retain HTTP peer provenance: %#v", report.Evidence)
+	}
 	if dialer.ProhibitedAttempts() != 0 {
 		t.Fatalf("prohibited dial attempts = %d, want 0", dialer.ProhibitedAttempts())
 	}

@@ -120,6 +120,47 @@ func (s *Store) RegisterBundle(ctx context.Context, bundleID string, manifest []
 	return nil
 }
 
+// ActivateBundle serializes durable bundle admission with pruning and invokes
+// filesystem publication before the activation transaction commits.
+func (s *Store) ActivateBundle(ctx context.Context, bundleID string, manifest []byte, compatible bool, publish func() error) error {
+	if bundleID == "" || !json.Valid(manifest) || publish == nil {
+		return model.NewError(model.CodeInvalidOptions, "bundle ID, JSON manifest, and publication callback are required", nil)
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return persistence("begin bundle activation", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lifecycleLockID); err != nil {
+		return persistence("lock bundle activation", err)
+	}
+	result, err := tx.Exec(ctx, `INSERT INTO dataset_bundles(bundle_id,manifest,compatible,available) VALUES($1,$2,$3,true)
+		ON CONFLICT (bundle_id) DO UPDATE SET available=true
+		WHERE dataset_bundles.manifest=EXCLUDED.manifest AND dataset_bundles.compatible=EXCLUDED.compatible`, bundleID, manifest, compatible)
+	if err != nil {
+		return persistence("register bundle activation", err)
+	}
+	if result.RowsAffected() != 1 {
+		return model.NewError(model.CodeIdempotencyConflict, "bundle ID is already registered with different immutable content", nil)
+	}
+	if err := publish(); err != nil {
+		return fmt.Errorf("publish bundle activation: %w", err)
+	}
+	result, err = tx.Exec(ctx, `INSERT INTO bundle_activations(bundle_id)
+		SELECT bundle_id FROM dataset_bundles WHERE bundle_id=$1 AND available
+		ON CONFLICT (bundle_id) DO UPDATE SET activation_order=nextval('bundle_activation_order'),activated_at=clock_timestamp()`, bundleID)
+	if err != nil {
+		return persistence("record bundle activation", err)
+	}
+	if result.RowsAffected() != 1 {
+		return model.NewError(model.CodeBundleUnavailable, "bundle is unavailable", nil)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return persistence("commit bundle activation", err)
+	}
+	return nil
+}
+
 // Submit atomically admits a job, reserves capacity, and creates its bundle pin.
 func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Job, error) {
 	if request.OperatorID == "" || request.IdempotencyKey == "" || request.WorkCount() == 0 {

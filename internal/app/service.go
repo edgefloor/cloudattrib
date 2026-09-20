@@ -258,63 +258,12 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		}
 	}
 
-	if s.prefixes != nil {
-		seen := make(map[string]struct{})
-		for _, run := range dnsRuns {
-			for _, address := range run.result.Addresses {
-				address = address.Unmap()
-				lookupKey := run.hostname + "\x00" + address.String()
-				if _, exists := seen[lookupKey]; exists {
-					continue
-				}
-				seen[lookupKey] = struct{}{}
-				associations, prefixCoverage, lookupErr := s.prefixes.LookupPrefixes(ctx, model.IPLookupRequest{Address: address, Match: "all"}, s.view)
-				if lookupErr != nil {
-					prefixCoverage.Status = model.CoverageUnavailable
-					prefixCoverage.ErrorCodes = append(prefixCoverage.ErrorCodes, model.ErrorCodeOf(lookupErr))
-				}
-				coverage = append(coverage, prefixCoverage)
-				for _, association := range associations {
-					item, evidenceErr := prefixEvidence(run.hostname, scopeForSeed(run.hostname, normalized.ScopeRoots), address, association, classifiedAt, observations)
-					if evidenceErr != nil {
-						return model.Report{}, evidenceErr
-					}
-					evidence = append(evidence, item)
-				}
-			}
-		}
-	} else {
-		coverage = append(coverage, model.Coverage{Capability: "prefix", Status: model.CoverageUnavailable, Reason: "prefix source is unavailable"})
+	enrichedEvidence, enrichedCoverage, err := s.enrichAddresses(ctx, observations, classifiedAt)
+	if err != nil {
+		return model.Report{}, err
 	}
-
-	if s.asn != nil {
-		seen := make(map[string]struct{})
-		for _, run := range dnsRuns {
-			for _, address := range run.result.Addresses {
-				address = address.Unmap()
-				lookupKey := run.hostname + "\x00" + address.String()
-				if _, exists := seen[lookupKey]; exists {
-					continue
-				}
-				seen[lookupKey] = struct{}{}
-				records, asnCoverage, lookupErr := s.asn.LookupASN(ctx, address, s.view)
-				if lookupErr != nil {
-					asnCoverage.Status = model.CoverageUnavailable
-					asnCoverage.ErrorCodes = append(asnCoverage.ErrorCodes, model.ErrorCodeOf(lookupErr))
-				}
-				coverage = append(coverage, asnCoverage)
-				for _, record := range records {
-					item, evidenceErr := asnEvidence(run.hostname, scopeForSeed(run.hostname, normalized.ScopeRoots), address, record, classifiedAt, observations)
-					if evidenceErr != nil {
-						return model.Report{}, evidenceErr
-					}
-					evidence = append(evidence, item)
-				}
-			}
-		}
-	} else {
-		coverage = append(coverage, model.Coverage{Capability: "asn", Status: model.CoverageUnavailable, Reason: "ASN source is unavailable"})
-	}
+	evidence = append(evidence, enrichedEvidence...)
+	coverage = append(coverage, enrichedCoverage...)
 
 	status := reportStatus(ctx, observations, coverage)
 	report := model.Report{
@@ -436,8 +385,10 @@ func (s *Service) LookupIP(ctx context.Context, request model.IPLookupRequest) (
 		return model.IPLookupResult{}, model.NewError(model.CodeCapabilityUnavailable, "local IP lookup is unavailable", nil)
 	}
 	result := model.IPLookupResult{Address: request.Address.Unmap(), Status: model.StatusComplete}
+	result.Coverage = append(result.Coverage, s.sourceCoverage([]netip.Addr{result.Address})...)
 	usable := 0
-	if s.prefixes == nil {
+	prefixUsable := s.prefixes != nil && s.sourceGroupUsable("prefix_source/")
+	if !prefixUsable {
 		result.Coverage = append(result.Coverage, model.Coverage{Capability: "prefix", Status: model.CoverageUnavailable, Reason: "prefix source is unavailable"})
 	} else {
 		associations, coverage, err := s.prefixes.LookupPrefixes(ctx, request, s.view)
@@ -449,7 +400,12 @@ func (s *Service) LookupIP(ctx context.Context, request model.IPLookupRequest) (
 			return model.IPLookupResult{}, fmt.Errorf("lookup prefixes: %w", err)
 		}
 	}
-	if s.asn == nil {
+	asnSource := "asn_source/ipv6"
+	if result.Address.Is4() {
+		asnSource = "asn_source/ipv4"
+	}
+	asnUsable := s.asn != nil && s.sourceCapabilityUsable(asnSource)
+	if !asnUsable {
 		result.Coverage = append(result.Coverage, model.Coverage{Capability: "asn", Status: model.CoverageUnavailable, Reason: "ASN source is unavailable"})
 	} else {
 		records, coverage, err := s.asn.LookupASN(ctx, request.Address, s.view)
@@ -530,30 +486,12 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 	if s.webDetector != nil && hasHTTP && !hasTechnology {
 		coverage = append(coverage, model.Coverage{Capability: "replay_webtech", Status: model.CoverageUnavailable, Reason: "raw response bytes and raw technology labels were not retained"})
 	}
-	if s.prefixes != nil {
-		for _, observation := range observations {
-			if observation.Type != "dns_address" {
-				continue
-			}
-			var payload model.DNSPayload
-			if json.Unmarshal(observation.Payload, &payload) != nil || !payload.Address.IsValid() {
-				continue
-			}
-			associations, prefixCoverage, lookupErr := s.prefixes.LookupPrefixes(ctx, model.IPLookupRequest{Address: payload.Address, Match: "all"}, s.view)
-			if lookupErr != nil {
-				prefixCoverage.Status = model.CoverageUnavailable
-				prefixCoverage.ErrorCodes = append(prefixCoverage.ErrorCodes, model.ErrorCodeOf(lookupErr))
-			}
-			coverage = append(coverage, prefixCoverage)
-			for _, association := range associations {
-				item, evidenceErr := prefixEvidence(observation.Subject, observation.Scope, payload.Address, association, classifiedAt, observations)
-				if evidenceErr != nil {
-					return model.Report{}, evidenceErr
-				}
-				evidence = append(evidence, item)
-			}
-		}
+	enrichedEvidence, enrichedCoverage, err := s.enrichAddresses(ctx, observations, classifiedAt)
+	if err != nil {
+		return model.Report{}, err
 	}
+	evidence = append(evidence, enrichedEvidence...)
+	coverage = append(coverage, enrichedCoverage...)
 	status := model.StatusComplete
 	for _, item := range coverage {
 		if strings.HasPrefix(item.Capability, "original_collection/") {
@@ -590,9 +528,6 @@ func (s *Service) ValidateReclassify(ctx context.Context, request model.Reclassi
 	if request.BundleID != "" && request.BundleID != s.view.BundleID() {
 		return model.NewError(model.CodeBundleUnavailable, "requested bundle is not loaded", nil)
 	}
-	if len(s.detectors) == 0 && s.prefixes == nil {
-		return model.NewError(model.CodeCapabilityUnavailable, "no replay classifier is usable", nil)
-	}
 	original, err := s.store.LoadReport(ctx, request.ReportID)
 	if err != nil {
 		if model.ErrorCodeOf(err) != "" {
@@ -602,6 +537,25 @@ func (s *Service) ValidateReclassify(ctx context.Context, request model.Reclassi
 	}
 	if len(original.Observations) == 0 && len(original.Evidence) == 0 {
 		return model.NewError(model.CodeCapabilityUnavailable, "report has no retained replay inputs", nil)
+	}
+	inputs := addressInputs(original.Observations)
+	hasTechnology := false
+	for _, observation := range original.Observations {
+		hasTechnology = hasTechnology || observation.Type == "technology"
+	}
+	hasAddressPath := len(inputs) > 0 && s.prefixes != nil && s.sourceGroupUsable("prefix_source/")
+	if !hasAddressPath && s.asn != nil {
+		for _, input := range inputs {
+			name := "asn_source/ipv6"
+			if input.address.Is4() {
+				name = "asn_source/ipv4"
+			}
+			hasAddressPath = hasAddressPath || s.sourceCapabilityUsable(name)
+		}
+	}
+	hasDetectorPath := len(s.detectors) > 0 && len(original.Observations) > 0
+	if !hasDetectorPath && !hasTechnology && !hasAddressPath {
+		return model.NewError(model.CodeCapabilityUnavailable, "no replay classifier is usable for retained inputs", nil)
 	}
 	return nil
 }
@@ -643,20 +597,182 @@ func normalizeTechnologyID(value string) string {
 	return strings.Trim(value, "-")
 }
 
-func prefixEvidence(subject string, scope model.Scope, address netip.Addr, association model.Association, classifiedAt time.Time, observations []model.Observation) (model.Evidence, error) {
+type addressInput struct {
+	subject        string
+	scope          model.Scope
+	address        netip.Addr
+	observationIDs []string
+}
+
+func addressInputs(observations []model.Observation) []addressInput {
+	byKey := make(map[string]*addressInput)
+	for _, observation := range observations {
+		var address netip.Addr
+		switch observation.Type {
+		case "dns_address":
+			var payload model.DNSPayload
+			if json.Unmarshal(observation.Payload, &payload) == nil {
+				address = payload.Address
+			}
+		case "http_response":
+			var payload model.HTTPPayload
+			if json.Unmarshal(observation.Payload, &payload) == nil {
+				address = payload.PeerAddress
+			}
+		}
+		if !address.IsValid() {
+			continue
+		}
+		address = address.Unmap()
+		key := observation.Subject + "\x00" + string(observation.Scope) + "\x00" + address.String()
+		input := byKey[key]
+		if input == nil {
+			input = &addressInput{subject: observation.Subject, scope: observation.Scope, address: address}
+			byKey[key] = input
+		}
+		if !slices.Contains(input.observationIDs, observation.ID) {
+			input.observationIDs = append(input.observationIDs, observation.ID)
+		}
+	}
+	inputs := make([]addressInput, 0, len(byKey))
+	for _, input := range byKey {
+		slices.Sort(input.observationIDs)
+		inputs = append(inputs, *input)
+	}
+	slices.SortFunc(inputs, func(left, right addressInput) int {
+		leftKey := left.subject + "\x00" + string(left.scope) + "\x00" + left.address.String()
+		rightKey := right.subject + "\x00" + string(right.scope) + "\x00" + right.address.String()
+		return strings.Compare(leftKey, rightKey)
+	})
+	return inputs
+}
+
+func (s *Service) enrichAddresses(ctx context.Context, observations []model.Observation, classifiedAt time.Time) ([]model.Evidence, []model.Coverage, error) {
+	inputs := addressInputs(observations)
+	if len(inputs) == 0 {
+		return nil, nil, nil
+	}
+	addresses := make([]netip.Addr, 0, len(inputs))
+	for _, input := range inputs {
+		addresses = append(addresses, input.address)
+	}
+	coverage := s.sourceCoverage(addresses)
+	var evidence []model.Evidence
+	prefixUsable := s.prefixes != nil && s.sourceGroupUsable("prefix_source/")
+	if !prefixUsable {
+		coverage = append(coverage, model.Coverage{Capability: "prefix", Status: model.CoverageUnavailable, Reason: "prefix source is unavailable"})
+	} else {
+		for _, input := range inputs {
+			associations, itemCoverage, lookupErr := s.prefixes.LookupPrefixes(ctx, model.IPLookupRequest{Address: input.address, Match: "all"}, s.view)
+			if lookupErr != nil {
+				itemCoverage.Status = model.CoverageUnavailable
+				itemCoverage.ErrorCodes = append(itemCoverage.ErrorCodes, model.ErrorCodeOf(lookupErr))
+			}
+			coverage = append(coverage, itemCoverage)
+			for _, association := range associations {
+				item, err := prefixEvidence(input, association, classifiedAt)
+				if err != nil {
+					return nil, nil, err
+				}
+				evidence = append(evidence, item)
+			}
+		}
+	}
+	if s.asn == nil {
+		coverage = append(coverage, model.Coverage{Capability: "asn", Status: model.CoverageUnavailable, Reason: "ASN source is unavailable"})
+	} else {
+		for _, input := range inputs {
+			asnSource := "asn_source/ipv6"
+			if input.address.Is4() {
+				asnSource = "asn_source/ipv4"
+			}
+			if !s.sourceCapabilityUsable(asnSource) {
+				continue
+			}
+			records, itemCoverage, lookupErr := s.asn.LookupASN(ctx, input.address, s.view)
+			if lookupErr != nil {
+				itemCoverage.Status = model.CoverageUnavailable
+				itemCoverage.ErrorCodes = append(itemCoverage.ErrorCodes, model.ErrorCodeOf(lookupErr))
+			}
+			coverage = append(coverage, itemCoverage)
+			for _, record := range records {
+				item, err := asnEvidence(input, record, classifiedAt)
+				if err != nil {
+					return nil, nil, err
+				}
+				evidence = append(evidence, item)
+			}
+		}
+	}
+	return evidence, coverage, nil
+}
+
+func (s *Service) sourceCoverage(addresses []netip.Addr) []model.Coverage {
+	wantV4, wantV6 := false, false
+	for _, address := range addresses {
+		wantV4 = wantV4 || address.Unmap().Is4()
+		wantV6 = wantV6 || address.Is6() && !address.Is4In6()
+	}
+	var coverage []model.Coverage
+	for _, capability := range s.view.Capabilities() {
+		include := strings.HasPrefix(capability.Name, "prefix_source/")
+		if capability.Name == "asn_source/ipv4" {
+			include = wantV4
+		}
+		if capability.Name == "asn_source/ipv6" {
+			include = wantV6
+		}
+		if !include {
+			continue
+		}
+		item := model.Coverage{Capability: capability.Name, Status: capability.Status, Reason: capability.Reason}
+		if capability.SourceAge != nil {
+			seconds := int64(*capability.SourceAge / time.Second)
+			item.DataAgeSeconds = &seconds
+		}
+		coverage = append(coverage, item)
+	}
+	return coverage
+}
+
+func (s *Service) sourceCapabilityUsable(name string) bool {
+	found := false
+	for _, capability := range s.view.Capabilities() {
+		if capability.Name != name {
+			continue
+		}
+		found = true
+		if capability.Status == model.CoverageComplete || capability.Status == model.CoveragePartial {
+			return true
+		}
+	}
+	return !found
+}
+
+func (s *Service) sourceGroupUsable(prefix string) bool {
+	found := false
+	for _, capability := range s.view.Capabilities() {
+		if !strings.HasPrefix(capability.Name, prefix) {
+			continue
+		}
+		found = true
+		if capability.Status == model.CoverageComplete || capability.Status == model.CoveragePartial {
+			return true
+		}
+	}
+	return !found
+}
+
+func prefixEvidence(input addressInput, association model.Association, classifiedAt time.Time) (model.Evidence, error) {
 	fields, err := json.Marshal(association)
 	if err != nil {
 		return model.Evidence{}, fmt.Errorf("encode prefix association: %w", err)
 	}
-	observationID := addressObservationID(subject, address, observations)
-	if observationID == "" {
-		return model.Evidence{}, fmt.Errorf("find address observation for %s", address)
-	}
-	key := association.ID + "\x00" + observationID
+	key := association.ID + "\x00" + strings.Join(input.observationIDs, ",")
 	sum := sha256.Sum256([]byte(key))
 	return model.Evidence{
 		ID:             "evidence-prefix-" + hex.EncodeToString(sum[:12]),
-		ObservationIDs: []string{observationID},
+		ObservationIDs: slices.Clone(input.observationIDs),
 		DatasetRecords: []model.DatasetRecord{{
 			SourceID:  association.SourceID,
 			Revision:  association.SourceRevision,
@@ -666,34 +782,30 @@ func prefixEvidence(subject string, scope model.Scope, address netip.Addr, assoc
 		}},
 		ClassifiedAt: classifiedAt,
 		DetectorID:   "prefix-v1",
-		Subject:      subject,
+		Subject:      input.subject,
 		ProviderID:   association.ProviderID,
 		ProductID:    association.ProductID,
 		Category:     "cloud_infrastructure",
 		Relation:     model.RelationServiceRange,
 		Strength:     model.StrengthModerate,
 		Activity:     model.ActivityUnknown,
-		Scope:        scope,
+		Scope:        input.scope,
 		Explanation:  "address is contained by a normalized local prefix record",
 	}, nil
 }
 
-func asnEvidence(subject string, scope model.Scope, address netip.Addr, record model.ASNRecord, classifiedAt time.Time, observations []model.Observation) (model.Evidence, error) {
+func asnEvidence(input addressInput, record model.ASNRecord, classifiedAt time.Time) (model.Evidence, error) {
 	fields, err := json.Marshal(record)
 	if err != nil {
 		return model.Evidence{}, fmt.Errorf("encode ASN record: %w", err)
 	}
-	observationID := addressObservationID(subject, address, observations)
-	if observationID == "" {
-		return model.Evidence{}, fmt.Errorf("find address observation for %s", address)
-	}
-	key := fmt.Sprintf("%d\x00%s\x00%s", record.ASN, record.RecordRef, observationID)
+	key := fmt.Sprintf("%d\x00%s\x00%s", record.ASN, record.RecordRef, strings.Join(input.observationIDs, ","))
 	sum := sha256.Sum256([]byte(key))
 	return model.Evidence{
-		ID: "evidence-asn-" + hex.EncodeToString(sum[:12]), ObservationIDs: []string{observationID},
+		ID: "evidence-asn-" + hex.EncodeToString(sum[:12]), ObservationIDs: slices.Clone(input.observationIDs),
 		DatasetRecords: []model.DatasetRecord{{SourceID: record.SourceID, Revision: record.SourceRevision, Digest: record.SourceDigest, RecordRef: record.RecordRef, Fields: fields}},
-		ClassifiedAt:   classifiedAt, DetectorID: "asn-v1", Subject: subject, ProviderID: fmt.Sprintf("asn:%d", record.ASN), Category: "network",
-		Relation: model.RelationNetworkProvider, Strength: model.StrengthWeak, Activity: model.ActivityUnknown, Scope: scope,
+		ClassifiedAt:   classifiedAt, DetectorID: "asn-v1", Subject: input.subject, ProviderID: fmt.Sprintf("asn:%d", record.ASN), Category: "network",
+		Relation: model.RelationNetworkProvider, Strength: model.StrengthWeak, Activity: model.ActivityUnknown, Scope: input.scope,
 		Explanation: "address is contained by a local ASN interval; organization attribution is not a product claim",
 	}, nil
 }
@@ -755,17 +867,4 @@ func seedPort(request model.NormalizedRequest, hostname, fallbackScheme string) 
 		}
 	}
 	return 443
-}
-
-func addressObservationID(subject string, address netip.Addr, observations []model.Observation) string {
-	for _, observation := range observations {
-		if observation.Type != "dns_address" || observation.Subject != subject {
-			continue
-		}
-		var payload model.DNSPayload
-		if err := json.Unmarshal(observation.Payload, &payload); err == nil && payload.Address == address {
-			return observation.ID
-		}
-	}
-	return ""
 }

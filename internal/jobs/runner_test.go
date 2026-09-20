@@ -2,6 +2,7 @@ package jobs
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -83,6 +84,85 @@ func TestRunnerObservesCancellationDuringLeaseRenewal(t *testing.T) {
 	if err != nil || loaded.Status != JobCancelled || loaded.Targets[0].Status != TargetCancelled {
 		t.Fatalf("Job() = %#v, %v", loaded, err)
 	}
+}
+
+func TestRunnerRenewsLeaseAndCancelsDuringBundleAcquisition(t *testing.T) {
+	t.Parallel()
+
+	memory := NewMemoryStore(2)
+	job, err := memory.Submit(t.Context(), SubmitRequest{OperatorID: "operator", IdempotencyKey: "cancel-load", BundleID: "bundle-slow", Targets: []model.AnalyzeRequest{{Target: "example.com", Kind: model.TargetDomain}}})
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	renewed := make(chan struct{})
+	store := &renewObservedStore{MemoryStore: memory, renewed: renewed}
+	factory := &blockingBundleFactory{started: make(chan struct{}), analyzerCalled: make(chan struct{}, 1)}
+	runner := Runner{Store: store, Factory: factory, WorkerID: "worker", Lease: 30 * time.Millisecond}
+	done := make(chan error, 1)
+	go func() { done <- runner.RunOnce(context.Background()) }()
+	select {
+	case <-factory.started:
+	case <-time.After(time.Second):
+		t.Fatal("bundle acquisition did not start")
+	}
+	select {
+	case <-renewed:
+	case <-time.After(time.Second):
+		t.Fatal("lease was not renewed during bundle acquisition")
+	}
+	if err := memory.RequestCancel(t.Context(), job.ID, "operator"); err != nil {
+		t.Fatalf("RequestCancel() error = %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not stop after acquisition cancellation")
+	}
+	select {
+	case <-factory.analyzerCalled:
+		t.Fatal("analysis started after acquisition was cancelled")
+	default:
+	}
+	loaded, err := memory.Job(t.Context(), job.ID)
+	if err != nil || loaded.Targets[0].Status != TargetCancelled {
+		t.Fatalf("Job() = %#v, %v", loaded, err)
+	}
+}
+
+type renewObservedStore struct {
+	*MemoryStore
+	renewed chan struct{}
+	once    sync.Once
+}
+
+func (s *renewObservedStore) Renew(ctx context.Context, targetID, token string, lease time.Duration) error {
+	s.once.Do(func() { close(s.renewed) })
+	return s.MemoryStore.Renew(ctx, targetID, token, lease)
+}
+
+type blockingBundleFactory struct {
+	started        chan struct{}
+	analyzerCalled chan struct{}
+}
+
+func (f *blockingBundleFactory) AnalyzerForBundle(ctx context.Context, _ string) (app.Analyzer, error) {
+	close(f.started)
+	<-ctx.Done()
+	return neverCalledAnalyzer{called: f.analyzerCalled}, ctx.Err()
+}
+
+type neverCalledAnalyzer struct{ called chan<- struct{} }
+
+func (a neverCalledAnalyzer) Analyze(context.Context, model.AnalyzeRequest) (model.Report, error) {
+	a.called <- struct{}{}
+	return model.Report{}, nil
+}
+func (neverCalledAnalyzer) LookupIP(context.Context, model.IPLookupRequest) (model.IPLookupResult, error) {
+	return model.IPLookupResult{}, nil
+}
+func (a neverCalledAnalyzer) Reclassify(context.Context, model.ReclassifyRequest) (model.Report, error) {
+	a.called <- struct{}{}
+	return model.Report{}, nil
 }
 
 type fixtureAnalyzerFactory struct {

@@ -37,7 +37,8 @@ fingerprints, and offline reinterpretation of a standalone report. Local prefix 
 require an activated dataset bundle; without one, `lookup-ip` returns
 `capability_unavailable` instead of an empty successful result. Reclassification preserves the
 original observations and collection coverage while recording a new classification time and
-bundle identity.
+bundle identity. It re-evaluates retained DNS addresses and actual HTTP peers, including external
+redirect peers, against the selected prefix and ASN data without making network requests.
 
 Set `CLOUDATTRIB_CONFIG` to load one strict YAML or JSON configuration for all CLI operations.
 Command-specific `--config` flags on `serve` and `datasets` override the path for that operation.

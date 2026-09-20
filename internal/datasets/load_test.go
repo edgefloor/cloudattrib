@@ -93,6 +93,32 @@ func TestLoadSourcesRejectsMalformedPresentSource(t *testing.T) {
 	}
 }
 
+func TestLoadSourcesPreservesMissingFeedCoverage(t *testing.T) {
+	t.Parallel()
+
+	directory := t.TempDir()
+	for _, name := range []string{"aws-ip-ranges.json", "iptoasn-v4.tsv", "iptoasn-v6.tsv"} {
+		data, err := os.ReadFile(filepath.Join("..", "..", "testdata", "upstream", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(directory, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	loaded, err := LoadSources(t.Context(), directory, "build-a")
+	if err != nil {
+		t.Fatalf("LoadSources() error = %v", err)
+	}
+	states := make(map[string]model.CoverageStatus)
+	for _, capability := range loaded.Candidate.View.Capabilities() {
+		states[capability.Name] = capability.Status
+	}
+	if states["prefix"] != model.CoveragePartial || states["prefix_source/gcp-cloud-ranges"] != model.CoverageUnavailable || states["asn"] != model.CoverageComplete {
+		t.Fatalf("capability states = %#v", states)
+	}
+}
+
 func mustAddress(t *testing.T, value string) netip.Addr {
 	t.Helper()
 	address, err := netip.ParseAddr(value)

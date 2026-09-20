@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 
 	"cloudattrib/internal/app"
 	collectdns "cloudattrib/internal/collect/dns"
@@ -24,13 +25,13 @@ import (
 
 // NewLocal constructs the collection-only local analyzer without downloading data.
 func NewLocal(configuration config.Config) (app.Analyzer, error) {
-	return newAnalyzer(configuration, standaloneReportStore{})
+	return newAnalyzer(context.Background(), configuration, standaloneReportStore{})
 }
 
 // OpenLocal constructs a CLI analyzer and opens durable CT storage only when CT is enabled.
 func OpenLocal(ctx context.Context, configuration config.Config) (app.Analyzer, func(), error) {
 	if !configuration.CT.Enabled {
-		analyzer, err := NewLocal(configuration)
+		analyzer, err := newAnalyzer(ctx, configuration, standaloneReportStore{})
 		return analyzer, func() {}, err
 	}
 	dsn, err := readDSN(configuration.Storage.PostgresDSNFile)
@@ -41,7 +42,7 @@ func OpenLocal(ctx context.Context, configuration config.Config) (app.Analyzer, 
 	if err != nil {
 		return nil, nil, err
 	}
-	analyzer, err := newAnalyzer(configuration, store)
+	analyzer, err := newAnalyzer(ctx, configuration, store)
 	if err != nil {
 		store.Close()
 		return nil, nil, err
@@ -49,20 +50,31 @@ func OpenLocal(ctx context.Context, configuration config.Config) (app.Analyzer, 
 	return analyzer, store.Close, nil
 }
 
-func newAnalyzer(configuration config.Config, store app.ResultStore) (app.Analyzer, error) {
-	analyzer, _, _, _, err := newAnalyzerDetails(configuration, store)
+func newAnalyzer(ctx context.Context, configuration config.Config, store app.ResultStore) (app.Analyzer, error) {
+	analyzer, _, _, _, err := newAnalyzerDetails(ctx, configuration, store)
 	return analyzer, err
 }
 
 type lookupAvailability struct {
 	prefix bool
 	asn    bool
+	data   []model.CapabilityState
 }
 
-func (a lookupAvailability) usable() bool   { return a.prefix || a.asn }
-func (a lookupAvailability) complete() bool { return a.prefix && a.asn }
+func (a lookupAvailability) usable() bool { return a.prefix || a.asn }
+func (a lookupAvailability) complete() bool {
+	if !a.prefix || !a.asn {
+		return false
+	}
+	for _, capability := range a.data {
+		if (capability.Name == "prefix" || capability.Name == "asn") && capability.Status != model.CoverageComplete {
+			return false
+		}
+	}
+	return true
+}
 
-func newAnalyzerDetails(configuration config.Config, store app.ResultStore) (app.Analyzer, string, []byte, lookupAvailability, error) {
+func newAnalyzerDetails(ctx context.Context, configuration config.Config, store app.ResultStore) (app.Analyzer, string, []byte, lookupAvailability, error) {
 	if err := configuration.Validate(); err != nil {
 		return nil, "", nil, lookupAvailability{}, fmt.Errorf("validate configuration: %w", err)
 	}
@@ -124,7 +136,7 @@ func newAnalyzerDetails(configuration config.Config, store app.ResultStore) (app
 	if activation != nil {
 		sourceDirectory = activeSourceDirectory
 	}
-	loaded, loadErr := datasets.LoadSources(context.Background(), sourceDirectory, detectorBuildID)
+	loaded, loadErr := datasets.LoadSources(ctx, sourceDirectory, detectorBuildID)
 	if loadErr == nil {
 		if activation != nil && loaded.Candidate.Manifest.BundleID != activation.BundleID {
 			_ = repository.RecordLoad(activation.BundleID, "failed", "loaded content identity differs from active pointer")
@@ -141,14 +153,7 @@ func newAnalyzerDetails(configuration config.Config, store app.ResultStore) (app
 		if err != nil {
 			return nil, "", nil, lookupAvailability{}, fmt.Errorf("encode local bundle manifest: %w", err)
 		}
-		for index := range capabilities {
-			if capabilities[index].Name == "prefix" && prefixReader != nil {
-				capabilities[index] = model.CapabilityState{Name: "prefix", Status: model.CoverageComplete}
-			}
-			if capabilities[index].Name == "asn" && asnReader != nil {
-				capabilities[index] = model.CapabilityState{Name: "asn", Status: model.CoverageComplete}
-			}
-		}
+		capabilities = append(capabilities[:4], loaded.Candidate.View.Capabilities()...)
 		if activation != nil {
 			if err := repository.RecordLoad(bundleID, "loaded", ""); err != nil {
 				return nil, "", nil, lookupAvailability{}, fmt.Errorf("record active bundle load: %w", err)
@@ -182,5 +187,5 @@ func newAnalyzerDetails(configuration config.Config, store app.ResultStore) (app
 		CTEnabled:     configuration.CT.Enabled,
 		CTMaximumSeed: configuration.CT.MaximumSeedNames,
 		TargetTimeout: configuration.Limits.Target.TargetDeadline,
-	}), bundleID, manifest, lookupAvailability{prefix: prefixReader != nil, asn: asnReader != nil}, nil
+	}), bundleID, manifest, lookupAvailability{prefix: prefixReader != nil, asn: asnReader != nil, data: slices.Clone(capabilities[4:])}, nil
 }

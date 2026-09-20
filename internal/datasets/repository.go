@@ -192,6 +192,21 @@ func (r *Repository) Validate(ctx context.Context, candidateID string) (Validati
 
 // Activate atomically publishes a reviewed candidate as the desired bundle.
 func (r *Repository) Activate(ctx context.Context, candidateID, approvalHash, action string) (Activation, error) {
+	return r.ActivateCoordinated(ctx, candidateID, approvalHash, action, func(_ Manifest, _ []byte, publish func() error) error {
+		return publish()
+	})
+}
+
+// ActivateCoordinated holds the repository writer lock while durable admission
+// and filesystem publication are coordinated in one lock order.
+func (r *Repository) ActivateCoordinated(
+	ctx context.Context,
+	candidateID, approvalHash, action string,
+	coordinate func(Manifest, []byte, func() error) error,
+) (Activation, error) {
+	if coordinate == nil {
+		return Activation{}, fmt.Errorf("activation coordinator is required")
+	}
 	var activation Activation
 	err := r.withWriterLock(func() error {
 		report, err := r.Validate(ctx, candidateID)
@@ -204,15 +219,56 @@ func (r *Repository) Activate(ctx context.Context, candidateID, approvalHash, ac
 		if action == "" {
 			action = "activate"
 		}
+		manifest, manifestBytes, err := r.Manifest(candidateID)
+		if err != nil {
+			return err
+		}
 		activation = Activation{BundleID: candidateID, CandidateHash: report.CandidateHash, Action: action, At: r.now().UTC()}
 		encoded, err := json.Marshal(activation)
 		if err != nil {
 			return err
 		}
-		if err := atomicWrite(filepath.Join(r.root, activeFilename), append(encoded, '\n'), 0o640); err != nil {
+		activePath := filepath.Join(r.root, activeFilename)
+		previous, previousErr := os.ReadFile(activePath)
+		if previousErr != nil && !errors.Is(previousErr, os.ErrNotExist) {
+			return previousErr
+		}
+		published := false
+		publish := func() error {
+			if published {
+				return fmt.Errorf("activation was published more than once")
+			}
+			if err := atomicWrite(activePath, append(encoded, '\n'), 0o640); err != nil {
+				return err
+			}
+			published = true
+			if err := appendAudit(filepath.Join(r.root, "activation-audit.jsonl"), encoded); err != nil {
+				return err
+			}
+			return nil
+		}
+		if err := coordinate(manifest, manifestBytes, publish); err != nil {
+			if published {
+				var restoreErr error
+				if previousErr == nil {
+					restoreErr = atomicWrite(activePath, previous, 0o640)
+				} else {
+					if removeErr := os.Remove(activePath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+						restoreErr = removeErr
+					} else {
+						restoreErr = syncDirectory(r.root)
+					}
+				}
+				if restoreErr != nil {
+					return fmt.Errorf("%w; restore active pointer: %v", err, restoreErr)
+				}
+			}
 			return err
 		}
-		return appendAudit(filepath.Join(r.root, "activation-audit.jsonl"), encoded)
+		if !published {
+			return fmt.Errorf("activation coordinator did not publish the candidate")
+		}
+		return nil
 	})
 	return activation, err
 }

@@ -190,10 +190,10 @@ func LoadSources(ctx context.Context, directory, buildID string) (LoadedBundle, 
 	if err != nil {
 		return LoadedBundle{}, err
 	}
-	capabilities := make([]model.CapabilityState, 0, 2)
+	capabilities := sourceCapabilities(sources)
 	if len(associations) > 0 {
 		loaded.Prefixes = prefix.New(associations)
-		capabilities = append(capabilities, model.CapabilityState{Name: "prefix", Status: model.CoverageComplete})
+		capabilities = append(capabilities, aggregateCapability("prefix", capabilities, "prefix_source/", "no usable prefix source"))
 	} else {
 		capabilities = append(capabilities, model.CapabilityState{Name: "prefix", Status: model.CoverageUnavailable, Reason: "no usable prefix source"})
 	}
@@ -202,7 +202,7 @@ func LoadSources(ctx context.Context, directory, buildID string) (LoadedBundle, 
 		if err != nil {
 			return LoadedBundle{}, fmt.Errorf("build ASN index: %w", err)
 		}
-		capabilities = append(capabilities, model.CapabilityState{Name: "asn", Status: model.CoverageComplete})
+		capabilities = append(capabilities, aggregateCapability("asn", capabilities, "asn_source/", "no usable ASN source"))
 	} else {
 		capabilities = append(capabilities, model.CapabilityState{Name: "asn", Status: model.CoverageUnavailable, Reason: "no usable ASN source"})
 	}
@@ -229,6 +229,69 @@ func LoadSources(ctx context.Context, directory, buildID string) (LoadedBundle, 
 		View:     model.NewAttributionView(bundleID, "public-destination-v1", []string{buildID, "rules-v1", "wappalyzergo-v0.3.2"}, capabilities),
 	}
 	return loaded, nil
+}
+
+func sourceCapabilities(sources []Source) []model.CapabilityState {
+	byName := make(map[string]model.CapabilityState)
+	for _, source := range sources {
+		name := ""
+		switch source.ID {
+		case "aws-ip-ranges", "gcp-cloud-ranges", "azure-service-tags", "cdncheck-data":
+			name = "prefix_source/" + source.ID
+		case "iptoasn-v4":
+			name = "asn_source/ipv4"
+		case "iptoasn-v6":
+			name = "asn_source/ipv6"
+		case "disposable/cloud-ip-ranges":
+			name = "prefix_source/disposable-cloud-ip-ranges"
+		default:
+			if strings.HasPrefix(source.ID, "disposable/cloud-ip-ranges/") {
+				name = "prefix_source/disposable-cloud-ip-ranges"
+			}
+		}
+		if name == "" {
+			continue
+		}
+		state := model.CapabilityState{Name: name, Status: source.Status, Reason: source.Reason}
+		if source.PublishedAt != nil {
+			age := time.Since(*source.PublishedAt)
+			if age < 0 {
+				age = 0
+			}
+			state.SourceAge = &age
+		}
+		if current, exists := byName[name]; !exists || current.Status != model.CoverageComplete {
+			byName[name] = state
+		}
+	}
+	capabilities := make([]model.CapabilityState, 0, len(byName))
+	for _, state := range byName {
+		capabilities = append(capabilities, state)
+	}
+	slices.SortFunc(capabilities, func(left, right model.CapabilityState) int { return strings.Compare(left.Name, right.Name) })
+	return capabilities
+}
+
+func aggregateCapability(name string, capabilities []model.CapabilityState, prefix, unavailableReason string) model.CapabilityState {
+	complete, unavailable := 0, 0
+	for _, capability := range capabilities {
+		if !strings.HasPrefix(capability.Name, prefix) {
+			continue
+		}
+		if capability.Status == model.CoverageComplete {
+			complete++
+		} else {
+			unavailable++
+		}
+	}
+	switch {
+	case complete > 0 && unavailable == 0:
+		return model.CapabilityState{Name: name, Status: model.CoverageComplete}
+	case complete > 0:
+		return model.CapabilityState{Name: name, Status: model.CoveragePartial, Reason: "one or more configured sources are unavailable"}
+	default:
+		return model.CapabilityState{Name: name, Status: model.CoverageUnavailable, Reason: unavailableReason}
+	}
 }
 
 func readSource(root, relative string) ([]byte, Artifact, string, error) {

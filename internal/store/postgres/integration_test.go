@@ -28,6 +28,34 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	if _, err := store.pool.Exec(ctx, `TRUNCATE ct_records,ct_checkpoints,finding_evidence,findings,evidence,observations,job_targets,reports,bundle_pins,jobs,dataset_bundles RESTART IDENTITY CASCADE; UPDATE queue_capacity SET reserved_targets=0,maximum_targets=4 WHERE singleton=true`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}
+	publishStarted := make(chan struct{})
+	releasePublish := make(chan struct{})
+	activationDone := make(chan error, 1)
+	go func() {
+		activationDone <- store.ActivateBundle(ctx, "coordinated-bundle", []byte(`{"schema_version":1,"bundle_id":"coordinated-bundle"}`), true, func() error {
+			close(publishStarted)
+			<-releasePublish
+			return nil
+		})
+	}()
+	<-publishStarted
+	pruneCtx, cancelPrune := context.WithTimeout(ctx, 100*time.Millisecond)
+	err = store.WithBundlePruneLock(pruneCtx, "coordinated-bundle", func(bool) error { return nil })
+	cancelPrune()
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("WithBundlePruneLock() during activation error = %v, want deadline", err)
+	}
+	close(releasePublish)
+	if err := <-activationDone; err != nil {
+		t.Fatalf("ActivateBundle() error = %v", err)
+	}
+	protectedByActivation := false
+	if err := store.WithBundlePruneLock(ctx, "coordinated-bundle", func(protected bool) error {
+		protectedByActivation = protected
+		return nil
+	}); err != nil || !protectedByActivation {
+		t.Fatalf("WithBundlePruneLock() after activation protected=%v, error=%v", protectedByActivation, err)
+	}
 	if err := store.RegisterBundle(ctx, "fixture-bundle", []byte(`{"schema_version":1}`), true); err != nil {
 		t.Fatalf("RegisterBundle() error = %v", err)
 	}
@@ -53,7 +81,7 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 		t.Fatalf("RecordBundleActivation() error = %v", err)
 	}
 	protected, err := store.ProtectedBundles(ctx, 3)
-	if err != nil || len(protected) != 1 || protected[0] != "fixture-bundle" {
+	if err != nil || len(protected) < 1 || protected[0] != "fixture-bundle" {
 		t.Fatalf("ProtectedBundles() = %v, %v", protected, err)
 	}
 	if err := store.RegisterBundle(ctx, "fixture-bundle", []byte(`{"schema_version":2}`), true); model.ErrorCodeOf(err) != model.CodeIdempotencyConflict {
