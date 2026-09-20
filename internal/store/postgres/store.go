@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"cloudattrib/internal/app"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 )
@@ -26,6 +28,11 @@ const lifecycleLockID int64 = 174120260921
 type Store struct {
 	pool *pgxpool.Pool
 	now  func() time.Time
+}
+
+type workRequest struct {
+	Analyze    *model.AnalyzeRequest    `json:"analyze,omitempty"`
+	Reclassify *model.ReclassifyRequest `json:"reclassify,omitempty"`
 }
 
 // Open connects, verifies connectivity, and applies the schema.
@@ -65,7 +72,7 @@ func (s *Store) RegisterBundle(ctx context.Context, bundleID string, manifest []
 
 // Submit atomically admits a job, reserves capacity, and creates its bundle pin.
 func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Job, error) {
-	if request.OperatorID == "" || request.IdempotencyKey == "" || len(request.Targets) == 0 {
+	if request.OperatorID == "" || request.IdempotencyKey == "" || request.WorkCount() == 0 {
 		return jobs.Job{}, model.NewError(model.CodeInvalidOptions, "operator, idempotency key, and targets are required", nil)
 	}
 	hash, err := payloadHash(request)
@@ -109,7 +116,7 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 			return jobs.Job{}, model.NewError(model.CodeBundleIncompatible, "requested bundle is incompatible", nil)
 		}
 	}
-	capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets+$1 WHERE singleton=true AND reserved_targets+$1<=maximum_targets`, len(request.Targets))
+	capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets+$1 WHERE singleton=true AND reserved_targets+$1<=maximum_targets`, request.WorkCount())
 	if err != nil {
 		return jobs.Job{}, persistence("reserve queue capacity", err)
 	}
@@ -124,13 +131,14 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 	if _, err := tx.Exec(ctx, `INSERT INTO jobs(id,operator_id,idempotency_key,payload_hash,bundle_id,status,created_at,updated_at) VALUES($1,$2,$3,$4,NULLIF($5,''),'queued',$6,$6)`, jobID, request.OperatorID, request.IdempotencyKey, hash, request.BundleID, now); err != nil {
 		return jobs.Job{}, persistence("insert job", err)
 	}
-	result := jobs.Job{ID: jobID, OperatorID: request.OperatorID, IdempotencyKey: request.IdempotencyKey, BundleID: request.BundleID, Status: jobs.JobQueued, CreatedAt: now, UpdatedAt: now, Targets: make([]jobs.Target, len(request.Targets))}
+	result := jobs.Job{ID: jobID, OperatorID: request.OperatorID, IdempotencyKey: request.IdempotencyKey, BundleID: request.BundleID, Status: jobs.JobQueued, CreatedAt: now, UpdatedAt: now, Targets: make([]jobs.Target, request.WorkCount())}
 	for index, targetRequest := range request.Targets {
 		targetID, idErr := newID("target")
 		if idErr != nil {
 			return jobs.Job{}, fmt.Errorf("create target ID: %w", idErr)
 		}
-		encoded, encodeErr := json.Marshal(targetRequest)
+		copied := targetRequest
+		encoded, encodeErr := json.Marshal(workRequest{Analyze: &copied})
 		if encodeErr != nil {
 			return jobs.Job{}, fmt.Errorf("encode target request: %w", encodeErr)
 		}
@@ -138,6 +146,22 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 			return jobs.Job{}, persistence("insert target", err)
 		}
 		result.Targets[index] = jobs.Target{ID: targetID, Index: index, Request: targetRequest, Status: jobs.TargetQueued}
+	}
+	for requestIndex, reclassifyRequest := range request.Reclassifications {
+		index := len(request.Targets) + requestIndex
+		targetID, idErr := newID("target")
+		if idErr != nil {
+			return jobs.Job{}, fmt.Errorf("create target ID: %w", idErr)
+		}
+		copied := reclassifyRequest
+		encoded, encodeErr := json.Marshal(workRequest{Reclassify: &copied})
+		if encodeErr != nil {
+			return jobs.Job{}, fmt.Errorf("encode reclassification request: %w", encodeErr)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO job_targets(id,job_id,input_index,request,status) VALUES($1,$2,$3,$4,'queued')`, targetID, jobID, index, encoded); err != nil {
+			return jobs.Job{}, persistence("insert reclassification target", err)
+		}
+		result.Targets[index] = jobs.Target{ID: targetID, Index: index, Reclassify: &copied, Status: jobs.TargetQueued}
 	}
 	if request.BundleID != "" {
 		if _, err := tx.Exec(ctx, `INSERT INTO bundle_pins(bundle_id,job_id) VALUES($1,$2)`, request.BundleID, jobID); err != nil {
@@ -174,7 +198,7 @@ func (s *Store) Job(ctx context.Context, id string) (jobs.Job, error) {
 		if err := rows.Scan(&target.ID, &target.Index, &requestJSON, &target.Status, &target.Attempts, &target.LeaseOwner, &leaseExpires, &nextAttempt, &target.TerminalReason, &reportID); err != nil {
 			return jobs.Job{}, persistence("scan job target", err)
 		}
-		if err := json.Unmarshal(requestJSON, &target.Request); err != nil {
+		if err := decodeWorkRequest(requestJSON, &target.Request, &target.Reclassify); err != nil {
 			return jobs.Job{}, persistence("decode target request", err)
 		}
 		if leaseExpires != nil {
@@ -221,7 +245,7 @@ func (s *Store) Claim(ctx context.Context, worker string, lease time.Duration) (
 		}
 		return jobs.Claim{}, persistence("select claim", err)
 	}
-	if err := json.Unmarshal(requestJSON, &claim.Request); err != nil {
+	if err := decodeWorkRequest(requestJSON, &claim.Request, &claim.Reclassify); err != nil {
 		return jobs.Claim{}, persistence("decode claimed request", err)
 	}
 	claim.Attempt++
@@ -414,6 +438,82 @@ func (s *Store) LoadReport(ctx context.Context, id string) (model.Report, error)
 	return report, nil
 }
 
+type findingCursor struct {
+	ClassifiedAt time.Time `json:"classified_at"`
+	ReportID     string    `json:"report_id"`
+	FindingID    string    `json:"finding_id"`
+}
+
+// Findings returns a stable keyset-ordered page of stored findings.
+func (s *Store) Findings(ctx context.Context, query app.FindingQuery) (app.FindingPage, error) {
+	if query.Limit < 1 || query.Limit > 500 {
+		return app.FindingPage{}, model.NewError(model.CodeInvalidOptions, "finding limit must be between 1 and 500", nil)
+	}
+	cursor := findingCursor{}
+	if query.Cursor != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(query.Cursor)
+		if err == nil {
+			err = json.Unmarshal(decoded, &cursor)
+		}
+		if err != nil || cursor.ClassifiedAt.IsZero() || cursor.ReportID == "" || cursor.FindingID == "" {
+			return app.FindingPage{}, model.NewError(model.CodeInvalidOptions, "finding cursor is invalid", err)
+		}
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT f.report_id,r.classified_at,f.finding_id,f.document
+		FROM findings f JOIN reports r ON r.id=f.report_id
+		WHERE ($1='' OR r.target=$1)
+		  AND ($2='' OR f.provider_id=$2)
+		  AND ($3='' OR f.product_id=$3)
+		  AND ($4='' OR f.relation=$4)
+		  AND ($5='' OR f.strength=$5)
+		  AND (($6::timestamptz IS NULL AND $7::timestamptz IS NULL) OR EXISTS (
+		      SELECT 1 FROM observations o WHERE o.report_id=f.report_id
+		      AND ($6::timestamptz IS NULL OR o.observed_at >= $6)
+		      AND ($7::timestamptz IS NULL OR o.observed_at <= $7)))
+		  AND ($8::timestamptz IS NULL OR (r.classified_at,f.report_id,f.finding_id) > ($8,$9,$10))
+		ORDER BY r.classified_at,f.report_id,f.finding_id
+		LIMIT $11`, query.Domain, query.ProviderID, query.ProductID, query.Relation, query.Strength, query.ObservedFrom, query.ObservedTo,
+		nullTime(cursor.ClassifiedAt), cursor.ReportID, cursor.FindingID, query.Limit+1)
+	if err != nil {
+		return app.FindingPage{}, persistence("search findings", err)
+	}
+	defer rows.Close()
+	page := app.FindingPage{Items: make([]app.StoredFinding, 0, query.Limit)}
+	for rows.Next() {
+		var item app.StoredFinding
+		var findingID string
+		var document []byte
+		if err := rows.Scan(&item.ReportID, &item.ClassifiedAt, &findingID, &document); err != nil {
+			return app.FindingPage{}, persistence("scan finding", err)
+		}
+		if err := json.Unmarshal(document, &item.Finding); err != nil {
+			return app.FindingPage{}, persistence("decode finding", err)
+		}
+		if len(page.Items) == query.Limit {
+			last := page.Items[len(page.Items)-1]
+			encoded, encodeErr := json.Marshal(findingCursor{ClassifiedAt: last.ClassifiedAt, ReportID: last.ReportID, FindingID: last.Finding.ID})
+			if encodeErr != nil {
+				return app.FindingPage{}, persistence("encode finding cursor", encodeErr)
+			}
+			page.NextCursor = base64.RawURLEncoding.EncodeToString(encoded)
+			break
+		}
+		page.Items = append(page.Items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return app.FindingPage{}, persistence("iterate findings", err)
+	}
+	return page, nil
+}
+
+func nullTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
+}
+
 // SaveReport stores a standalone immutable report atomically.
 func (s *Store) SaveReport(ctx context.Context, report model.Report) error {
 	if err := report.ValidateReferences(); err != nil {
@@ -575,14 +675,45 @@ func reportProjection(report model.Report) ([]string, []string, []string) {
 
 func payloadHash(request jobs.SubmitRequest) (string, error) {
 	encoded, err := json.Marshal(struct {
-		BundleID string                 `json:"bundle_id"`
-		Targets  []model.AnalyzeRequest `json:"targets"`
-	}{BundleID: request.BundleID, Targets: request.Targets})
+		BundleID          string                    `json:"bundle_id"`
+		Targets           []model.AnalyzeRequest    `json:"targets"`
+		Reclassifications []model.ReclassifyRequest `json:"reclassifications"`
+	}{BundleID: request.BundleID, Targets: request.Targets, Reclassifications: request.Reclassifications})
 	if err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256(encoded)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+func decodeWorkRequest(encoded []byte, analyze *model.AnalyzeRequest, reclassify **model.ReclassifyRequest) error {
+	var work workRequest
+	if err := json.Unmarshal(encoded, &work); err != nil {
+		return err
+	}
+	if work.Analyze != nil && work.Reclassify != nil {
+		return fmt.Errorf("work request contains multiple operations")
+	}
+	if work.Analyze != nil {
+		*analyze = *work.Analyze
+		*reclassify = nil
+		return nil
+	}
+	if work.Reclassify != nil {
+		*analyze = model.AnalyzeRequest{}
+		copy := *work.Reclassify
+		*reclassify = &copy
+		return nil
+	}
+	// Rows written before work envelopes were introduced contain a bare analysis request.
+	if err := json.Unmarshal(encoded, analyze); err != nil {
+		return err
+	}
+	if analyze.Target == "" {
+		return fmt.Errorf("work request contains no operation")
+	}
+	*reclassify = nil
+	return nil
 }
 
 func newID(prefix string) (string, error) {

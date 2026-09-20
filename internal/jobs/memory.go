@@ -45,7 +45,7 @@ func (s *MemoryStore) Submit(ctx context.Context, request SubmitRequest) (Job, e
 	if err := ctx.Err(); err != nil {
 		return Job{}, err
 	}
-	if request.OperatorID == "" || request.IdempotencyKey == "" || len(request.Targets) == 0 {
+	if request.OperatorID == "" || request.IdempotencyKey == "" || request.WorkCount() == 0 {
 		return Job{}, model.NewError(model.CodeInvalidOptions, "operator, idempotency key, and targets are required", nil)
 	}
 	payloadHash, err := hashRequest(request)
@@ -62,7 +62,7 @@ func (s *MemoryStore) Submit(ctx context.Context, request SubmitRequest) (Job, e
 		}
 		return cloneJob(*existing), nil
 	}
-	if s.maximumTargets <= 0 || len(request.Targets) > s.maximumTargets-s.reservations {
+	if s.maximumTargets <= 0 || request.WorkCount() > s.maximumTargets-s.reservations {
 		return Job{}, model.NewError(model.CodeQueueCapacityExceeded, "nonterminal target capacity is exhausted", nil)
 	}
 	now := s.now()
@@ -71,7 +71,7 @@ func (s *MemoryStore) Submit(ctx context.Context, request SubmitRequest) (Job, e
 		return Job{}, fmt.Errorf("create job ID: %w", err)
 	}
 	job := &Job{ID: jobID, OperatorID: request.OperatorID, IdempotencyKey: request.IdempotencyKey, BundleID: request.BundleID, Status: JobQueued, CreatedAt: now, UpdatedAt: now, payloadHash: payloadHash}
-	job.Targets = make([]Target, len(request.Targets))
+	job.Targets = make([]Target, request.WorkCount())
 	for index, targetRequest := range request.Targets {
 		targetID, idErr := randomID("target")
 		if idErr != nil {
@@ -79,10 +79,19 @@ func (s *MemoryStore) Submit(ctx context.Context, request SubmitRequest) (Job, e
 		}
 		job.Targets[index] = Target{ID: targetID, Index: index, Request: targetRequest, Status: TargetQueued}
 	}
+	for requestIndex, reclassifyRequest := range request.Reclassifications {
+		index := len(request.Targets) + requestIndex
+		targetID, idErr := randomID("target")
+		if idErr != nil {
+			return Job{}, fmt.Errorf("create target ID: %w", idErr)
+		}
+		copied := reclassifyRequest
+		job.Targets[index] = Target{ID: targetID, Index: index, Reclassify: &copied, Status: TargetQueued}
+	}
 	s.jobs[job.ID] = job
 	s.order = append(s.order, job.ID)
 	s.idempotency[identity] = job.ID
-	s.reservations += len(job.Targets)
+	s.reservations += request.WorkCount()
 	if job.BundleID != "" {
 		s.pins[job.BundleID]++
 	}
@@ -135,7 +144,7 @@ func (s *MemoryStore) Claim(ctx context.Context, worker string, lease time.Durat
 			target.LeaseExpiresAt = now.Add(lease)
 			job.Status = JobRunning
 			job.UpdatedAt = now
-			return Claim{JobID: job.ID, TargetID: target.ID, BundleID: job.BundleID, Request: target.Request, Attempt: target.Attempts, AttemptToken: token, LeaseExpires: target.LeaseExpiresAt}, nil
+			return Claim{JobID: job.ID, TargetID: target.ID, BundleID: job.BundleID, Request: target.Request, Reclassify: cloneReclassify(target.Reclassify), Attempt: target.Attempts, AttemptToken: token, LeaseExpires: target.LeaseExpiresAt}, nil
 		}
 	}
 	return Claim{}, model.NewError(model.CodeCapabilityUnavailable, "no target is ready to claim", nil)
@@ -309,9 +318,10 @@ func terminalTarget(status TargetStatus) bool {
 
 func hashRequest(request SubmitRequest) (string, error) {
 	payload := struct {
-		BundleID string                 `json:"bundle_id"`
-		Targets  []model.AnalyzeRequest `json:"targets"`
-	}{BundleID: request.BundleID, Targets: request.Targets}
+		BundleID          string                    `json:"bundle_id"`
+		Targets           []model.AnalyzeRequest    `json:"targets"`
+		Reclassifications []model.ReclassifyRequest `json:"reclassifications"`
+	}{BundleID: request.BundleID, Targets: request.Targets, Reclassifications: request.Reclassifications}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
@@ -332,6 +342,15 @@ func cloneJob(job Job) Job {
 	job.Targets = slices.Clone(job.Targets)
 	for index := range job.Targets {
 		job.Targets[index].Report = job.Targets[index].Report.Clone()
+		job.Targets[index].Reclassify = cloneReclassify(job.Targets[index].Reclassify)
 	}
 	return job
+}
+
+func cloneReclassify(request *model.ReclassifyRequest) *model.ReclassifyRequest {
+	if request == nil {
+		return nil
+	}
+	copy := *request
+	return &copy
 }

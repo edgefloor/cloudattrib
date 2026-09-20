@@ -1,6 +1,7 @@
 package api
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"fmt"
 	"net"
@@ -112,8 +113,10 @@ func bearerOperator(header string, credentials map[string]string) (string, bool)
 	}
 	var operatorID string
 	matched := 0
+	presentedDigest := sha256.Sum256([]byte(credential))
 	for candidate, mappedOperatorID := range credentials {
-		if subtle.ConstantTimeCompare([]byte(credential), []byte(candidate)) == 1 {
+		candidateDigest := sha256.Sum256([]byte(candidate))
+		if subtle.ConstantTimeCompare(presentedDigest[:], candidateDigest[:]) == 1 {
 			operatorID = mappedOperatorID
 			matched = 1
 		}

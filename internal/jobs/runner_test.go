@@ -31,6 +31,29 @@ func TestRunnerUsesPinnedBundleAndCommitsTerminalReport(t *testing.T) {
 	}
 }
 
+func TestRunnerExecutesPinnedReclassification(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStore(2)
+	job, err := store.Submit(context.Background(), SubmitRequest{
+		OperatorID: "operator", IdempotencyKey: "reclassify", BundleID: "bundle-2",
+		Reclassifications: []model.ReclassifyRequest{{ReportID: "report-1", BundleID: "bundle-2"}},
+	})
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	called := false
+	factory := &fixtureAnalyzerFactory{reclassified: &called}
+	runner := Runner{Store: store, Factory: factory, WorkerID: "worker", Lease: time.Second}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	loaded, err := store.Job(context.Background(), job.ID)
+	if err != nil || !called || loaded.Status != JobCompleted || loaded.Targets[0].Report.OriginalReportID != "report-1" {
+		t.Fatalf("Job() = %#v, called=%v, %v", loaded, called, err)
+	}
+}
+
 func TestRunnerObservesCancellationDuringLeaseRenewal(t *testing.T) {
 	t.Parallel()
 
@@ -62,14 +85,20 @@ func TestRunnerObservesCancellationDuringLeaseRenewal(t *testing.T) {
 	}
 }
 
-type fixtureAnalyzerFactory struct{ bundleID string }
+type fixtureAnalyzerFactory struct {
+	bundleID     string
+	reclassified *bool
+}
 
 func (f *fixtureAnalyzerFactory) AnalyzerForBundle(_ context.Context, bundleID string) (app.Analyzer, error) {
 	f.bundleID = bundleID
-	return fixtureAnalyzer{bundleID: bundleID}, nil
+	return fixtureAnalyzer{bundleID: bundleID, reclassified: f.reclassified}, nil
 }
 
-type fixtureAnalyzer struct{ bundleID string }
+type fixtureAnalyzer struct {
+	bundleID     string
+	reclassified *bool
+}
 
 func (f fixtureAnalyzer) Analyze(context.Context, model.AnalyzeRequest) (model.Report, error) {
 	return model.Report{ID: "report", BundleID: f.bundleID, Status: model.StatusComplete}, nil
@@ -77,8 +106,11 @@ func (f fixtureAnalyzer) Analyze(context.Context, model.AnalyzeRequest) (model.R
 func (fixtureAnalyzer) LookupIP(context.Context, model.IPLookupRequest) (model.IPLookupResult, error) {
 	return model.IPLookupResult{}, nil
 }
-func (fixtureAnalyzer) Reclassify(context.Context, model.ReclassifyRequest) (model.Report, error) {
-	return model.Report{}, nil
+func (f fixtureAnalyzer) Reclassify(_ context.Context, request model.ReclassifyRequest) (model.Report, error) {
+	if f.reclassified != nil {
+		*f.reclassified = true
+	}
+	return model.Report{ID: "reclassified", OriginalReportID: request.ReportID, BundleID: f.bundleID, Status: model.StatusComplete}, nil
 }
 
 type blockingAnalyzerFactory struct{ started chan<- struct{} }

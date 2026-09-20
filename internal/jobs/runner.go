@@ -45,7 +45,13 @@ func (r Runner) RunOnce(ctx context.Context) error {
 	analysisDone := make(chan struct{})
 	renewResult := make(chan error, 1)
 	go r.renewLease(analysisCtx, cancel, analysisDone, renewResult, claim)
-	report, analyzeErr := analyzer.Analyze(analysisCtx, claim.Request)
+	var report model.Report
+	var analyzeErr error
+	if claim.Reclassify != nil {
+		report, analyzeErr = analyzer.Reclassify(analysisCtx, *claim.Reclassify)
+	} else {
+		report, analyzeErr = analyzer.Analyze(analysisCtx, claim.Request)
+	}
 	close(analysisDone)
 	renewErr := <-renewResult
 	status, reason := targetResult(report, analyzeErr)

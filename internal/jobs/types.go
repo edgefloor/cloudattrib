@@ -34,26 +34,31 @@ const (
 
 // SubmitRequest is atomically admitted or rejected as one batch.
 type SubmitRequest struct {
-	OperatorID     string                 `json:"operator_id"`
-	IdempotencyKey string                 `json:"idempotency_key"`
-	BundleID       string                 `json:"bundle_id,omitempty"`
-	Targets        []model.AnalyzeRequest `json:"targets"`
+	OperatorID        string                    `json:"operator_id"`
+	IdempotencyKey    string                    `json:"idempotency_key"`
+	BundleID          string                    `json:"bundle_id,omitempty"`
+	Targets           []model.AnalyzeRequest    `json:"targets"`
+	Reclassifications []model.ReclassifyRequest `json:"reclassifications,omitempty"`
 }
+
+// WorkCount returns the number of capacity reservations in the batch.
+func (r SubmitRequest) WorkCount() int { return len(r.Targets) + len(r.Reclassifications) }
 
 // Target is one durable target attempt record.
 type Target struct {
-	ID              string               `json:"id"`
-	Index           int                  `json:"input_index"`
-	Request         model.AnalyzeRequest `json:"request"`
-	Status          TargetStatus         `json:"status"`
-	Attempts        int                  `json:"attempts"`
-	AttemptToken    string               `json:"-"`
-	LeaseOwner      string               `json:"lease_owner,omitempty"`
-	LeaseExpiresAt  time.Time            `json:"lease_expires_at,omitempty"`
-	NextAttemptAt   time.Time            `json:"next_attempt_at,omitempty"`
-	TerminalReason  string               `json:"terminal_reason,omitempty"`
-	Report          model.Report         `json:"report,omitempty"`
-	ReportAvailable bool                 `json:"report_available"`
+	ID              string                   `json:"id"`
+	Index           int                      `json:"input_index"`
+	Request         model.AnalyzeRequest     `json:"request"`
+	Reclassify      *model.ReclassifyRequest `json:"reclassify,omitempty"`
+	Status          TargetStatus             `json:"status"`
+	Attempts        int                      `json:"attempts"`
+	AttemptToken    string                   `json:"-"`
+	LeaseOwner      string                   `json:"lease_owner,omitempty"`
+	LeaseExpiresAt  time.Time                `json:"lease_expires_at,omitempty"`
+	NextAttemptAt   time.Time                `json:"next_attempt_at,omitempty"`
+	TerminalReason  string                   `json:"terminal_reason,omitempty"`
+	Report          model.Report             `json:"report,omitempty"`
+	ReportAvailable bool                     `json:"report_available"`
 }
 
 // Job is an accepted batch and its shared immutable bundle reference.
@@ -78,6 +83,7 @@ type Claim struct {
 	TargetID     string
 	BundleID     string
 	Request      model.AnalyzeRequest
+	Reclassify   *model.ReclassifyRequest
 	Attempt      int
 	AttemptToken string
 	LeaseExpires time.Time

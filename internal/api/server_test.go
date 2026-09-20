@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"cloudattrib/internal/app"
+	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 )
 
@@ -108,6 +110,161 @@ func TestRequestBodyIsLimitedToOneMiB(t *testing.T) {
 	}
 	if got := decodeError(t, recorder); got.Code != model.CodeInputTooLarge {
 		t.Fatalf("error code = %q, want %q", got.Code, model.CodeInputTooLarge)
+	}
+}
+
+func TestAnalyzePersistsTerminalReport(t *testing.T) {
+	t.Parallel()
+
+	results := newFixtureResultStore()
+	handler := mustHandler(t, Config{Analyzer: &fixtureAnalyzer{report: fixtureReport(model.StatusComplete)}, Results: results})
+	recorder := serve(handler, http.MethodPost, "/v1/analyze", `{"target":"example.com","kind":"domain"}`, "127.0.0.1:1000", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if _, err := results.LoadReport(t.Context(), "report-1"); err != nil {
+		t.Fatalf("persisted report: %v", err)
+	}
+}
+
+func TestJobsUseAuthenticatedIdempotencyAndSharedVisibility(t *testing.T) {
+	t.Parallel()
+
+	store := jobs.NewMemoryStore(10)
+	auth := Authentication{Mode: AuthBearer, Credentials: map[string]string{"credential-a": "operator-a", "credential-b": "operator-b"}}
+	handler := mustHandler(t, Config{Jobs: store, Authentication: auth})
+	created := serve(handler, http.MethodPost, "/v1/jobs", `{"idempotency_key":"request-1","bundle_id":"bundle-1","targets":[{"target":"example.com","kind":"domain"}]}`, "192.0.2.10:1000", map[string]string{"Authorization": "Bearer credential-a"})
+	if created.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d: %s", created.Code, http.StatusAccepted, created.Body.String())
+	}
+	var response jobResponse
+	if err := json.Unmarshal(created.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode job: %v", err)
+	}
+	if response.Counts[jobs.TargetQueued] != 1 || created.Header().Get("Location") != "/v1/jobs/"+response.ID {
+		t.Fatalf("job response = %#v, location = %q", response, created.Header().Get("Location"))
+	}
+
+	otherHeaders := map[string]string{"Authorization": "Bearer credential-b"}
+	loaded := serve(handler, http.MethodGet, "/v1/jobs/"+response.ID, "", "192.0.2.10:1000", otherHeaders)
+	if loaded.Code != http.StatusOK {
+		t.Fatalf("shared read status = %d, want %d: %s", loaded.Code, http.StatusOK, loaded.Body.String())
+	}
+	cancelled := serve(handler, http.MethodPost, "/v1/jobs/"+response.ID+"/cancel", "", "192.0.2.10:1000", otherHeaders)
+	if cancelled.Code != http.StatusAccepted {
+		t.Fatalf("cancel status = %d, want %d: %s", cancelled.Code, http.StatusAccepted, cancelled.Body.String())
+	}
+	job, err := store.Job(t.Context(), response.ID)
+	if err != nil {
+		t.Fatalf("load cancelled job: %v", err)
+	}
+	if !job.CancelRequested || job.CancelRequestedBy != "operator-b" {
+		t.Fatalf("cancel attribution = %#v", job)
+	}
+}
+
+func TestJobsRejectOversizedBatchBeforeStoreAdmission(t *testing.T) {
+	t.Parallel()
+
+	targets := make([]model.AnalyzeRequest, maximumBatchTargets+1)
+	for index := range targets {
+		targets[index] = model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain}
+	}
+	body, err := json.Marshal(submitJobInput{IdempotencyKey: "too-many", Targets: targets})
+	if err != nil {
+		t.Fatalf("encode request: %v", err)
+	}
+	handler := mustHandler(t, Config{Jobs: jobs.NewMemoryStore(2000), MaximumRequestBytes: maximumRequestBytes})
+	recorder := serve(handler, http.MethodPost, "/v1/jobs", string(body), "127.0.0.1:1000", nil)
+	if recorder.Code != http.StatusUnprocessableEntity || decodeError(t, recorder).Code != model.CodeInvalidOptions {
+		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestStoredResultAndObservationPagination(t *testing.T) {
+	t.Parallel()
+
+	report := fixtureReport(model.StatusComplete)
+	report.Observations = []model.Observation{
+		{ID: "later", ObservedAt: report.StartedAt.Add(time.Second)},
+		{ID: "first-b", ObservedAt: report.StartedAt},
+		{ID: "first-a", ObservedAt: report.StartedAt},
+	}
+	results := newFixtureResultStore()
+	if err := results.SaveReport(t.Context(), report); err != nil {
+		t.Fatalf("save fixture report: %v", err)
+	}
+	handler := mustHandler(t, Config{Results: results})
+	loaded := serve(handler, http.MethodGet, "/v1/results/report-1", "", "127.0.0.1:1000", nil)
+	if loaded.Code != http.StatusOK {
+		t.Fatalf("result status = %d, want %d: %s", loaded.Code, http.StatusOK, loaded.Body.String())
+	}
+	first := serve(handler, http.MethodGet, "/v1/results/report-1/observations?limit=2", "", "127.0.0.1:1000", nil)
+	var page struct {
+		Items      []model.Observation `json:"items"`
+		NextCursor string              `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(first.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode first page: %v", err)
+	}
+	if first.Code != http.StatusOK || len(page.Items) != 2 || page.Items[0].ID != "first-a" || page.Items[1].ID != "first-b" || page.NextCursor == "" {
+		t.Fatalf("first page = %d %#v", first.Code, page)
+	}
+	second := serve(handler, http.MethodGet, "/v1/results/report-1/observations?limit=2&cursor="+page.NextCursor, "", "127.0.0.1:1000", nil)
+	page = struct {
+		Items      []model.Observation `json:"items"`
+		NextCursor string              `json:"next_cursor"`
+	}{}
+	if err := json.Unmarshal(second.Body.Bytes(), &page); err != nil {
+		t.Fatalf("decode second page: %v", err)
+	}
+	if second.Code != http.StatusOK || len(page.Items) != 1 || page.Items[0].ID != "later" || page.NextCursor != "" {
+		t.Fatalf("second page = %d %#v", second.Code, page)
+	}
+}
+
+func TestReclassifyCreatesPinnedReplayJob(t *testing.T) {
+	t.Parallel()
+
+	store := jobs.NewMemoryStore(2)
+	handler := mustHandler(t, Config{Jobs: store})
+	recorder := serve(handler, http.MethodPost, "/v1/results/report-1/reclassify", `{"bundle_id":"bundle-2","idempotency_key":"replay-1"}`, "127.0.0.1:1000", nil)
+	var response jobResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode job: %v", err)
+	}
+	if recorder.Code != http.StatusAccepted || recorder.Header().Get("Location") != "/v1/jobs/"+response.ID {
+		t.Fatalf("response = %d %s location=%q", recorder.Code, recorder.Body.String(), recorder.Header().Get("Location"))
+	}
+	job, err := store.Job(t.Context(), response.ID)
+	if err != nil || job.BundleID != "bundle-2" || job.Targets[0].Reclassify == nil || job.Targets[0].Reclassify.ReportID != "report-1" {
+		t.Fatalf("reclassification job = %#v, %v", job, err)
+	}
+}
+
+func TestFindingAndCatalogSearchAreBounded(t *testing.T) {
+	t.Parallel()
+
+	findings := &fixtureFindingStore{page: app.FindingPage{Items: []app.StoredFinding{{
+		ReportID: "report-1", ClassifiedAt: time.Date(2026, 9, 20, 9, 0, 0, 0, time.UTC),
+		Finding: model.Finding{ID: "finding-1", ProviderID: "aws", ProductID: "aws.cloudfront"},
+	}}}}
+	handler := mustHandler(t, Config{Findings: findings})
+	recorder := serve(handler, http.MethodGet, "/v1/findings?domain=example.com&provider=aws&limit=25&observed_from=2026-09-01T00:00:00Z", "", "127.0.0.1:1000", nil)
+	if recorder.Code != http.StatusOK || findings.query.Domain != "example.com" || findings.query.ProviderID != "aws" || findings.query.Limit != 25 || findings.query.ObservedFrom == nil {
+		t.Fatalf("finding response = %d %s, query = %#v", recorder.Code, recorder.Body.String(), findings.query)
+	}
+	providers := serve(handler, http.MethodGet, "/v1/providers?q=amazon&limit=1", "", "127.0.0.1:1000", nil)
+	if providers.Code != http.StatusOK || !strings.Contains(providers.Body.String(), `"id":"aws"`) {
+		t.Fatalf("provider response = %d %s", providers.Code, providers.Body.String())
+	}
+	products := serve(handler, http.MethodGet, "/v1/products?q=cdn", "", "127.0.0.1:1000", nil)
+	if products.Code != http.StatusOK || !strings.Contains(products.Body.String(), `"id":"aws.cloudfront"`) {
+		t.Fatalf("product response = %d %s", products.Code, products.Body.String())
+	}
+	metrics := serve(handler, http.MethodGet, "/metrics", "", "127.0.0.1:1000", nil)
+	if metrics.Code != http.StatusOK || !strings.Contains(metrics.Body.String(), "cloudattrib_http_requests_total 4") {
+		t.Fatalf("metrics response = %d %s", metrics.Code, metrics.Body.String())
 	}
 }
 
@@ -256,11 +413,13 @@ func TestAuthenticationRejectsSpoofedIdentityAndUsesConfiguredOperators(t *testi
 }
 
 type fixtureAnalyzer struct {
-	report     model.Report
-	analyzeErr error
-	lookup     model.IPLookupResult
-	lookupErr  error
-	operatorID string
+	report       model.Report
+	analyzeErr   error
+	lookup       model.IPLookupResult
+	lookupErr    error
+	operatorID   string
+	reclassified model.Report
+	reclassify   model.ReclassifyRequest
 }
 
 func (a *fixtureAnalyzer) Analyze(ctx context.Context, _ model.AnalyzeRequest) (model.Report, error) {
@@ -273,8 +432,44 @@ func (a *fixtureAnalyzer) LookupIP(ctx context.Context, _ model.IPLookupRequest)
 	return a.lookup, a.lookupErr
 }
 
-func (a *fixtureAnalyzer) Reclassify(context.Context, model.ReclassifyRequest) (model.Report, error) {
-	return model.Report{}, model.NewError(model.CodeCapabilityUnavailable, "not used", nil)
+func (a *fixtureAnalyzer) Reclassify(_ context.Context, request model.ReclassifyRequest) (model.Report, error) {
+	a.reclassify = request
+	if a.reclassified.ID == "" {
+		return model.Report{}, model.NewError(model.CodeCapabilityUnavailable, "not used", nil)
+	}
+	return a.reclassified, nil
+}
+
+type fixtureResultStore struct {
+	reports map[string]model.Report
+}
+
+type fixtureFindingStore struct {
+	query app.FindingQuery
+	page  app.FindingPage
+	err   error
+}
+
+func (s *fixtureFindingStore) Findings(_ context.Context, query app.FindingQuery) (app.FindingPage, error) {
+	s.query = query
+	return s.page, s.err
+}
+
+func newFixtureResultStore() *fixtureResultStore {
+	return &fixtureResultStore{reports: make(map[string]model.Report)}
+}
+
+func (s *fixtureResultStore) SaveReport(_ context.Context, report model.Report) error {
+	s.reports[report.ID] = report
+	return nil
+}
+
+func (s *fixtureResultStore) LoadReport(_ context.Context, id string) (model.Report, error) {
+	report, ok := s.reports[id]
+	if !ok {
+		return model.Report{}, model.NewError(model.CodeInvalidTarget, "report was not found", nil)
+	}
+	return report, nil
 }
 
 type fixtureReadiness struct{ snapshot ReadinessSnapshot }

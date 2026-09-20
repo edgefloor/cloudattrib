@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"cloudattrib/internal/app"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 )
@@ -44,7 +45,10 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	report := model.Report{
 		SchemaVersion: model.SchemaVersion, ID: "fixture-report", Target: model.Target{Original: "example.com", Canonical: "example.com", Kind: model.TargetDomain},
 		Mode: model.ModeFull, StartedAt: time.Unix(1, 0).UTC(), EndedAt: time.Unix(2, 0).UTC(), ClassifiedAt: time.Unix(2, 0).UTC(), BundleID: "fixture-bundle", BuildID: "fixture", Status: model.StatusComplete,
-		Observations: []model.Observation{}, Evidence: []model.Evidence{}, Findings: []model.Finding{}, Coverage: []model.Coverage{}, Warnings: []string{},
+		Observations: []model.Observation{{ID: "observation-1", Subject: "example.com", Type: "dns", ObservedAt: time.Unix(1, 0).UTC(), Status: "answered", Payload: model.JSONValue(`{}`)}},
+		Evidence:     []model.Evidence{{ID: "evidence-1", ObservationIDs: []string{"observation-1"}, ClassifiedAt: time.Unix(2, 0).UTC(), Subject: "example.com", ProviderID: "aws", ProductID: "aws.cloudfront", Relation: model.RelationWebDelivery, Strength: model.StrengthStrong}},
+		Findings:     []model.Finding{{ID: "finding-1", Subject: "example.com", ProviderID: "aws", ProductID: "aws.cloudfront", Relation: model.RelationWebDelivery, Strength: model.StrengthStrong, EvidenceIDs: []string{"evidence-1"}}},
+		Coverage:     []model.Coverage{}, Warnings: []string{},
 	}
 	if err := store.Complete(ctx, claim.TargetID, claim.AttemptToken, report, jobs.TargetCompleted, ""); err != nil {
 		t.Fatalf("Complete() error = %v", err)
@@ -53,9 +57,34 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	if err != nil || loaded.Status != jobs.JobCompleted || !loaded.Targets[0].ReportAvailable {
 		t.Fatalf("Job() = %#v, %v", loaded, err)
 	}
+	page, err := store.Findings(ctx, app.FindingQuery{Domain: "example.com", ProviderID: "aws", Limit: 1})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Finding.ID != "finding-1" {
+		t.Fatalf("Findings() = %#v, %v", page, err)
+	}
 	pinned, err = store.BundlePinned(ctx, "fixture-bundle")
 	if err != nil || pinned {
 		t.Fatalf("BundlePinned() after completion = %v, %v", pinned, err)
+	}
+	replayJob, err := store.Submit(ctx, jobs.SubmitRequest{
+		OperatorID: "operator-a", IdempotencyKey: "replay-key", BundleID: "fixture-bundle",
+		Reclassifications: []model.ReclassifyRequest{{ReportID: report.ID, BundleID: "fixture-bundle"}},
+	})
+	if err != nil {
+		t.Fatalf("Submit(reclassification) error = %v", err)
+	}
+	replayClaim, err := store.Claim(ctx, "replay-worker", time.Minute)
+	if err != nil || replayClaim.Reclassify == nil || replayClaim.Reclassify.ReportID != report.ID {
+		t.Fatalf("Claim(reclassification) = %#v, %v", replayClaim, err)
+	}
+	reclassified := report.Clone()
+	reclassified.ID = "fixture-reclassified"
+	reclassified.OriginalReportID = report.ID
+	if err := store.Complete(ctx, replayClaim.TargetID, replayClaim.AttemptToken, reclassified, jobs.TargetCompleted, ""); err != nil {
+		t.Fatalf("Complete(reclassification) error = %v", err)
+	}
+	replayLoaded, err := store.Job(ctx, replayJob.ID)
+	if err != nil || replayLoaded.Status != jobs.JobCompleted || replayLoaded.Targets[0].Report.OriginalReportID != report.ID {
+		t.Fatalf("Job(reclassification) = %#v, %v", replayLoaded, err)
 	}
 
 	cancelJob, err := store.Submit(ctx, jobs.SubmitRequest{OperatorID: "operator-a", IdempotencyKey: "cancel-key", BundleID: "fixture-bundle", Targets: []model.AnalyzeRequest{{Target: "one.example", Kind: model.TargetDomain}, {Target: "two.example", Kind: model.TargetDomain}}})

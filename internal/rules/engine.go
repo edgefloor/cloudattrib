@@ -30,13 +30,18 @@ type Bundle struct {
 
 // Provider identifies one canonical provider.
 type Provider struct {
-	ID string `json:"id"`
+	ID      string   `json:"id"`
+	Name    string   `json:"name,omitempty"`
+	Aliases []string `json:"aliases,omitempty"`
 }
 
 // Product identifies one canonical product and its supported relations.
 type Product struct {
 	ID         string           `json:"id"`
 	ProviderID string           `json:"provider_id,omitempty"`
+	Name       string           `json:"name,omitempty"`
+	Aliases    []string         `json:"aliases,omitempty"`
+	Category   string           `json:"category,omitempty"`
 	Relations  []model.Relation `json:"relations"`
 }
 
@@ -81,12 +86,23 @@ type Emit struct {
 
 // Engine evaluates a validated immutable rule bundle.
 type Engine struct {
-	rules []Rule
+	rules     []Rule
+	providers []Provider
+	products  []Product
 }
 
 // Default loads the reviewed rules embedded in this detector build.
 func Default() (*Engine, error) {
 	return Load(builtin)
+}
+
+// DefaultCatalog returns caller-owned canonical provider and product entries.
+func DefaultCatalog() ([]Provider, []Product, error) {
+	engine, err := Default()
+	if err != nil {
+		return nil, nil, err
+	}
+	return cloneProviders(engine.providers), cloneProducts(engine.products), nil
 }
 
 // Load validates and compiles a rule bundle before it can be activated.
@@ -133,7 +149,24 @@ func Load(data []byte) (*Engine, error) {
 			return nil, fmt.Errorf("rule %q: %w", rule.ID, err)
 		}
 	}
-	return &Engine{rules: slices.Clone(bundle.Rules)}, nil
+	return &Engine{rules: slices.Clone(bundle.Rules), providers: cloneProviders(bundle.Providers), products: cloneProducts(bundle.Products)}, nil
+}
+
+func cloneProviders(input []Provider) []Provider {
+	output := slices.Clone(input)
+	for index := range output {
+		output[index].Aliases = slices.Clone(output[index].Aliases)
+	}
+	return output
+}
+
+func cloneProducts(input []Product) []Product {
+	output := slices.Clone(input)
+	for index := range output {
+		output[index].Aliases = slices.Clone(output[index].Aliases)
+		output[index].Relations = slices.Clone(output[index].Relations)
+	}
+	return output
 }
 
 // Detect evaluates existing observations without making requests.

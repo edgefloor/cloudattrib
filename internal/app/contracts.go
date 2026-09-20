@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"time"
 
 	"cloudattrib/internal/model"
 )
@@ -69,4 +70,35 @@ type SnapshotStore interface {
 type ResultStore interface {
 	SaveReport(context.Context, model.Report) error
 	LoadReport(context.Context, string) (model.Report, error)
+}
+
+// FindingQuery selects a bounded deterministic page of stored findings.
+type FindingQuery struct {
+	Domain       string
+	ProviderID   string
+	ProductID    string
+	Relation     model.Relation
+	Strength     model.Strength
+	ObservedFrom *time.Time
+	ObservedTo   *time.Time
+	Cursor       string
+	Limit        int
+}
+
+// StoredFinding links one finding to its immutable report classification.
+type StoredFinding struct {
+	ReportID     string        `json:"report_id"`
+	ClassifiedAt time.Time     `json:"classified_at"`
+	Finding      model.Finding `json:"finding"`
+}
+
+// FindingPage is one keyset-paginated result page.
+type FindingPage struct {
+	Items      []StoredFinding `json:"items"`
+	NextCursor string          `json:"next_cursor,omitempty"`
+}
+
+// FindingStore searches persisted findings without exposing database details.
+type FindingStore interface {
+	Findings(context.Context, FindingQuery) (FindingPage, error)
 }

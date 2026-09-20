@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
   "providers": [
-    {"id":"aws"}, {"id":"microsoft"}, {"id":"google"}, {"id":"cloudflare"},
-    {"id":"fastly"}, {"id":"vercel"}, {"id":"netlify"}, {"id":"proofpoint"},
-    {"id":"mimecast"}, {"id":"hubspot"}, {"id":"segment"}, {"id":"atlassian"}
+    {"id":"aws","name":"Amazon Web Services","aliases":["amazon"]}, {"id":"microsoft","name":"Microsoft","aliases":["azure"]}, {"id":"google","name":"Google"}, {"id":"cloudflare","name":"Cloudflare"},
+    {"id":"fastly","name":"Fastly"}, {"id":"vercel","name":"Vercel"}, {"id":"netlify","name":"Netlify"}, {"id":"proofpoint","name":"Proofpoint"},
+    {"id":"mimecast","name":"Mimecast"}, {"id":"hubspot","name":"HubSpot"}, {"id":"segment","name":"Segment"}, {"id":"atlassian","name":"Atlassian"}
   ],
   "products": [
-    {"id":"aws.cloudfront","provider_id":"aws","relations":["web_delivery"]},
+    {"id":"aws.cloudfront","provider_id":"aws","name":"Amazon CloudFront","aliases":["cloudfront"],"category":"cdn","relations":["web_delivery"]},
     {"id":"aws.elb","provider_id":"aws","relations":["web_delivery"]},
     {"id":"aws.s3","provider_id":"aws","relations":["web_delivery"]},
     {"id":"aws.route53","provider_id":"aws","relations":["authoritative_dns"]},
@@ -26,7 +26,7 @@
     {"id":"hubspot.tracking","provider_id":"hubspot","relations":["web_integration"]},
     {"id":"segment.analytics","provider_id":"segment","relations":["web_integration"]},
     {"id":"atlassian.domain-verification","provider_id":"atlassian","relations":["domain_verification"]},
-    {"id":"webtech.react","relations":["web_integration"]}
+    {"id":"webtech.react","name":"React","category":"web_technology","relations":["web_integration"]}
   ],
   "rules": [
     {"id":"aws.cloudfront.cname.v1","signal":"dns","rrtype":"CNAME","field":"rdata.target","match":{"fqdn_suffix":"cloudfront.net"},"emit":{"provider_id":"aws","product_id":"aws.cloudfront","category":"cdn","relation":"web_delivery","strength":"strong","activity":"configured"},"source_refs":["https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/CNAMEs.html"],"reviewed_at":"2026-09-20"},
