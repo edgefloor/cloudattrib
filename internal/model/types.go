@@ -176,6 +176,13 @@ type HTTPPayload struct {
 	BodyHash      string       `json:"body_hash"`
 	BodyLength    int64        `json:"body_length"`
 	BodyTruncated bool         `json:"body_truncated"`
+	ScriptURLs    []string     `json:"script_urls,omitempty"`
+}
+
+// TechnologyPayload retains a passive detector's raw technology label.
+type TechnologyPayload struct {
+	Name       string `json:"name"`
+	DetectorID string `json:"detector_id"`
 }
 
 // HTTPHeader is one retained response header and its sanitized values.

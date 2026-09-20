@@ -24,6 +24,8 @@ type Dependencies struct {
 	Detectors   []Detector
 	WebDetector WebDetector
 	Prefixes    PrefixReader
+	ASN         ASNReader
+	Store       ResultStore
 	View        model.AttributionView
 	HTTPScheme  string
 	Now         func() time.Time
@@ -36,6 +38,8 @@ type Service struct {
 	detectors   []Detector
 	webDetector WebDetector
 	prefixes    PrefixReader
+	asn         ASNReader
+	store       ResultStore
 	view        model.AttributionView
 	httpScheme  string
 	now         func() time.Time
@@ -57,6 +61,8 @@ func NewService(dependencies Dependencies) *Service {
 		detectors:   slices.Clone(dependencies.Detectors),
 		webDetector: dependencies.WebDetector,
 		prefixes:    dependencies.Prefixes,
+		asn:         dependencies.ASN,
+		store:       dependencies.Store,
 		view:        dependencies.View,
 		httpScheme:  scheme,
 		now:         now,
@@ -78,6 +84,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	}
 
 	hostname := normalized.SeedHostnames[0]
+	collectHTTP := normalized.Mode == model.ModeFull && s.http != nil
 	port := uint16(443)
 	if s.httpScheme == "http" {
 		port = 80
@@ -109,7 +116,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	for dnsDone != nil || (httpStarted && httpDone != nil) {
 		select {
 		case candidate := <-candidates:
-			if httpStarted || s.http == nil {
+			if httpStarted || !collectHTTP {
 				continue
 			}
 			httpStarted = true
@@ -120,7 +127,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		case outcome := <-dnsDone:
 			dnsResult = outcome.result
 			dnsDone = nil
-			if !httpStarted && s.http != nil {
+			if !httpStarted && collectHTTP {
 				select {
 				case candidate := <-candidates:
 					httpStarted = true
@@ -141,15 +148,59 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		}
 	}
 
-	observations := append([]model.Observation(nil), dnsResult.Observations...)
-	coverage := []model.Coverage{dnsResult.Coverage}
+	type dnsRun struct {
+		hostname string
+		result   collectdns.Result
+	}
+	type httpRun struct {
+		hostname string
+		result   collecthttp.Result
+		err      error
+	}
+	dnsRuns := []dnsRun{{hostname: hostname, result: dnsResult}}
+	httpRuns := make([]httpRun, 0, len(normalized.SeedHostnames))
 	if httpStarted {
-		coverage = append(coverage, httpResult.Coverage)
-		if httpErr == nil {
-			observations = append(observations, httpResult.Observations...)
+		httpRuns = append(httpRuns, httpRun{hostname: hostname, result: httpResult, err: httpErr})
+	}
+	for _, seed := range normalized.SeedHostnames[1:] {
+		var selected collectdns.Candidate
+		result := s.dns.Collect(ctx, seed, port, func(candidate collectdns.Candidate) {
+			if !selected.Address.IsValid() {
+				selected = candidate
+			}
+		})
+		dnsRuns = append(dnsRuns, dnsRun{hostname: seed, result: result})
+		if collectHTTP && selected.Address.IsValid() {
+			result, collectErr := s.http.Collect(ctx, s.httpScheme, selected.Hostname, selected.Address)
+			httpRuns = append(httpRuns, httpRun{hostname: seed, result: result, err: collectErr})
 		}
-	} else {
+	}
+
+	observations := make([]model.Observation, 0)
+	coverage := make([]model.Coverage, 0, len(dnsRuns)+len(httpRuns))
+	for _, run := range dnsRuns {
+		scope := scopeForSeed(run.hostname, normalized.ScopeRoots)
+		for _, observation := range run.result.Observations {
+			observation.Scope = scope
+			observations = append(observations, observation)
+		}
+		coverage = append(coverage, run.result.Coverage)
+	}
+	if normalized.Mode == model.ModeDNS {
+		coverage = append(coverage, model.Coverage{Capability: "http", Status: model.CoverageSkipped, Reason: "DNS-only mode"})
+	} else if len(httpRuns) == 0 {
 		coverage = append(coverage, model.Coverage{Capability: "http", Status: model.CoverageUnavailable, Reason: "no approved address"})
+	}
+	for _, run := range httpRuns {
+		coverage = append(coverage, run.result.Coverage)
+		if run.err == nil {
+			for _, observation := range run.result.Observations {
+				if observation.Scope != model.ScopeExternalRedirect {
+					observation.Scope = scopeForSeed(run.hostname, normalized.ScopeRoots)
+				}
+				observations = append(observations, observation)
+			}
+		}
 	}
 
 	classifiedAt := s.now()
@@ -164,37 +215,49 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		evidence = append(evidence, detected...)
 		coverage = append(coverage, detectorCoverage...)
 	}
-	if s.webDetector != nil && httpErr == nil && httpStarted {
-		detected, detectorCoverage := s.webDetector.Detect(ctx, httpResult.Observation.ID, httpResult.Observation.Subject, httpResult.Observation.Scope, httpResult.Headers, httpResult.Body, s.view)
-		for i := range detected {
-			if detected[i].ClassifiedAt.IsZero() {
-				detected[i].ClassifiedAt = classifiedAt
+	if s.webDetector != nil {
+		for _, run := range httpRuns {
+			if run.err != nil {
+				continue
 			}
+			scope := run.result.Observation.Scope
+			if scope != model.ScopeExternalRedirect {
+				scope = scopeForSeed(run.hostname, normalized.ScopeRoots)
+			}
+			detected, detectorCoverage := s.webDetector.Detect(ctx, run.result.Observation.ID, run.result.Observation.Subject, scope, run.result.Headers, run.result.Body, s.view)
+			for i := range detected {
+				if detected[i].ClassifiedAt.IsZero() {
+					detected[i].ClassifiedAt = classifiedAt
+				}
+			}
+			evidence = append(evidence, detected...)
+			coverage = append(coverage, detectorCoverage)
 		}
-		evidence = append(evidence, detected...)
-		coverage = append(coverage, detectorCoverage)
 	}
 
 	if s.prefixes != nil {
-		seen := make(map[netip.Addr]struct{})
-		for _, address := range dnsResult.Addresses {
-			address = address.Unmap()
-			if _, exists := seen[address]; exists {
-				continue
-			}
-			seen[address] = struct{}{}
-			associations, prefixCoverage, lookupErr := s.prefixes.LookupPrefixes(ctx, model.IPLookupRequest{Address: address, Match: "all"}, s.view)
-			if lookupErr != nil {
-				prefixCoverage.Status = model.CoverageUnavailable
-				prefixCoverage.ErrorCodes = append(prefixCoverage.ErrorCodes, model.ErrorCodeOf(lookupErr))
-			}
-			coverage = append(coverage, prefixCoverage)
-			for _, association := range associations {
-				item, evidenceErr := prefixEvidence(hostname, address, association, classifiedAt, observations)
-				if evidenceErr != nil {
-					return model.Report{}, evidenceErr
+		seen := make(map[string]struct{})
+		for _, run := range dnsRuns {
+			for _, address := range run.result.Addresses {
+				address = address.Unmap()
+				lookupKey := run.hostname + "\x00" + address.String()
+				if _, exists := seen[lookupKey]; exists {
+					continue
 				}
-				evidence = append(evidence, item)
+				seen[lookupKey] = struct{}{}
+				associations, prefixCoverage, lookupErr := s.prefixes.LookupPrefixes(ctx, model.IPLookupRequest{Address: address, Match: "all"}, s.view)
+				if lookupErr != nil {
+					prefixCoverage.Status = model.CoverageUnavailable
+					prefixCoverage.ErrorCodes = append(prefixCoverage.ErrorCodes, model.ErrorCodeOf(lookupErr))
+				}
+				coverage = append(coverage, prefixCoverage)
+				for _, association := range associations {
+					item, evidenceErr := prefixEvidence(run.hostname, scopeForSeed(run.hostname, normalized.ScopeRoots), address, association, classifiedAt, observations)
+					if evidenceErr != nil {
+						return model.Report{}, evidenceErr
+					}
+					evidence = append(evidence, item)
+				}
 			}
 		}
 	}
@@ -235,31 +298,136 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 
 // LookupIP performs local prefix lookup without DNS, HTTP, or storage.
 func (s *Service) LookupIP(ctx context.Context, request model.IPLookupRequest) (model.IPLookupResult, error) {
-	if s.prefixes == nil {
-		return model.IPLookupResult{}, model.NewError(model.CodeCapabilityUnavailable, "prefix lookup is unavailable", nil)
+	if !request.Address.IsValid() {
+		return model.IPLookupResult{}, model.NewError(model.CodeInvalidTarget, "IP address is invalid", nil)
 	}
-	associations, coverage, err := s.prefixes.LookupPrefixes(ctx, request, s.view)
+	if s.prefixes == nil && s.asn == nil {
+		return model.IPLookupResult{}, model.NewError(model.CodeCapabilityUnavailable, "local IP lookup is unavailable", nil)
+	}
+	result := model.IPLookupResult{Address: request.Address.Unmap(), Status: model.StatusComplete}
+	usable := 0
+	if s.prefixes == nil {
+		result.Coverage = append(result.Coverage, model.Coverage{Capability: "prefix", Status: model.CoverageUnavailable, Reason: "prefix source is unavailable"})
+	} else {
+		associations, coverage, err := s.prefixes.LookupPrefixes(ctx, request, s.view)
+		result.Coverage = append(result.Coverage, coverage)
+		if err == nil {
+			usable++
+			result.Associations = associations
+		} else if model.ErrorCodeOf(err) != model.CodeCapabilityUnavailable && model.ErrorCodeOf(err) != model.CodeSourceUnavailable {
+			return model.IPLookupResult{}, fmt.Errorf("lookup prefixes: %w", err)
+		}
+	}
+	if s.asn == nil {
+		result.Coverage = append(result.Coverage, model.Coverage{Capability: "asn", Status: model.CoverageUnavailable, Reason: "ASN source is unavailable"})
+	} else {
+		records, coverage, err := s.asn.LookupASN(ctx, request.Address, s.view)
+		result.Coverage = append(result.Coverage, coverage)
+		if err == nil {
+			usable++
+			result.ASN = records
+		} else if model.ErrorCodeOf(err) != model.CodeCapabilityUnavailable && model.ErrorCodeOf(err) != model.CodeSourceUnavailable {
+			return model.IPLookupResult{}, fmt.Errorf("lookup ASN: %w", err)
+		}
+	}
+	if usable == 0 {
+		return model.IPLookupResult{}, model.NewError(model.CodeCapabilityUnavailable, "all local IP lookup sources are unavailable", nil)
+	}
+	for _, coverage := range result.Coverage {
+		if coverage.Status != model.CoverageComplete {
+			result.Status = model.StatusPartial
+			break
+		}
+	}
+	return result, nil
+}
+
+// Reclassify reinterprets immutable normalized observations without collecting.
+func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyRequest) (model.Report, error) {
+	if request.ReportID == "" {
+		return model.Report{}, model.NewError(model.CodeInvalidOptions, "report ID is required", nil)
+	}
+	if s.store == nil {
+		return model.Report{}, model.NewError(model.CodeCapabilityUnavailable, "reclassification input storage is unavailable", nil)
+	}
+	if request.BundleID != "" && request.BundleID != s.view.BundleID() {
+		return model.Report{}, model.NewError(model.CodeBundleUnavailable, "requested bundle is not loaded", nil)
+	}
+	if len(s.detectors) == 0 && s.prefixes == nil {
+		return model.Report{}, model.NewError(model.CodeCapabilityUnavailable, "no replay classifier is usable", nil)
+	}
+	original, err := s.store.LoadReport(ctx, request.ReportID)
 	if err != nil {
-		return model.IPLookupResult{}, fmt.Errorf("lookup prefixes: %w", err)
+		if model.ErrorCodeOf(err) != "" {
+			return model.Report{}, fmt.Errorf("load replay input: %w", err)
+		}
+		return model.Report{}, model.NewError(model.CodePersistenceFailed, "load replay input", err)
+	}
+	classifiedAt := s.now()
+	observations := slices.Clone(original.Observations)
+	evidence := make([]model.Evidence, 0)
+	coverage := make([]model.Coverage, 0, len(original.Coverage)+len(s.detectors)+1)
+	coverage = append(coverage, original.Coverage...)
+	for _, detector := range s.detectors {
+		detected, detectorCoverage := detector.Detect(ctx, observations, s.view)
+		for index := range detected {
+			detected[index].ClassifiedAt = classifiedAt
+		}
+		evidence = append(evidence, detected...)
+		coverage = append(coverage, detectorCoverage...)
+	}
+	if s.prefixes != nil {
+		for _, observation := range observations {
+			if observation.Type != "dns_address" {
+				continue
+			}
+			var payload model.DNSPayload
+			if json.Unmarshal(observation.Payload, &payload) != nil || !payload.Address.IsValid() {
+				continue
+			}
+			associations, prefixCoverage, lookupErr := s.prefixes.LookupPrefixes(ctx, model.IPLookupRequest{Address: payload.Address, Match: "all"}, s.view)
+			if lookupErr != nil {
+				prefixCoverage.Status = model.CoverageUnavailable
+				prefixCoverage.ErrorCodes = append(prefixCoverage.ErrorCodes, model.ErrorCodeOf(lookupErr))
+			}
+			coverage = append(coverage, prefixCoverage)
+			for _, association := range associations {
+				item, evidenceErr := prefixEvidence(observation.Subject, observation.Scope, payload.Address, association, classifiedAt, observations)
+				if evidenceErr != nil {
+					return model.Report{}, evidenceErr
+				}
+				evidence = append(evidence, item)
+			}
+		}
 	}
 	status := model.StatusComplete
-	if coverage.Status != model.CoverageComplete {
-		status = model.StatusPartial
+	for _, item := range coverage {
+		if item.Status == model.CoveragePartial || item.Status == model.CoverageUnavailable {
+			status = model.StatusPartial
+			break
+		}
 	}
-	return model.IPLookupResult{Address: request.Address.Unmap(), Status: status, Associations: associations, Coverage: []model.Coverage{coverage}}, nil
+	report := model.Report{
+		SchemaVersion: model.SchemaVersion, OriginalReportID: original.ID, Target: original.Target, Mode: model.ModeReclassify,
+		StartedAt: classifiedAt, EndedAt: s.now(), ClassifiedAt: classifiedAt, BundleID: s.view.BundleID(), BuildID: "cloudattrib-reclassify-v1",
+		Status: status, Observations: observations, Evidence: evidence, Findings: aggregate.Build(evidence), Coverage: coverage, Warnings: make([]string, 0),
+	}
+	report.ID, err = report.ContentID()
+	if err != nil {
+		return model.Report{}, fmt.Errorf("create reclassified report ID: %w", err)
+	}
+	if err := report.ValidateReferences(); err != nil {
+		return model.Report{}, fmt.Errorf("validate reclassified report references: %w", err)
+	}
+	return report, nil
 }
 
-// Reclassify is added after retained replay inputs ship.
-func (*Service) Reclassify(context.Context, model.ReclassifyRequest) (model.Report, error) {
-	return model.Report{}, model.NewError(model.CodeCapabilityUnavailable, "reclassification is not available in the E1 slice", nil)
-}
-
-func prefixEvidence(subject string, address netip.Addr, association model.Association, classifiedAt time.Time, observations []model.Observation) (model.Evidence, error) {
+func prefixEvidence(subject string, scope model.Scope, address netip.Addr, association model.Association, classifiedAt time.Time, observations []model.Observation) (model.Evidence, error) {
 	fields, err := json.Marshal(association)
 	if err != nil {
 		return model.Evidence{}, fmt.Errorf("encode prefix association: %w", err)
 	}
-	observationID := addressObservationID(address, observations)
+	observationID := addressObservationID(subject, address, observations)
 	if observationID == "" {
 		return model.Evidence{}, fmt.Errorf("find address observation for %s", address)
 	}
@@ -284,14 +452,21 @@ func prefixEvidence(subject string, address netip.Addr, association model.Associ
 		Relation:     model.RelationServiceRange,
 		Strength:     model.StrengthModerate,
 		Activity:     model.ActivityUnknown,
-		Scope:        model.ScopeRoot,
+		Scope:        scope,
 		Explanation:  "address is contained by a normalized local prefix record",
 	}, nil
 }
 
-func addressObservationID(address netip.Addr, observations []model.Observation) string {
+func scopeForSeed(hostname string, roots []string) model.Scope {
+	if slices.Contains(roots, hostname) {
+		return model.ScopeRoot
+	}
+	return model.ScopeSubdomain
+}
+
+func addressObservationID(subject string, address netip.Addr, observations []model.Observation) string {
 	for _, observation := range observations {
-		if observation.Type != "dns_address" {
+		if observation.Type != "dns_address" || observation.Subject != subject {
 			continue
 		}
 		var payload model.DNSPayload

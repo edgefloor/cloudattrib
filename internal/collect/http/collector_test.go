@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	stdhttp "net/http"
 	"net/http/httptest"
@@ -12,6 +13,28 @@ import (
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/policy"
 )
+
+func TestCollectRetainsSanitizedScriptURLsForOfflineRules(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		_, _ = writer.Write([]byte(`<script src="https://cdn.segment.com/analytics.js/v1/key.js?token=secret"></script>`))
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := New((&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext, policy.PublicDestinationPolicy(), 2<<20)
+	result, err := collector.Collect(context.Background(), "http", "example.com", address)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	var payload model.HTTPPayload
+	if err := json.Unmarshal(result.Observation.Payload, &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if len(payload.ScriptURLs) != 1 || payload.ScriptURLs[0] != "https://cdn.segment.com/analytics.js/v1/key.js" {
+		t.Fatalf("ScriptURLs = %#v", payload.ScriptURLs)
+	}
+}
 
 func TestRedirectResolvesAndValidatesEveryAddress(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://127.0.0.1:1")

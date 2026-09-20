@@ -2,6 +2,7 @@
 package http
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -15,6 +16,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"golang.org/x/net/html"
 
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/policy"
@@ -170,7 +173,7 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 		body = body[:c.maxBody]
 	}
 	bodyDigest := sha256.Sum256(body)
-	payload := model.HTTPPayload{URL: redactQuery(targetURL), StatusCode: response.StatusCode, PeerAddress: address, Headers: selectedHeaders(response.Header), BodyHash: "sha256:" + hex.EncodeToString(bodyDigest[:]), BodyLength: int64(len(body)), BodyTruncated: truncated}
+	payload := model.HTTPPayload{URL: redactQuery(targetURL), StatusCode: response.StatusCode, PeerAddress: address, Headers: selectedHeaders(response.Header), BodyHash: "sha256:" + hex.EncodeToString(bodyDigest[:]), BodyLength: int64(len(body)), BodyTruncated: truncated, ScriptURLs: scriptURLs(body, targetURL, 128)}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return Result{}, "", fmt.Errorf("encode HTTP observation: %w", err)
@@ -186,6 +189,44 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 	}
 	observation := model.Observation{ID: observationID(targetURL.Hostname(), address, hop), Type: "http_response", Subject: targetURL.Hostname(), Relation: model.RelationWebDelivery, Scope: scope, ObservedAt: c.now(), Status: "responded", Payload: encoded, ContentHash: payload.BodyHash}
 	return Result{Observation: observation, Coverage: coverage, PeerAddress: address, Headers: response.Header.Clone(), Body: slices.Clone(body)}, response.Header.Get("Location"), nil
+}
+
+func scriptURLs(body []byte, base *url.URL, limit int) []string {
+	tokenizer := html.NewTokenizer(bytes.NewReader(body))
+	result := make([]string, 0)
+	seen := make(map[string]struct{})
+	for len(result) < limit {
+		tokenType := tokenizer.Next()
+		if tokenType == html.ErrorToken {
+			break
+		}
+		if tokenType != html.StartTagToken && tokenType != html.SelfClosingTagToken {
+			continue
+		}
+		token := tokenizer.Token()
+		if !strings.EqualFold(token.Data, "script") {
+			continue
+		}
+		for _, attribute := range token.Attr {
+			if !strings.EqualFold(attribute.Key, "src") {
+				continue
+			}
+			parsed, err := base.Parse(attribute.Val)
+			if err != nil || parsed.Hostname() == "" || parsed.User != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+				break
+			}
+			parsed.RawQuery = ""
+			parsed.Fragment = ""
+			value := parsed.String()
+			if _, exists := seen[value]; !exists {
+				seen[value] = struct{}{}
+				result = append(result, value)
+			}
+			break
+		}
+	}
+	slices.Sort(result)
+	return result
 }
 
 func (c *Collector) firstApproved(addresses []netip.Addr, port uint16) (netip.Addr, bool) {

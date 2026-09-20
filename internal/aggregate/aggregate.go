@@ -28,6 +28,7 @@ func Build(evidence []model.Evidence) []model.Finding {
 	findings := make([]model.Finding, 0, len(groups))
 	for groupKey, items := range groups {
 		slices.SortFunc(items, func(a, b model.Evidence) int { return strings.Compare(a.ID, b.ID) })
+		items = deduplicate(items)
 		finding := model.Finding{
 			ID:          findingID(groupKey),
 			Subject:     groupKey.subject,
@@ -50,6 +51,32 @@ func Build(evidence []model.Evidence) []model.Finding {
 	}
 	slices.SortFunc(findings, func(a, b model.Finding) int { return strings.Compare(a.ID, b.ID) })
 	return findings
+}
+
+func deduplicate(items []model.Evidence) []model.Evidence {
+	byID := make(map[string]model.Evidence, len(items))
+	for _, item := range items {
+		current, ok := byID[item.ID]
+		if !ok || strengthRank(item.Strength) > strengthRank(current.Strength) {
+			byID[item.ID] = item
+		}
+	}
+	byProvenance := make(map[string]model.Evidence, len(byID))
+	for _, item := range byID {
+		observationIDs := slices.Clone(item.ObservationIDs)
+		slices.Sort(observationIDs)
+		provenance := strings.Join([]string{item.DetectorID, item.RuleID, strings.Join(observationIDs, ",")}, "\x00")
+		current, ok := byProvenance[provenance]
+		if !ok || strengthRank(item.Strength) > strengthRank(current.Strength) || strengthRank(item.Strength) == strengthRank(current.Strength) && item.ID < current.ID {
+			byProvenance[provenance] = item
+		}
+	}
+	result := make([]model.Evidence, 0, len(byProvenance))
+	for _, item := range byProvenance {
+		result = append(result, item)
+	}
+	slices.SortFunc(result, func(a, b model.Evidence) int { return strings.Compare(a.ID, b.ID) })
+	return result
 }
 
 func findingID(value key) string {

@@ -108,6 +108,9 @@ func Normalize(req model.AnalyzeRequest) (model.NormalizedRequest, error) {
 	}
 	slices.Sort(result.SeedHostnames)
 	result.SeedHostnames = slices.Compact(result.SeedHostnames)
+	if len(result.SeedHostnames) > 32 {
+		return model.NormalizedRequest{}, invalidOptions("seed hostname limit exceeds 32")
+	}
 	return result, nil
 }
 

@@ -75,8 +75,9 @@ func TestE1DomainAnalysisStartsHTTPBeforeAAAAAndKeepsPartialEvidence(t *testing.
 	reportCh := make(chan model.Report, 1)
 	errCh := make(chan error, 1)
 	go func() {
+		includeWWW := false
 		report, err := service.Analyze(t.Context(), model.AnalyzeRequest{
-			Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull,
+			Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull, IncludeWWW: &includeWWW,
 		})
 		reportCh <- report
 		errCh <- err
@@ -159,7 +160,8 @@ func TestE1MissingPrefixSourcePreservesDNSAndHTTP(t *testing.T) {
 		Now:        time.Now,
 	})
 
-	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain})
+	includeWWW := false
+	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, IncludeWWW: &includeWWW})
 	if err != nil {
 		t.Fatalf("Analyze() error = %v", err)
 	}
