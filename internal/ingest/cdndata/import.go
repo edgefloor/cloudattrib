@@ -9,17 +9,25 @@ import (
 	"cloudattrib/internal/ingest/cloudranges"
 )
 
+// Metadata identifies the exact converted upstream data artifact.
 type Metadata struct{ Revision, Digest, ProvenanceGroup string }
+
+// CIDRRecord is one normalized CDN, WAF, or cloud prefix record.
 type CIDRRecord struct {
 	Prefix                                                                     netip.Prefix
 	Category, Provider, SourceID, RecordRef, Revision, Digest, ProvenanceGroup string
 }
+
+// SuffixRecord is one normalized local DNS suffix classification.
 type SuffixRecord struct{ Suffix, Category, Provider, SourceID, RecordRef, Revision, Digest, ProvenanceGroup string }
+
+// Result contains every converted CIDR and suffix record.
 type Result struct {
 	CIDRs    []CIDRRecord
 	Suffixes []SuffixRecord
 }
 
+// Parse validates and converts pinned cdncheck-style generated data.
 func Parse(data []byte, metadata Metadata) (Result, error) {
 	var source map[string]map[string][]string
 	if err := cloudranges.DecodeStrict(data, &source); err != nil {
@@ -74,7 +82,7 @@ func normalizeSuffix(value string) (string, error) {
 			return "", fmt.Errorf("invalid suffix %q", value)
 		}
 		for _, r := range label {
-			if !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-') {
+			if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
 				return "", fmt.Errorf("invalid suffix %q", value)
 			}
 		}

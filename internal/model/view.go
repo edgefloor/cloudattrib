@@ -75,11 +75,13 @@ type Association struct {
 
 // ASNRecord is one local interval lookup result.
 type ASNRecord struct {
-	ASN         uint32 `json:"asn"`
-	Description string `json:"description,omitempty"`
-	CountryCode string `json:"country_code,omitempty"`
-	SourceID    string `json:"source_id"`
-	RecordRef   string `json:"record_ref"`
+	ASN            uint32 `json:"asn"`
+	Description    string `json:"description,omitempty"`
+	CountryCode    string `json:"country_code,omitempty"`
+	SourceID       string `json:"source_id"`
+	SourceRevision string `json:"source_revision"`
+	SourceDigest   string `json:"source_digest"`
+	RecordRef      string `json:"record_ref"`
 }
 
 // IPLookupRequest selects local sources and matching behavior.

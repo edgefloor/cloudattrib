@@ -11,8 +11,10 @@ import (
 	"cloudattrib/internal/model"
 )
 
+// Index is an immutable family-separated interval index.
 type Index struct{ v4, v6 []iptoasn.Interval }
 
+// New validates, sorts, and copies IPtoASN intervals.
 func New(intervals []iptoasn.Interval) (*Index, error) {
 	index := &Index{}
 	for _, item := range intervals {
@@ -35,6 +37,8 @@ func New(intervals []iptoasn.Interval) (*Index, error) {
 	}
 	return index, nil
 }
+
+// LookupASN returns the local interval containing address, when one exists.
 func (i *Index) LookupASN(ctx context.Context, address netip.Addr, _ model.AttributionView) ([]model.ASNRecord, model.Coverage, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, model.Coverage{}, err
@@ -50,7 +54,7 @@ func (i *Index) LookupASN(ctx context.Context, address netip.Addr, _ model.Attri
 	position := sort.Search(len(list), func(n int) bool { return list[n].Start.Compare(address) > 0 }) - 1
 	if position >= 0 && list[position].End.Compare(address) >= 0 {
 		item := list[position]
-		return []model.ASNRecord{{ASN: item.ASN, Description: item.Description, CountryCode: item.CountryCode, SourceID: item.SourceID, RecordRef: item.RecordRef}}, model.Coverage{Capability: "asn", Status: model.CoverageComplete, Attempted: 1, Completed: 1}, nil
+		return []model.ASNRecord{{ASN: item.ASN, Description: item.Description, CountryCode: item.CountryCode, SourceID: item.SourceID, SourceRevision: item.Revision, SourceDigest: item.Digest, RecordRef: item.RecordRef}}, model.Coverage{Capability: "asn", Status: model.CoverageComplete, Attempted: 1, Completed: 1}, nil
 	}
 	return nil, model.Coverage{Capability: "asn", Status: model.CoverageComplete, Attempted: 1, Completed: 1}, nil
 }

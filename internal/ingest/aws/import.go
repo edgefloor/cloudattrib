@@ -11,6 +11,7 @@ import (
 
 const maxInputBytes = 16 << 20
 
+// Result contains normalized AWS associations and source metadata.
 type Result struct {
 	SyncToken    string
 	CreateDate   string
@@ -32,6 +33,7 @@ type prefix struct {
 	NetworkBorderGroup string `json:"network_border_group"`
 }
 
+// Parse validates and normalizes one complete AWS range document.
 func Parse(data []byte, revision, digest string) (Result, error) {
 	if len(data) > maxInputBytes {
 		return Result{}, fmt.Errorf("AWS input exceeds %d byte limit", maxInputBytes)

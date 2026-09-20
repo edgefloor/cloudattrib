@@ -9,6 +9,7 @@ import (
 	"cloudattrib/internal/model"
 )
 
+// Result contains normalized Azure service-tag associations.
 type Result struct {
 	ChangeNumber string
 	Cloud        string
@@ -33,6 +34,7 @@ type properties struct {
 	AddressPrefixes []string `json:"addressPrefixes"`
 }
 
+// Parse validates and normalizes one complete Azure service-tag document.
 func Parse(data []byte, revision, digest string) (Result, error) {
 	var doc document
 	if err := cloudranges.DecodeStrict(data, &doc); err != nil {

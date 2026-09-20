@@ -9,6 +9,7 @@ import (
 	"cloudattrib/internal/model"
 )
 
+// Result contains normalized Google Cloud associations and source metadata.
 type Result struct {
 	SyncToken    string
 	CreationTime string
@@ -27,6 +28,7 @@ type prefix struct {
 	Scope      string `json:"scope"`
 }
 
+// Parse validates and normalizes one complete Google Cloud range document.
 func Parse(data []byte, revision, digest string) (Result, error) {
 	var doc document
 	if err := cloudranges.DecodeStrict(data, &doc); err != nil {
