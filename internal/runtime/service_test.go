@@ -211,7 +211,7 @@ func TestBundleAnalyzerFactoryReloadsDesiredAndRetainsPinnedBundle(t *testing.T)
 	if _, err := repository.Activate(context.Background(), second.CandidateID, second.CandidateHash, "activate"); err != nil {
 		t.Fatalf("Activate(second) error = %v", err)
 	}
-	if err := factory.reloadDesired(); err != nil {
+	if err := factory.reloadDesired(t.Context()); err != nil {
 		t.Fatalf("reloadDesired() error = %v", err)
 	}
 	if factory.activeBundleID != second.CandidateID {
@@ -298,6 +298,75 @@ func TestBundleAnalyzerFactoryLoadsDifferentBundlesConcurrently(t *testing.T) {
 	}
 	if !seen["bundle-a"] || !seen["bundle-b"] {
 		t.Fatalf("started loads = %#v", seen)
+	}
+}
+
+func TestBundleAnalyzerFactoryReloadLoopCancelsBlockedLoad(t *testing.T) {
+	t.Parallel()
+
+	configuration := config.Default()
+	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
+	repository, err := datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := repository.Import(t.Context(), runtimeFixtureSources(t, "reload-cancellation"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Activate(t.Context(), desired.CandidateID, desired.CandidateHash, "activate"); err != nil {
+		t.Fatal(err)
+	}
+	loadStarted := make(chan struct{})
+	loadStopped := make(chan struct{})
+	factory := &bundleAnalyzerFactory{
+		configuration:  configuration,
+		active:         runtimeFixtureAnalyzer{bundleID: "previous-bundle"},
+		activeBundleID: "previous-bundle",
+		analyzers:      make(map[string]app.Analyzer),
+		lookup:         make(map[string]lookupAvailability),
+		load: func(ctx context.Context, _ string) (app.Analyzer, lookupAvailability, error) {
+			close(loadStarted)
+			<-ctx.Done()
+			close(loadStopped)
+			return nil, lookupAvailability{}, ctx.Err()
+		},
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	loopDone := make(chan struct{})
+	unexpectedError := make(chan error, 1)
+	go func() {
+		defer close(loopDone)
+		factory.reloadLoop(ctx, time.Millisecond, func(err error) { unexpectedError <- err })
+	}()
+	select {
+	case <-loadStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reload loop did not start the desired bundle load")
+	}
+	cancel()
+	select {
+	case <-loadStopped:
+	case <-time.After(time.Second):
+		t.Fatal("bundle load did not observe reload-loop cancellation")
+	}
+	select {
+	case <-loopDone:
+	case <-time.After(time.Second):
+		t.Fatal("reload loop did not terminate after cancellation")
+	}
+	select {
+	case err := <-unexpectedError:
+		t.Fatalf("reload loop reported shutdown cancellation: %v", err)
+	default:
+	}
+	status, err := repository.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Loads) != 0 {
+		t.Fatalf("shutdown cancellation recorded a load failure: %#v", status.Loads)
 	}
 }
 

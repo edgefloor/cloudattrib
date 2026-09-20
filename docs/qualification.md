@@ -65,6 +65,27 @@ The dataset repository tests cover malformed and corrupt artifacts, stale source
 
 Offline classification paths do not initialize an enrichment client. Local lookup, bundle loading, rules, Wappalyzer passive fingerprinting, and reclassification consume supplied data only. Live DNS and HTTP collectors use the configured resolver and exact approved destination addresses; tests instrument those boundaries, including redirects, mixed answers, timeouts, response limits, and cancellation.
 
+## Repair acceptance evidence
+
+The acceptance repair at `2e52440` and its reload-cancellation follow-up cover these findings:
+
+| Finding | Maintained evidence |
+| --- | --- |
+| 1. Historical built-in pins after restart | `TestBundleAnalyzerFactoryReconstructsBuiltinAfterDatasetActivation`, `TestRunnerUsesPinnedBundleAndCommitsTerminalReport`, and the PostgreSQL pin-lifecycle integration test cover analyzer reconstruction, pinned execution, and terminal pin release. |
+| 2. Missing sources and false complete results | `TestLoadSourcesPreservesMissingFeedCoverage`, `TestLookupIPIsPartialWhenConfiguredProviderFeedsAreMissing`, `TestLookupIPRejectsAddressFamilyWithNoUsableSource`, `TestLookupIPDoesNotRequireDurableStore`, and the E1 CLI rendering assertion cover source state, address-family applicability, HTTP 200 partial results, and CLI exit 3. |
+| 3. HTTP peer enrichment | `TestE1DomainAnalysisStartsHTTPBeforeAAAAAndKeepsPartialEvidence` proves that fresh evidence references the HTTP peer. `TestReclassifyEnrichesHTTPRedirectPeerWithNewPrefixAndASNData` proves replay enrichment and external-redirect scope. |
+| 4. Activation and pruning | `TestActivateCoordinatedExcludesPruneAndRestoresPointerOnFailure` covers the filesystem lock and pointer compensation. `TestPostgresAdmissionClaimCompletionAndPinLifecycle` ran against a fresh PostgreSQL 18 instance and covers the lifecycle advisory lock, durable activation, and prune protection. |
+| 5. Replay parity | `TestReclassifyPreservesCaptureAndUsesNewClassificationProvenance`, `TestReclassifyEnrichesHTTPRedirectPeerWithNewPrefixAndASNData`, `TestReclassifyRequiresUsableReplayPath`, and `TestReclassifyRejectsFindingsWithoutRetainedInputs` cover selected-bundle provenance, prefix and ASN replay, partial paths, and rejection when no replay path applies. |
+| 6. Bundle acquisition cancellation | `TestRunnerRenewsLeaseAndCancelsDuringBundleAcquisition` covers lease renewal before acquisition. `TestBundleAnalyzerFactoryLoadsDifferentBundlesConcurrently` covers per-bundle load isolation. `TestBundleAnalyzerFactoryReloadLoopCancelsBlockedLoad` covers cancellation through the production reload loop. |
+| 7. Shutdown ownership | `TestSupervisorJoinsWorkerTerminalCommitOnShutdown` proves that the supervisor waits for a bounded terminal commit. `TestBundleAnalyzerFactoryReloadLoopCancelsBlockedLoad` proves that the reloader stops on cancellation. The service waits for both goroutines before `Store.Close`. |
+
+The repair did not exercise these full production compositions:
+
+- No single test restarts the complete service with a queued `builtin-rules-v1` PostgreSQL job and then runs that job through the production worker. The factory, runner, and durable pin behavior are tested separately.
+- No single test races the production `datasets activate` and `datasets prune` CLI commands across both the filesystem and PostgreSQL. Repository exclusion and PostgreSQL lifecycle serialization are tested separately.
+- No test sends a process signal to `Serve` while a real HTTP listener, a blocked reload, a worker terminal commit, and PostgreSQL are all active. The HTTP, supervisor, reload-loop, and store-lifetime boundaries are tested separately.
+- The temporary external acceptance overlay was not available for the repair run. Maintained repository tests cover its built-in pin and missing-feed cases.
+
 ## CT qualification
 
 The optional RFC 6962 collector passes synthetic tests for checkpoint signatures, initial and continued tree consistency, exact-entry inclusion, altered entry bytes, proof budgets, invalid certificates, checkpoint retention after failure, and durable ingestion resume. The shipping 256-entry synthetic benchmark completed in 3.07 ms/run, accounted for 21 requests, 84,640 response bytes, 44,800 retained-field bytes, one-hour fixture lag, and reduced the fixture backlog from 256 to zero. See `docs/ct-operations.md` for the budget and interpretation.

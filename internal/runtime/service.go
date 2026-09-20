@@ -321,14 +321,14 @@ func (f *bundleAnalyzerFactory) reloadLoop(ctx context.Context, interval time.Du
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := f.reloadDesired(); err != nil && onError != nil {
+			if err := f.reloadDesired(ctx); err != nil && ctx.Err() == nil && onError != nil {
 				onError(err)
 			}
 		}
 	}
 }
 
-func (f *bundleAnalyzerFactory) reloadDesired() error {
+func (f *bundleAnalyzerFactory) reloadDesired(ctx context.Context) error {
 	repository, err := datasets.NewRepository(f.configuration.Data.BundleDirectory, detectorBuildID)
 	if err != nil {
 		return err
@@ -343,9 +343,15 @@ func (f *bundleAnalyzerFactory) reloadDesired() error {
 		return nil
 	}
 	f.mu.Unlock()
-	analyzer, err := f.AnalyzerForBundle(context.Background(), activation.BundleID)
+	analyzer, err := f.AnalyzerForBundle(ctx, activation.BundleID)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		_ = repository.RecordLoad(activation.BundleID, "failed", err.Error())
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	f.mu.Lock()
