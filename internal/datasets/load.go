@@ -356,6 +356,9 @@ func loadCloudRanges(ctx context.Context, root string) ([]Source, []Artifact, []
 	slices.Sort(primaryFiles)
 	usedCompanions := make(map[string]struct{})
 	for _, relative := range primaryFiles {
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("load cloud ranges: %w", err)
+		}
 		fullRelative := filepath.ToSlash(filepath.Join("cloudranges", relative))
 		data, artifact, digest, err := readSource(root, fullRelative)
 		if err != nil {
@@ -379,6 +382,9 @@ func loadCloudRanges(ctx context.Context, root string) ([]Source, []Artifact, []
 		if err != nil {
 			return nil, nil, nil, nil, fmt.Errorf("load cloud ranges: %w", err)
 		}
+		if err := ctx.Err(); err != nil {
+			return nil, nil, nil, nil, fmt.Errorf("load cloud ranges: %w", err)
+		}
 		artifacts = append(artifacts, artifact)
 		associations = append(associations, result.Associations...)
 		warnings = append(warnings, result.Warnings...)
@@ -391,6 +397,9 @@ func loadCloudRanges(ctx context.Context, root string) ([]Source, []Artifact, []
 	}
 	if len(sources) == 0 {
 		sources = append(sources, Source{ID: "disposable/cloud-ip-ranges", Status: model.CoverageUnavailable, Reason: "no primary provider files"})
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("load cloud ranges: %w", err)
 	}
 	return sources, artifacts, associations, warnings, nil
 }

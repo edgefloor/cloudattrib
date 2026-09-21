@@ -2,6 +2,7 @@ package datasets
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -11,6 +12,54 @@ import (
 
 	"cloudattrib/internal/model"
 )
+
+func TestLoadCloudRangesHonorsCancellationWhileProcessingProviders(t *testing.T) {
+	tests := []struct {
+		name          string
+		cancelAfter   int
+		secondPrimary bool
+	}{
+		{name: "after first provider", cancelAfter: 5, secondPrimary: true},
+		{name: "after final provider", cancelAfter: 4},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			writeCloudRangeFile(t, directory, "a.json", `{"provider":"A","provider_id":"a","ipv4":["192.0.2.0/24"],"ipv6":[]}`)
+			if test.secondPrimary {
+				writeCloudRangeFile(t, directory, "z.json", `{"provider":`)
+			}
+
+			ctx, cancel := newCancelAfterChecksContext(test.cancelAfter)
+			defer cancel()
+			_, _, _, _, err := loadCloudRanges(ctx, directory)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("loadCloudRanges() error = %v, want context canceled", err)
+			}
+		})
+	}
+}
+
+type cancelAfterChecksContext struct {
+	context.Context
+	cancel        context.CancelFunc
+	allowedChecks int
+	checks        int
+}
+
+func newCancelAfterChecksContext(allowedChecks int) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &cancelAfterChecksContext{Context: ctx, cancel: cancel, allowedChecks: allowedChecks}, cancel
+}
+
+func (c *cancelAfterChecksContext) Err() error {
+	c.checks++
+	if c.checks > c.allowedChecks {
+		c.cancel()
+	}
+	return c.Context.Err()
+}
 
 func TestLoadSourcesJoinsCloudRangeLifecycleMetadata(t *testing.T) {
 	directory := t.TempDir()
