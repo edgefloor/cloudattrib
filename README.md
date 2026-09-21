@@ -4,6 +4,38 @@
 
 Rules and IP lookups run from local data. Domain analysis contacts the configured DNS resolver and the target website.
 
+## Measured on TypeSafe and GitLab
+
+On 2026-09-21, we measured discovery, DNS enrichment, and full analysis of resolving names. Full analysis added 42 findings for TypeSafe and 738 for GitLab.
+
+**Built-in Certificate Transparency discovery is experimental and has not yet been tested against live CT logs.** We therefore used crt.name to discover hostnames, then checked every returned name through Cloudattrib's DNS API.
+
+| Scope | Measurement | `typesafe.ai` | `gitlab.com` |
+| --- | --- | ---: | ---: |
+| All discovered names | Hostnames checked | 9 | 747 |
+| All discovered names | crt.name discovery | 10.11 s | 10.22 s |
+| All discovered names | DNS enrichment | 0.22 s | 42.48 s |
+| All discovered names | **Discovery + DNS enrichment** | **10.33 s** | **52.70 s** |
+| Resolving names | Hostnames checked | 9 | 143 |
+| Resolving names | Fresh DNS-only analysis | 0.20 s | 2.62 s |
+| Resolving names | **Full analysis** | **2.62 s** | **52.64 s** |
+| Resolving names | Evidence records, DNS → full | 94 → 137 | 2,114 → 2,933 |
+| Resolving names | Findings, DNS → full | 19 → 61 | 430 → 1,168 |
+| Resolving names | Names gaining findings | 9 | 119 |
+| Resolving names | Complete / partial reports | 9 / 0 | 128 / 15 |
+
+crt.name supplies certificate-derived names. Cloudattrib adds current DNS results and attribution evidence. Of GitLab's 747 names, 604 had no address at measurement time. Discovery + DNS totals sum separately timed stages.
+
+For resolving names, we repeated DNS checks before full analysis, which fetches each website, follows redirects, and runs HTTP rules and technology fingerprints.
+
+Added fingerprints included Next.js, Vercel, and Ruby on Rails for TypeSafe, and Google Cloud services, CloudFront, and Marketo for GitLab. Counts include repeated findings across hosts and redirects, not unique vendors.
+
+GitLab's 15 partial reports retained their DNS findings despite HTTP collection failures. Eight failed requests took about 10 seconds each, matching the configured HTTP timeout. No DNS finding disappeared in the full-analysis comparison.
+
+Both runs used the local API at `a504ec0`, resolver `192.168.50.211:53`, four concurrent analyses, the same datasets, and PostgreSQL persistence. Startup is excluded from all timings; discovery is excluded from the follow-up comparison. These are single-run network measurements, not a load test.
+
+Raw results: [discovery and DNS](docs/benchmarks/2026-09-21-company-api-measurements.json), [full-analysis comparison](docs/benchmarks/2026-09-21-subdomain-full-measurements.json).
+
 ## Run it
 
 Install Go 1.25 or later and Make, then build the binary:

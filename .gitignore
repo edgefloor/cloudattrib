@@ -10,3 +10,5 @@ coverage.html
 !.env.*.example
 /data/
 /secrets/
+/output/
+/tmp/
