@@ -26,6 +26,10 @@ The reviewed `disposable/cloud-ip-ranges` revision is `0c4c204e650a47a6f57d37098
 
 Primary discovery reads selected regular `json/*.json` files. It excludes `json/all-providers.json`, `*-details.json`, and `misc/`. Detail files use a separate validated join. A selected missing or malformed provider fails the candidate; it does not become an empty source.
 
+The upstream generator builds each base array from the current crawl. It then appends retained retired prefixes and writes their timestamps to `details_ipv4` or `details_ipv6`. If a retired prefix appears in a later crawl, the generator clears `retired_at`; the next output contains the prefix without a retirement annotation. The adapter therefore assigns `active` only after it joins all validated lifecycle records for that provider and canonical prefix.
+
+When `<provider>-details.json` exists, the adapter treats it as a companion document. The companion document cannot create an association. Its provider name and provider ID must match the primary document, and every detail prefix must match a canonical primary prefix. The bundle manifest includes both file digests. A lifecycle association records the exact timestamp, detail record reference, and digest of the file that supplied the lifecycle record.
+
 Known fields include `provider`, `provider_id`, `method`, `coverage_notes`, `generated_at`, `source_updated_at`, `source`, `last_update`, `ipv4`, `ipv6`, `source_http`, and lifecycle detail arrays. Archive unknown fields and reject invalid types for known fields.
 
 Join retirement information by provider ID and canonical prefix. The reviewed upstream README describes four weeks of retained retired ranges with `retired_at` metadata. A base-array prefix must not become active merely because it still appears in the list.

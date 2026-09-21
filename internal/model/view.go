@@ -55,22 +55,25 @@ func (v AttributionView) Capabilities() []CapabilityState {
 
 // Association is one normalized prefix or source relationship.
 type Association struct {
-	ID              string       `json:"id"`
-	Prefix          netip.Prefix `json:"prefix"`
-	ProviderID      string       `json:"provider_id"`
-	ProductID       string       `json:"product_id,omitempty"`
-	Service         string       `json:"service,omitempty"`
-	Region          string       `json:"region,omitempty"`
-	Role            string       `json:"role,omitempty"`
-	Lifecycle       string       `json:"lifecycle"`
-	LifecycleTime   string       `json:"lifecycle_time,omitempty"`
-	SourceID        string       `json:"source_id"`
-	SourceRevision  string       `json:"source_revision"`
-	SourceDigest    string       `json:"source_digest"`
-	RecordRef       string       `json:"record_ref"`
-	RecordRefs      []string     `json:"record_refs,omitempty"`
-	CoverageNotes   string       `json:"coverage_notes,omitempty"`
-	ProvenanceGroup string       `json:"provenance_group,omitempty"`
+	ID                      string       `json:"id"`
+	Prefix                  netip.Prefix `json:"prefix"`
+	ProviderID              string       `json:"provider_id"`
+	ProductID               string       `json:"product_id,omitempty"`
+	Service                 string       `json:"service,omitempty"`
+	Region                  string       `json:"region,omitempty"`
+	Role                    string       `json:"role,omitempty"`
+	Lifecycle               string       `json:"lifecycle"`
+	LifecycleTime           string       `json:"lifecycle_time,omitempty"`
+	LifecycleSourceRevision string       `json:"lifecycle_source_revision,omitempty"`
+	LifecycleSourceDigest   string       `json:"lifecycle_source_digest,omitempty"`
+	LifecycleRecordRef      string       `json:"lifecycle_record_ref,omitempty"`
+	SourceID                string       `json:"source_id"`
+	SourceRevision          string       `json:"source_revision"`
+	SourceDigest            string       `json:"source_digest"`
+	RecordRef               string       `json:"record_ref"`
+	RecordRefs              []string     `json:"record_refs,omitempty"`
+	CoverageNotes           string       `json:"coverage_notes,omitempty"`
+	ProvenanceGroup         string       `json:"provenance_group,omitempty"`
 }
 
 // ASNRecord is one local interval lookup result.

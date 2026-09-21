@@ -326,6 +326,8 @@ func loadCloudRanges(ctx context.Context, root string) ([]Source, []Artifact, []
 	var artifacts []Artifact
 	var associations []model.Association
 	var warnings []string
+	var primaryFiles []string
+	companionFiles := make(map[string]struct{})
 	err := filepath.WalkDir(base, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -341,26 +343,51 @@ func loadCloudRanges(ctx context.Context, root string) ([]Source, []Artifact, []
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("cloud range source %s is a symlink", relative)
 		}
-		if !cloudranges.PrimaryFile(relative) {
-			return nil
+		if cloudranges.PrimaryFile(relative) {
+			primaryFiles = append(primaryFiles, relative)
+		} else if strings.HasPrefix(relative, "json/") && strings.HasSuffix(relative, "-details.json") {
+			companionFiles[relative] = struct{}{}
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, nil, nil, nil, fmt.Errorf("load cloud ranges: %w", err)
+	}
+	slices.Sort(primaryFiles)
+	usedCompanions := make(map[string]struct{})
+	for _, relative := range primaryFiles {
 		fullRelative := filepath.ToSlash(filepath.Join("cloudranges", relative))
 		data, artifact, digest, err := readSource(root, fullRelative)
 		if err != nil {
-			return err
+			return nil, nil, nil, nil, fmt.Errorf("load cloud ranges: %w", err)
 		}
-		result, err := cloudranges.Parse(data, cloudranges.Input{Revision: digest, Digest: digest, Path: relative})
+		input := cloudranges.Input{Revision: digest, Digest: digest, Path: relative}
+		companionRelative := strings.TrimSuffix(relative, ".json") + "-details.json"
+		if _, ok := companionFiles[companionRelative]; ok {
+			fullCompanionRelative := filepath.ToSlash(filepath.Join("cloudranges", companionRelative))
+			companionData, companionArtifact, companionDigest, err := readSource(root, fullCompanionRelative)
+			if err != nil {
+				return nil, nil, nil, nil, fmt.Errorf("load cloud ranges: %w", err)
+			}
+			input.Companion = &cloudranges.CompanionInput{
+				Data: companionData, Revision: companionDigest, Digest: companionDigest, Path: companionRelative,
+			}
+			artifacts = append(artifacts, companionArtifact)
+			usedCompanions[companionRelative] = struct{}{}
+		}
+		result, err := cloudranges.Parse(data, input)
 		if err != nil {
-			return err
+			return nil, nil, nil, nil, fmt.Errorf("load cloud ranges: %w", err)
 		}
 		artifacts = append(artifacts, artifact)
 		associations = append(associations, result.Associations...)
 		warnings = append(warnings, result.Warnings...)
 		sources = append(sources, Source{ID: "disposable/cloud-ip-ranges/" + result.ProviderID, Revision: digest, Digest: digest, Status: model.CoverageComplete, Records: len(result.Associations)})
-		return nil
-	})
-	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("load cloud ranges: %w", err)
+	}
+	for relative := range companionFiles {
+		if _, ok := usedCompanions[relative]; !ok {
+			return nil, nil, nil, nil, fmt.Errorf("load cloud ranges: companion source %s has no primary provider file", relative)
+		}
 	}
 	if len(sources) == 0 {
 		sources = append(sources, Source{ID: "disposable/cloud-ip-ranges", Status: model.CoverageUnavailable, Reason: "no primary provider files"})

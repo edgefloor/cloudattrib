@@ -96,6 +96,7 @@ Populate `data/sources` with supported files:
 - `cdncheck-sources-data.json`
 - `iptoasn-v4.tsv` and `iptoasn-v6.tsv`
 - primary provider JSON files below `cloudranges/json/`
+- matching `cloudranges/json/*-details.json` companion files when the pinned revision contains them
 
 ASN files must be decompressed TSV with ordered, non-overlapping intervals. IPv4 endpoints are unsigned integers; IPv6 endpoints are textual addresses. See [source contracts](source-contracts.md) for all fields and source identities.
 

@@ -44,28 +44,34 @@ The selected source snapshot imported successfully from local files with no requ
 
 | Source | Pinned identity |
 | --- | --- |
-| AWS `ip-ranges.json` | SHA-256 `3b8580168cd1491fb1e7f923e2e5912a925bc2e27184aa84755527055021783b` |
-| GCP `cloud.json` | SHA-256 `bf9379d98f683174f29d0bb7d9ad085d8119b899d1a357482b705f2629d080b2` |
+| AWS `ip-ranges.json` | SHA-256 `ec40e8424dfaa4c100d4ccfdbf7c3734173470b84c1c6989777c55732d5e0727` |
+| GCP `cloud.json` | SHA-256 `bc7272fa666331e694df9edf8fa52ae335a8aa055c41a5f6d802afec09a9c8ff` |
 | Azure public service tags | `ServiceTags_Public_20260914.json`, SHA-256 `238141eec0d82ed23402be7107c5d23ed9377fb6b085b24b28254b5c7487805f` |
 | `cdncheck` source data | commit `a06260a272dc92cec0747f2f369b697088899bc7`, SHA-256 `64641dd6d6af84c8d240a5860fe7cf05cad6d7634f8892bf007cbadb8c2670a5` |
-| IPtoASN IPv4 | SHA-256 `6eadf717cb621270e4a9a5c9b17ea0752b0533379721d800232f349496fc27ed` |
+| IPtoASN IPv4 | SHA-256 `b8f6f3563d0220fc750c891553831d04c3dd2a267afde80bca156712145cb301` |
 | IPtoASN IPv6 | SHA-256 `74b2a2847fc8bff14175d5d704dfe7027400ef6f7168519c5c095fbb80d8bac6` |
-| `cloud-ip-ranges` | commit `0c4c204e650a47a6f57d3709893a9dc96f942ed9`, 91 provider JSON files |
+| `cloud-ip-ranges` | commit `0c4c204e650a47a6f57d3709893a9dc96f942ed9`, 76 primary and 15 companion JSON files |
 
-The compiled bundle ID was `bundle-sha256-1a5900754842dc811a6d24fffcc74a989482c312d903717e67fd780dd60fc3f3`.
+The lifecycle-corrected compiled bundle ID was `bundle-sha256-171a615d38fd8d07caf345f9b38192b504431a9d9060745202084147020b3115`. The isolated candidate validation hash was `sha256:20558d3778bd25cf509900f545daf59077f1f2635a9836a6d3ca2cbb0c17153c`.
 
 | Record type | Count |
 | --- | ---: |
-| Prefix associations | 685,784, all active in this snapshot |
+| Prefix associations | 685,784 |
+| Active prefix associations | 666,531 |
+| Retired prefix associations | 19,253 |
 | Service associations | 685,784 |
 | Region associations | 65,565 |
 | Role or method associations | 115,670 |
-| ASN intervals | 720,051 |
+| ASN intervals | 719,860 |
 | CDN suffixes | 103 |
 
 The importer reported 80 Azure records with empty `systemService` fields. It retained those records with their service-tag names and warnings, without inventing a more specific product.
 
-The full import took 3.70 seconds and reached 1,421,426,688 bytes of resident memory in the test process. Allow at least 2 GiB for an import of this source mix. Measure your own inputs before setting a memory limit.
+The broad source archive had SHA-256 `d2fa69b92b8a4ff7be1296179df98ecc511cb82496aea434cee1690dd9897a09`. The broad source contributed 449,320 associations across 76 providers. The lifecycle reconciliation checked every provider and canonical prefix against the source records. It found 430,067 active and 19,253 retired broad associations. Each retired association retained the source timestamp, the lifecycle record reference, and the digest of the primary or companion file that supplied the record. The check also confirmed that `103.204.128.0/23` is retired for `a2hosting`, absent from normal lookup for that association, and present with `include_retired`. Other overlapping providers remain independent associations.
+
+The pinned companion files contain service and region fields but no additional `retired_at` records. The adapter archives those fields with the source artifact but does not normalize them as official service-range evidence. AWS, GCP, and Azure service and region claims continue to come from their official adapters.
+
+The lifecycle-corrected full import took 4.26 seconds. The lifecycle reconciliation took 5.49 seconds and checked all 449,320 broad associations. This run did not measure peak resident memory. A prior full import reached 1,421,426,688 bytes, so allow at least 2 GiB and measure the current inputs before setting a memory limit.
 
 ## Local latency
 
