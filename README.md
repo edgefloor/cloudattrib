@@ -106,12 +106,25 @@ flowchart TB
 
 ## Add local data
 
-Put source files in `data/sources`, or set `data.source_directory` in the configuration file. For ASN lookups, add these files:
+Put source files in `data/sources`, or set `data.source_directory` in the configuration file. You can load any supported subset. Missing sources produce partial coverage instead of an empty successful lookup.
 
 ```text
-data/sources/iptoasn-v4.tsv
-data/sources/iptoasn-v6.tsv
+data/sources/
+├── cloudranges/
+│   └── json/
+│       ├── <provider>.json
+│       └── <provider>-details.json
+├── aws-ip-ranges.json
+├── gcp-cloud.json
+├── azure-service-tags.json
+├── cdncheck-sources-data.json
+├── iptoasn-v4.tsv
+└── iptoasn-v6.tsv
 ```
+
+Keep each `disposable/cloud-ip-ranges` primary file and its optional `*-details.json` companion from the same pinned revision. Primary files create provider associations. Companion files only add validated metadata to matching provider prefixes, so the importer never treats them as duplicate providers.
+
+The broad feed retains recently retired prefixes. The importer joins `retired_at` records by provider and canonical prefix, and normal analysis and IP lookup exclude those associations. An API lookup with `include_retired: true` returns them with their retirement time and source provenance. Historical matches do not claim current ownership.
 
 See the [source contracts](docs/source-contracts.md) for the supported files and formats. See the [operations guide](docs/operations.md#import-and-activate-data) to import and activate a data bundle.
 
