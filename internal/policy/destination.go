@@ -48,6 +48,14 @@ func (DestinationPolicy) Check(address netip.Addr, port uint16) Decision {
 		decision.Reason = ReasonPort
 		return decision
 	}
+	if wellKnownNAT64Prefix.Contains(address) {
+		embedded := address.As16()
+		ipv4 := netip.AddrFrom4([4]byte(embedded[12:]))
+		if embeddedDecision := (DestinationPolicy{}).Check(ipv4, port); !embeddedDecision.Allowed {
+			decision.Reason = embeddedDecision.Reason
+			return decision
+		}
+	}
 	switch {
 	case address.IsLoopback():
 		decision.Reason = ReasonLoopback
@@ -63,6 +71,8 @@ func (DestinationPolicy) Check(address netip.Addr, port uint16) Decision {
 		decision.Reason = ReasonDocumentation
 	case inPrefixes(address, benchmarkPrefixes):
 		decision.Reason = ReasonBenchmark
+	case inPrefixes(address, globallyReachableSpecialPurposePrefixes):
+		decision.Allowed = true
 	case !address.IsGlobalUnicast() || inPrefixes(address, specialUsePrefixes):
 		decision.Reason = ReasonSpecialUse
 	default:
@@ -76,6 +86,7 @@ var documentationPrefixes = mustPrefixes(
 	"198.51.100.0/24",
 	"203.0.113.0/24",
 	"2001:db8::/32",
+	"3fff::/20",
 )
 
 var benchmarkPrefixes = mustPrefixes(
@@ -87,10 +98,33 @@ var specialUsePrefixes = mustPrefixes(
 	"0.0.0.0/8",
 	"100.64.0.0/10",
 	"192.0.0.0/24",
+	"192.88.99.0/24",
 	"240.0.0.0/4",
+	"64:ff9b:1::/48",
 	"100::/64",
+	"100:0:0:1::/64",
+	"2001::/23",
 	"2001:10::/28",
+	"2002::/16",
+	"5f00::/16",
 )
+
+// These entries are the globally reachable exceptions inside broader special-
+// purpose allocations in the IANA registries updated 2025-10-09. Keep this
+// list in sync with the pinned registry cases in destination_test.go.
+var globallyReachableSpecialPurposePrefixes = mustPrefixes(
+	"192.0.0.9/32",
+	"192.0.0.10/32",
+	"2001:1::1/128",
+	"2001:1::2/128",
+	"2001:1::3/128",
+	"2001:3::/32",
+	"2001:4:112::/48",
+	"2001:20::/28",
+	"2001:30::/28",
+)
+
+var wellKnownNAT64Prefix = netip.MustParsePrefix("64:ff9b::/96")
 
 func mustPrefixes(values ...string) []netip.Prefix {
 	prefixes := make([]netip.Prefix, 0, len(values))

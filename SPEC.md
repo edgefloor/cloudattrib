@@ -249,7 +249,7 @@ For every connection and redirect:
 
 Never connect to a prohibited address or let the transport perform a different resolution after validation. Approve each retry or alternate-address attempt independently.
 
-The default policy rejects loopback, private, link-local, unspecified, multicast, documentation, benchmark, and other non-public destinations. This includes IPv4-mapped forms and cloud metadata addresses.
+The default policy rejects loopback, private, link-local, unspecified, multicast, documentation, benchmark, and other non-public destinations. This includes IPv4-mapped forms and cloud metadata addresses. The policy pins the IANA IPv4 and IPv6 special-purpose registry classifications dated 2025-10-09. More-specific entries that IANA marks globally reachable remain eligible. The well-known NAT64 prefix is eligible only when its embedded IPv4 address passes the same policy; the local-use translation prefix, Teredo, 6to4, dummy, and SRv6 SID ranges are prohibited.
 
 For mixed answers, remove prohibited connection candidates but retain their observations and policy reasons. Continue with approved addresses. A failed AAAA query must not block an approved public IPv4 address.
 

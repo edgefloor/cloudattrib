@@ -27,7 +27,7 @@ The Compose networks separate three kinds of traffic:
 | `collector` | Application to the resolver and public targets. |
 | `update` | Optional updater; no access to the database network. |
 
-The updater reads operator-populated local files. Apply host or platform firewall rules for any additional destination or port restrictions.
+The updater reads operator-populated local files. Enforce an independent egress boundary with host, platform, or network firewall rules. Collector traffic needs the configured resolver plus TCP ports 80 and 443 to public destinations. It does not need private, link-local, documentation, benchmark, or other non-public ranges. Treat the application's address policy as a second check, not as a replacement for network egress controls.
 
 Metrics do not use domains or IPs as labels. Logs contain operation and error classes and omit target values by default. Treat stored reports as retained captures, even after sanitization.
 

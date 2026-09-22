@@ -243,6 +243,31 @@ func TestRedirectToOnlyProhibitedAddressesIsNotDialed(t *testing.T) {
 	}
 }
 
+func TestSpecialPurposeIPv6DestinationsAreNotDialed(t *testing.T) {
+	t.Parallel()
+
+	addresses := []string{
+		"3fff::1",
+		"100:0:0:1::1",
+		"64:ff9b:1::a00:1",
+		"5f00::1",
+	}
+	for _, value := range addresses {
+		address := netip.MustParseAddr(value)
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			dialer := &mappedDialer{destinations: map[netip.Addr]string{}}
+			collector := New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20)
+			if _, err := collector.Collect(context.Background(), "http", "example.com", address); err == nil {
+				t.Fatal("Collect() succeeded for prohibited address")
+			}
+			if got := dialer.Addresses(); len(got) != 0 {
+				t.Fatalf("dial addresses = %v, want none", got)
+			}
+		})
+	}
+}
+
 func TestHTTPSUsesTargetHostnameForSNIWhenDialingApprovedAddress(t *testing.T) {
 	t.Parallel()
 
