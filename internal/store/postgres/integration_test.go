@@ -381,13 +381,45 @@ func TestPostgresActivationGenerationIsIdempotentAndResolvesLostAcknowledgement(
 	proposed := datasets.Activation{
 		OperationID: "activation-fixture", BundleID: "fixture-bundle", CandidateHash: manifestDigestForTest(manifest), Action: "activate",
 	}
-	store.transactionHooks = &transactionHooks{afterActivationCommit: func() error {
-		store.transactionHooks.afterActivationCommit = nil
-		return errors.New("lost commit acknowledgement")
-	}}
+	var activationBackendPID int32
+	connectionInterrupted := false
+	store.transactionHooks = &transactionHooks{
+		beforeActivationCommit: func(tx pgx.Tx) {
+			if err := tx.QueryRow(ctx, `SELECT pg_backend_pid()`).Scan(&activationBackendPID); err != nil {
+				t.Fatalf("read activation backend PID: %v", err)
+			}
+		},
+		afterActivationCommit: func() error {
+			store.transactionHooks.afterActivationCommit = nil
+			admin, err := pgx.Connect(ctx, os.Getenv("CLOUDATTRIB_POSTGRES_TEST_DSN"))
+			if err != nil {
+				return fmt.Errorf("open interruption connection: %w", err)
+			}
+			defer func() { _ = admin.Close(ctx) }()
+			var terminated bool
+			if err := admin.QueryRow(ctx, `SELECT pg_terminate_backend($1)`, activationBackendPID).Scan(&terminated); err != nil {
+				return fmt.Errorf("terminate activation connection: %w", err)
+			}
+			if !terminated {
+				return errors.New("activation connection was not terminated")
+			}
+			interruptionErr := store.pool.Ping(ctx)
+			if interruptionErr == nil {
+				return errors.New("terminated activation connection remained usable")
+			}
+			connectionInterrupted = true
+			if err := store.pool.Ping(ctx); err != nil {
+				return fmt.Errorf("restore PostgreSQL pool after interruption: %w", err)
+			}
+			return interruptionErr
+		},
+	}
 	committed, err := store.CommitBundleActivation(ctx, proposed, manifest, true)
 	if err != nil {
 		t.Fatalf("CommitBundleActivation() error = %v", err)
+	}
+	if !connectionInterrupted {
+		t.Fatal("activation commit did not exercise an actual PostgreSQL connection interruption")
 	}
 	if committed.Generation < 1 || committed.At.IsZero() {
 		t.Fatalf("committed activation = %#v", committed)

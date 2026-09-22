@@ -35,9 +35,10 @@ type Store struct {
 }
 
 type transactionHooks struct {
-	beforeLifecycleLock   func(string)
-	afterLifecycleLock    func(string)
-	afterActivationCommit func() error
+	beforeLifecycleLock    func(string)
+	afterLifecycleLock     func(string)
+	beforeActivationCommit func(pgx.Tx)
+	afterActivationCommit  func() error
 }
 
 type workRequest struct {
@@ -194,6 +195,9 @@ func (s *Store) CommitBundleActivation(ctx context.Context, activation datasets.
 			return model.NewError(model.CodeIdempotencyConflict, "activation operation ID was used for different content", nil)
 		}
 		committed = loaded
+		if s.transactionHooks != nil && s.transactionHooks.beforeActivationCommit != nil {
+			s.transactionHooks.beforeActivationCommit(tx)
+		}
 		return nil
 	})
 	if err == nil && s.transactionHooks != nil && s.transactionHooks.afterActivationCommit != nil {
