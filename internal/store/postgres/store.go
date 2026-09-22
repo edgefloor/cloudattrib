@@ -302,13 +302,11 @@ func (s *Store) Job(ctx context.Context, id string) (jobs.Job, error) {
 		return jobs.Job{}, persistence("load job targets", err)
 	}
 	defer rows.Close()
-	reportIDs := make([]string, 0)
 	for rows.Next() {
 		var target jobs.Target
 		var requestJSON []byte
 		var leaseExpires, nextAttempt *time.Time
-		var reportID string
-		if err := rows.Scan(&target.ID, &target.Index, &requestJSON, &target.Status, &target.Attempts, &target.LeaseOwner, &leaseExpires, &nextAttempt, &target.TerminalReason, &reportID); err != nil {
+		if err := rows.Scan(&target.ID, &target.Index, &requestJSON, &target.Status, &target.Attempts, &target.LeaseOwner, &leaseExpires, &nextAttempt, &target.TerminalReason, &target.ReportID); err != nil {
 			return jobs.Job{}, persistence("scan job target", err)
 		}
 		if err := decodeWorkRequest(requestJSON, &target.Request, &target.Reclassify); err != nil {
@@ -320,22 +318,12 @@ func (s *Store) Job(ctx context.Context, id string) (jobs.Job, error) {
 		if nextAttempt != nil {
 			target.NextAttemptAt = *nextAttempt
 		}
+		target.ReportAvailable = target.ReportID != ""
 		job.Targets = append(job.Targets, target)
-		reportIDs = append(reportIDs, reportID)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return jobs.Job{}, persistence("iterate job targets", err)
-	}
-	for index, reportID := range reportIDs {
-		if reportID == "" {
-			continue
-		}
-		report, loadErr := s.LoadReport(ctx, reportID)
-		if loadErr != nil {
-			return jobs.Job{}, loadErr
-		}
-		job.Targets[index].Report, job.Targets[index].ReportAvailable = report, true
 	}
 	return job, nil
 }

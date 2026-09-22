@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -393,6 +394,40 @@ func TestReclassifyValidatesRetainedInputAndBundle(t *testing.T) {
 	missingReport := serve(handler, http.MethodPost, "/v1/results/report-1/reclassify", `{"bundle_id":"bundle-1","idempotency_key":"replay-2"}`, "127.0.0.1:1000", nil)
 	if missingReport.Code != http.StatusUnprocessableEntity || decodeError(t, missingReport).Code != model.CodeInvalidTarget {
 		t.Fatalf("missing report response = %d %s", missingReport.Code, missingReport.Body.String())
+	}
+}
+
+func TestJobResponseUsesReportIdentityWithoutReadingDocument(t *testing.T) {
+	t.Parallel()
+
+	job := jobs.Job{ID: "job-1", Targets: []jobs.Target{
+		{ID: "target-1", Index: 0, Status: jobs.TargetCompleted, ReportID: "report-1"},
+		{ID: "target-2", Index: 1, Status: jobs.TargetCompleted, Report: model.Report{ID: "report-must-not-be-read"}},
+	}}
+	response := newJobResponse(job)
+	if got := response.Targets[0].ResultURL; got != "/v1/results/report-1" {
+		t.Fatalf("result URL = %q, want report identity link", got)
+	}
+	if got := response.Targets[1].ResultURL; got != "" {
+		t.Fatalf("result URL = %q, want no link from report document", got)
+	}
+}
+
+func TestJobResponseAllocationsDoNotScaleWithReportDocuments(t *testing.T) {
+	const targetCount = 1000
+	small := jobs.Job{ID: "job-small", Targets: make([]jobs.Target, targetCount)}
+	large := jobs.Job{ID: "job-large", Targets: make([]jobs.Target, targetCount)}
+	payload := make([]byte, 256<<10)
+	for index := range targetCount {
+		reportID := fmt.Sprintf("report-%d", index)
+		small.Targets[index] = jobs.Target{ID: fmt.Sprintf("target-%d", index), Index: index, Status: jobs.TargetCompleted, ReportID: reportID}
+		large.Targets[index] = small.Targets[index]
+		large.Targets[index].Report = model.Report{ID: reportID, Observations: []model.Observation{{ID: "large", Payload: payload}}}
+	}
+	smallAllocs := testing.AllocsPerRun(5, func() { _ = newJobResponse(small) })
+	largeAllocs := testing.AllocsPerRun(5, func() { _ = newJobResponse(large) })
+	if largeAllocs > smallAllocs+1 {
+		t.Fatalf("allocations grew with report documents: small=%v large=%v", smallAllocs, largeAllocs)
 	}
 }
 

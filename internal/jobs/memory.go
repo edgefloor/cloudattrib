@@ -221,6 +221,7 @@ func (s *MemoryStore) Complete(ctx context.Context, targetID, token string, repo
 	target.LeaseExpiresAt = time.Time{}
 	if report.ID != "" {
 		target.Report = report.Clone()
+		target.ReportID = report.ID
 		target.ReportAvailable = true
 	}
 	s.reservations--

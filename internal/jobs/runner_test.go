@@ -27,7 +27,7 @@ func TestRunnerUsesPinnedBundleAndCommitsTerminalReport(t *testing.T) {
 		t.Fatalf("factory bundle = %q", factory.bundleID)
 	}
 	loaded, err := store.Job(context.Background(), job.ID)
-	if err != nil || loaded.Status != JobCompleted || loaded.Targets[0].Report.ID != "report" {
+	if err != nil || loaded.Status != JobCompleted || loaded.Targets[0].ReportID != "report" {
 		t.Fatalf("Job() = %#v, %v", loaded, err)
 	}
 }
@@ -50,7 +50,7 @@ func TestRunnerExecutesPinnedReclassification(t *testing.T) {
 		t.Fatalf("RunOnce() error = %v", err)
 	}
 	loaded, err := store.Job(context.Background(), job.ID)
-	if err != nil || !called || loaded.Status != JobCompleted || loaded.Targets[0].Report.OriginalReportID != "report-1" {
+	if err != nil || !called || loaded.Status != JobCompleted || loaded.Targets[0].ReportID != "reclassified" || loaded.Targets[0].Report.OriginalReportID != "report-1" {
 		t.Fatalf("Job() = %#v, called=%v, %v", loaded, called, err)
 	}
 }

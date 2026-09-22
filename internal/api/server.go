@@ -412,8 +412,8 @@ func newJobResponse(job jobs.Job) jobResponse {
 	}
 	for _, target := range job.Targets {
 		item := jobTargetResponse{ID: target.ID, InputIndex: target.Index, Status: target.Status, Attempts: target.Attempts, TerminalReason: target.TerminalReason}
-		if target.ReportAvailable {
-			item.ResultURL = "/v1/results/" + target.Report.ID
+		if target.ReportID != "" {
+			item.ResultURL = "/v1/results/" + target.ReportID
 		}
 		response.Counts[target.Status]++
 		response.Targets = append(response.Targets, item)

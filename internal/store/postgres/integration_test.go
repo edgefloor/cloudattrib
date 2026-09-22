@@ -2,16 +2,78 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"cloudattrib/internal/app"
 	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 )
+
+func TestPostgresJobProjectionKeepsReportDocumentsOutOfPolling(t *testing.T) {
+	dsn := os.Getenv("CLOUDATTRIB_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("CLOUDATTRIB_POSTGRES_TEST_DSN is not set")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	store, err := Open(ctx, dsn, 1000)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(store.Close)
+	if _, err := store.pool.Exec(ctx, `TRUNCATE ct_records,ct_checkpoints,finding_evidence,findings,evidence,observations,job_targets,reports,bundle_pins,jobs,dataset_bundles RESTART IDENTITY CASCADE; UPDATE queue_capacity SET reserved_targets=0,maximum_targets=1000 WHERE singleton=true`); err != nil {
+		t.Fatalf("reset database: %v", err)
+	}
+	report := model.Report{
+		SchemaVersion: model.SchemaVersion,
+		ID:            "projection-report",
+		Target:        model.Target{Original: "example.com", Canonical: "example.com", Kind: model.TargetDomain},
+		Status:        model.StatusComplete,
+		ClassifiedAt:  time.Unix(1, 0).UTC(),
+	}
+	if err := store.SaveReport(ctx, report); err != nil {
+		t.Fatalf("SaveReport() error = %v", err)
+	}
+	if _, err := store.pool.Exec(ctx, `INSERT INTO jobs(id,operator_id,idempotency_key,payload_hash,status,created_at,updated_at) VALUES('projection-job','operator','projection-key','hash','completed',clock_timestamp(),clock_timestamp())`); err != nil {
+		t.Fatalf("insert job: %v", err)
+	}
+	batch := &pgx.Batch{}
+	for index := range 1000 {
+		request, marshalErr := json.Marshal(workRequest{Analyze: &model.AnalyzeRequest{Target: fmt.Sprintf("target-%04d.example.com", index), Kind: model.TargetDomain}})
+		if marshalErr != nil {
+			t.Fatalf("encode request: %v", marshalErr)
+		}
+		batch.Queue(`INSERT INTO job_targets(id,job_id,input_index,request,status,attempts,report_id) VALUES($1,'projection-job',$2,$3,'completed',1,'projection-report')`, fmt.Sprintf("projection-target-%04d", index), index, request)
+	}
+	results := store.pool.SendBatch(ctx, batch)
+	if err := results.Close(); err != nil {
+		t.Fatalf("insert targets: %v", err)
+	}
+	loaded, err := store.Job(ctx, "projection-job")
+	if err != nil {
+		t.Fatalf("Job() error = %v", err)
+	}
+	if len(loaded.Targets) != 1000 {
+		t.Fatalf("target count = %d", len(loaded.Targets))
+	}
+	for index, target := range loaded.Targets {
+		if target.Index != index || target.ReportID != report.ID || target.Report.ID != "" || !target.ReportAvailable || target.Attempts != 1 {
+			t.Fatalf("target[%d] = %#v", index, target)
+		}
+	}
+	loadedReport, err := store.LoadReport(ctx, report.ID)
+	if err != nil || loadedReport.ID != report.ID {
+		t.Fatalf("LoadReport() = %#v, %v", loadedReport, err)
+	}
+}
 
 func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	dsn := os.Getenv("CLOUDATTRIB_POSTGRES_TEST_DSN")
@@ -157,8 +219,12 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 		t.Fatalf("ContentID() after JSONB round trip = %q, want %q", roundTripID, identityReport.ID)
 	}
 	loaded, err := store.Job(ctx, job.ID)
-	if err != nil || loaded.Status != jobs.JobCompleted || !loaded.Targets[0].ReportAvailable {
+	if err != nil || loaded.Status != jobs.JobCompleted || !loaded.Targets[0].ReportAvailable || loaded.Targets[0].ReportID != report.ID || loaded.Targets[0].Report.ID != "" {
 		t.Fatalf("Job() = %#v, %v", loaded, err)
+	}
+	loadedReport, err := store.LoadReport(ctx, loaded.Targets[0].ReportID)
+	if err != nil || loadedReport.ID != report.ID {
+		t.Fatalf("LoadReport() = %#v, %v", loadedReport, err)
 	}
 	page, err := store.Findings(ctx, app.FindingQuery{Domain: "example.com", ProviderID: "aws", Limit: 1})
 	if err != nil || len(page.Items) != 1 || page.Items[0].Finding.ID != "finding-1" {
@@ -190,8 +256,12 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 		t.Fatalf("Complete(reclassification) error = %v", err)
 	}
 	replayLoaded, err := store.Job(ctx, replayJob.ID)
-	if err != nil || replayLoaded.Status != jobs.JobCompleted || replayLoaded.Targets[0].Report.OriginalReportID != report.ID {
+	if err != nil || replayLoaded.Status != jobs.JobCompleted || replayLoaded.Targets[0].ReportID != reclassified.ID || replayLoaded.Targets[0].Report.ID != "" {
 		t.Fatalf("Job(reclassification) = %#v, %v", replayLoaded, err)
+	}
+	replayReport, err := store.LoadReport(ctx, replayLoaded.Targets[0].ReportID)
+	if err != nil || replayReport.OriginalReportID != report.ID {
+		t.Fatalf("LoadReport(reclassification) = %#v, %v", replayReport, err)
 	}
 
 	cancelJob, err := store.Submit(ctx, jobs.SubmitRequest{OperatorID: "operator-a", IdempotencyKey: "cancel-key", BundleID: "fixture-bundle", Targets: []model.AnalyzeRequest{{Target: "one.example.com", Kind: model.TargetDomain}, {Target: "two.example.com", Kind: model.TargetDomain}}})

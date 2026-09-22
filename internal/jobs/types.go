@@ -69,6 +69,7 @@ type Target struct {
 	LeaseExpiresAt  time.Time                `json:"lease_expires_at,omitempty"`
 	NextAttemptAt   time.Time                `json:"next_attempt_at,omitempty"`
 	TerminalReason  string                   `json:"terminal_reason,omitempty"`
+	ReportID        string                   `json:"report_id,omitempty"`
 	Report          model.Report             `json:"report,omitempty"`
 	ReportAvailable bool                     `json:"report_available"`
 }
