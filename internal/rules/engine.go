@@ -376,6 +376,8 @@ func spfIncludes(value, expected string) bool {
 	}
 	expected = strings.ToLower(strings.TrimSuffix(expected, "."))
 	matched := false
+	seenRedirect := false
+	seenExplanation := false
 	for _, term := range fields[1:] {
 		if term == "" {
 			continue
@@ -390,17 +392,27 @@ func spfIncludes(value, expected string) bool {
 				return false
 			}
 		}
-		if strings.Contains(term, "=") {
+		separator := strings.IndexAny(term, ":/")
+		assignment := strings.IndexByte(term, '=')
+		if assignment >= 0 && (separator < 0 || assignment < separator) {
 			name, argument, _ := strings.Cut(term, "=")
 			if hasQualifier || !validSPFName(name) || argument == "" {
 				return false
 			}
-			if (name == "redirect" || name == "exp") && !validSPFDomainSpec(argument) {
-				return false
+			switch name {
+			case "redirect":
+				if seenRedirect || !validSPFDomainSpec(argument) {
+					return false
+				}
+				seenRedirect = true
+			case "exp":
+				if seenExplanation || !validSPFDomainSpec(argument) {
+					return false
+				}
+				seenExplanation = true
 			}
 			continue
 		}
-		separator := strings.IndexAny(term, ":/")
 		mechanism, suffix, hasSuffix := term, "", separator >= 0
 		if hasSuffix {
 			mechanism, suffix = term[:separator], term[separator:]
