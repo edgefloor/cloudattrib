@@ -475,11 +475,14 @@ func validSPFPtr(suffix string, hasSuffix bool) bool {
 }
 
 func validSPFDualCIDR(value string) bool {
-	parts := strings.Split(value, "/")
-	if len(parts) < 1 || len(parts) > 2 || !validSPFCIDRLength(parts[0], 32) {
+	if strings.HasPrefix(value, "/") {
+		return validSPFCIDRLength(value[1:], 128)
+	}
+	ipv4, ipv6, hasIPv6 := strings.Cut(value, "//")
+	if !validSPFCIDRLength(ipv4, 32) {
 		return false
 	}
-	return len(parts) == 1 || validSPFCIDRLength(parts[1], 128)
+	return !hasIPv6 || validSPFCIDRLength(ipv6, 128)
 }
 
 func validSPFIP(value string, ipv4 bool) bool {
