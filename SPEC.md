@@ -157,7 +157,7 @@ Normalize DNS names to lowercase IDNA ASCII, preserve the original input, and re
 
 Parse IPs with `netip.ParseAddr`. Unmap IPv4-mapped IPv6 addresses for lookup, reject zone identifiers, and distinguish invalid input from a valid address with no matches. An `ip` request does not cause DNS, HTTP, or certificate requests.
 
-For `url`, accept HTTP and HTTPS only. Fetch the supplied path and query, without a fragment, under the HTTP policy. Do not retain query values in routine logs. DNS collection uses its hostname. URL input must not become permission to crawl other links.
+For `url`, accept query-free HTTP and HTTPS URLs only. Reject a caller-supplied query before collection, job hashing, or durable persistence; do not silently strip it and analyze a different resource. This release has no restricted secret-storage path for retryable URL queries. Redirect targets may contain a query selected by the remote server, but routine observations redact its value. DNS collection uses the URL hostname. URL input must not become permission to crawl other links.
 
 ### 3.2 Seed selection
 

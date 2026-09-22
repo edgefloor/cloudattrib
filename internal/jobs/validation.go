@@ -17,6 +17,17 @@ func ValidateAnalyzeRequest(request model.AnalyzeRequest) error {
 	return nil
 }
 
+// ValidatePersistentAnalyzeRequests rejects a batch before hashing or storage
+// when an execution input is not safe for ordinary durable records.
+func ValidatePersistentAnalyzeRequests(requests []model.AnalyzeRequest) error {
+	for _, request := range requests {
+		if err := target.ValidatePersistentInput(request); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ValidationReason is the stable terminal reason stored for an invalid batch row.
 func ValidationReason(err error) string {
 	if err == nil {

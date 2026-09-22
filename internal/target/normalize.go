@@ -37,6 +37,9 @@ func NormalizeWithSeedLimit(req model.AnalyzeRequest, seedLimit int) (model.Norm
 	if !utf8.ValidString(req.Target) || containsControl(req.Target) {
 		return model.NormalizedRequest{}, invalidTarget("target contains invalid text")
 	}
+	if err := ValidatePersistentInput(req); err != nil {
+		return model.NormalizedRequest{}, err
+	}
 	mode := req.Mode
 	if mode == "" {
 		if req.Kind == model.TargetIP {
@@ -121,6 +124,16 @@ func NormalizeWithSeedLimit(req model.AnalyzeRequest, seedLimit int) (model.Norm
 		return model.NormalizedRequest{}, invalidOptions(fmt.Sprintf("seed hostname limit exceeds %d", seedLimit))
 	}
 	return result, nil
+}
+
+// ValidatePersistentInput rejects inputs whose execution form cannot be stored
+// safely in ordinary job and report records. Query-bearing URLs are not accepted;
+// callers must submit a query-free URL.
+func ValidatePersistentInput(req model.AnalyzeRequest) error {
+	if strings.Contains(req.Target, "?") {
+		return invalidTarget("URL query values are not accepted")
+	}
+	return nil
 }
 
 func normalizeDomain(input string) (string, error) {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -134,6 +135,27 @@ func TestPostgresConcurrentIdempotentAdmission(t *testing.T) {
 	conflict.Targets = []model.AnalyzeRequest{{Target: "other.example.com", Kind: model.TargetDomain}}
 	if _, err := store.Submit(ctx, conflict); model.ErrorCodeOf(err) != model.CodeIdempotencyConflict {
 		t.Fatalf("conflicting Submit() error = %v, want idempotency conflict", err)
+	}
+}
+
+func TestPostgresRejectsQueryBearingURLBeforePersistence(t *testing.T) {
+	store, ctx := openPostgresTest(t, 1)
+	_, err := store.Submit(ctx, jobs.SubmitRequest{
+		OperatorID: "operator-a", IdempotencyKey: "query-secret",
+		Targets: []model.AnalyzeRequest{{Target: "https://example.com/path?token=QUERY_CANARY", Kind: model.TargetURL}},
+	})
+	if model.ErrorCodeOf(err) != model.CodeInvalidTarget {
+		t.Fatalf("Submit() error = %v, want invalid_target", err)
+	}
+	if strings.Contains(err.Error(), "QUERY_CANARY") {
+		t.Fatalf("Submit() error exposed query value: %v", err)
+	}
+	var jobsFound, targets int
+	if err := store.pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM jobs), (SELECT count(*) FROM job_targets)`).Scan(&jobsFound, &targets); err != nil {
+		t.Fatalf("inspect rejected request persistence: %v", err)
+	}
+	if jobsFound != 0 || targets != 0 {
+		t.Fatalf("rejected request persisted jobs=%d targets=%d", jobsFound, targets)
 	}
 }
 

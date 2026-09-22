@@ -51,6 +51,8 @@ Domain analysis needs a recursive DNS resolver. The default address is `127.0.0.
 CLOUDATTRIB_RESOLVER=192.168.1.1:53 ./bin/cloudattrib analyze example.com
 ```
 
+URL targets must be query-free. Cloudattrib rejects caller-supplied query values before collection or durable job storage because this release has no restricted credential-storage path for retryable URL queries.
+
 The command writes JSON to stdout. A shortened report looks like this:
 
 ```json

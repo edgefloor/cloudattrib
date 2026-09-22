@@ -202,6 +202,26 @@ func TestJobsPersistInvalidRowsAsTerminalFailures(t *testing.T) {
 	}
 }
 
+func TestJobsRejectQueryValuesWithoutEchoingOrRetainingThem(t *testing.T) {
+	t.Parallel()
+
+	store := jobs.NewMemoryStore(1)
+	handler := mustHandler(t, Config{Jobs: store})
+	recorder := serve(handler, http.MethodPost, "/v1/jobs", `{"idempotency_key":"query-secret","targets":[{"target":"https://example.com/path?token=QUERY_CANARY","kind":"url"}]}`, "127.0.0.1:1000", nil)
+	if recorder.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusUnprocessableEntity, recorder.Body.String())
+	}
+	if got := decodeError(t, recorder); got.Code != model.CodeInvalidTarget {
+		t.Fatalf("error = %#v, want invalid_target", got)
+	}
+	if strings.Contains(recorder.Body.String(), "QUERY_CANARY") {
+		t.Fatalf("response exposed query value: %s", recorder.Body.String())
+	}
+	if store.Reservations() != 0 {
+		t.Fatalf("rejected request reservations = %d", store.Reservations())
+	}
+}
+
 func TestJobsRejectOversizedBatchBeforeStoreAdmission(t *testing.T) {
 	t.Parallel()
 

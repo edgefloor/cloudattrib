@@ -58,6 +58,25 @@ func TestInvalidRowsAreTerminalWithoutReservations(t *testing.T) {
 	}
 }
 
+func TestQueryBearingURLIsRejectedBeforeJobRetention(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryStore(1)
+	_, err := store.Submit(t.Context(), SubmitRequest{
+		OperatorID: "operator", IdempotencyKey: "query-secret",
+		Targets: []model.AnalyzeRequest{{Target: "https://example.com/path?token=QUERY_CANARY", Kind: model.TargetDomain}},
+	})
+	if model.ErrorCodeOf(err) != model.CodeInvalidTarget {
+		t.Fatalf("Submit() error = %v, want invalid_target", err)
+	}
+	if strings.Contains(err.Error(), "QUERY_CANARY") {
+		t.Fatalf("Submit() error exposed query value: %v", err)
+	}
+	if len(store.jobs) != 0 || len(store.idempotency) != 0 || store.Reservations() != 0 {
+		t.Fatalf("rejected request was retained: jobs=%d idempotency=%d reservations=%d", len(store.jobs), len(store.idempotency), store.Reservations())
+	}
+}
+
 func TestAttemptTokenRejectsStaleCompletionAndPinReleasesAtAllTerminal(t *testing.T) {
 	t.Parallel()
 

@@ -1,6 +1,7 @@
 package target
 
 import (
+	"strings"
 	"testing"
 
 	"cloudattrib/internal/model"
@@ -46,11 +47,12 @@ func TestNormalize(t *testing.T) {
 		},
 		{
 			name:      "bracketed URL IPv6",
-			req:       model.AnalyzeRequest{Target: "https://[2001:db8::1]/a?q=1", Kind: model.TargetURL},
+			req:       model.AnalyzeRequest{Target: "https://[2001:db8::1]/a", Kind: model.TargetURL},
 			wantKind:  model.TargetURL,
-			wantValue: "https://[2001:db8::1]/a?q=1",
+			wantValue: "https://[2001:db8::1]/a",
 			wantSeeds: []string{"2001:db8::1"},
 		},
+		{name: "query values", req: model.AnalyzeRequest{Target: "https://example.com/path?token=QUERY_CANARY", Kind: model.TargetURL}, wantErr: true},
 		{name: "userinfo", req: model.AnalyzeRequest{Target: "https://user@example.com", Kind: model.TargetURL}, wantErr: true},
 		{name: "fragment", req: model.AnalyzeRequest{Target: "https://example.com/#secret", Kind: model.TargetURL}, wantErr: true},
 		{name: "unsupported scheme", req: model.AnalyzeRequest{Target: "ftp://example.com/", Kind: model.TargetURL}, wantErr: true},
@@ -101,6 +103,18 @@ func TestNormalize(t *testing.T) {
 				t.Fatalf("Normalize() seeds = %v, want %v", got.SeedHostnames, tt.wantSeeds)
 			}
 		})
+	}
+}
+
+func TestNormalizeQueryErrorDoesNotExposeValue(t *testing.T) {
+	t.Parallel()
+
+	_, err := Normalize(model.AnalyzeRequest{Target: "https://example.com/path?token=QUERY_CANARY", Kind: model.TargetURL})
+	if model.ErrorCodeOf(err) != model.CodeInvalidTarget {
+		t.Fatalf("Normalize() error = %v, want invalid_target", err)
+	}
+	if strings.Contains(err.Error(), "QUERY_CANARY") {
+		t.Fatalf("Normalize() error exposed query value: %v", err)
 	}
 }
 

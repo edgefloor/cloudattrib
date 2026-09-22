@@ -49,6 +49,9 @@ func (s *MemoryStore) Submit(ctx context.Context, request SubmitRequest) (Job, e
 	if request.OperatorID == "" || request.IdempotencyKey == "" || request.WorkCount() == 0 {
 		return Job{}, model.NewError(model.CodeInvalidOptions, "operator, idempotency key, and targets are required", nil)
 	}
+	if err := ValidatePersistentAnalyzeRequests(request.Targets); err != nil {
+		return Job{}, err
+	}
 	payloadHash, err := hashRequest(request)
 	if err != nil {
 		return Job{}, fmt.Errorf("hash job request: %w", err)

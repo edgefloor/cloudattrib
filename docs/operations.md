@@ -31,6 +31,8 @@ The updater reads operator-populated local files. Enforce an independent egress 
 
 Metrics do not use domains or IPs as labels. Logs contain operation and error classes and omit target values by default. Treat stored reports as retained captures, even after sanitization.
 
+Caller-supplied URL queries are rejected before collection and before ordinary job or report persistence. Submit a query-free URL; the service does not strip the query and analyze a different resource, and it has no secret-storage path for retryable query credentials. Installations that accepted URL queries with an earlier release may already have values in report documents or `job_targets.request`. Assess those historical records under the operator's retention policy; this release does not rewrite or delete them.
+
 ## Compose installation
 
 Use Docker Engine with Compose v2. The pinned Unbound image needs an `amd64` runtime or emulation. See the [SBOM](../sbom/cloudattrib.cdx.json) for image and module identities.

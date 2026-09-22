@@ -172,6 +172,9 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 	if request.OperatorID == "" || request.IdempotencyKey == "" || request.WorkCount() == 0 {
 		return jobs.Job{}, model.NewError(model.CodeInvalidOptions, "operator, idempotency key, and targets are required", nil)
 	}
+	if err := jobs.ValidatePersistentAnalyzeRequests(request.Targets); err != nil {
+		return jobs.Job{}, err
+	}
 	hash, err := payloadHash(request)
 	if err != nil {
 		return jobs.Job{}, fmt.Errorf("hash job payload: %w", err)
