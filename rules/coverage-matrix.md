@@ -1,6 +1,6 @@
 # Rule coverage matrix
 
-Reviewed on 2026-09-20. [builtin.json](../internal/rules/builtin.json) contains the rules. [engine_test.go](../internal/rules/engine_test.go) contains their fixtures.
+Reviewed on 2026-09-22. [builtin.json](../internal/rules/builtin.json) contains the rules. [engine_test.go](../internal/rules/engine_test.go) contains their fixtures.
 
 Each row names the input that matches, the emitted relationship, and the limit of that match.
 
@@ -29,11 +29,11 @@ Each row names the input that matches, the emitted relationship, and the limit o
 | Amazon Route 53 | Constrained Route 53 nameserver shape | `authoritative_dns` | `ns-123.awsdns-45.net` | AWS web delivery and SPF records do not establish the DNS operator. | [Hosted-zone nameservers](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/GetInfoAboutHostedZone.html) |
 | Azure DNS | Constrained Azure DNS nameserver shape | `authoritative_dns` | `ns1-01.azure-dns.com` | An Azure-hosted website does not establish its DNS operator. | [Delegate a domain to Azure DNS](https://learn.microsoft.com/en-us/azure/dns/dns-delegate-domain-azure-dns) |
 | Cloudflare DNS | Nameserver below `ns.cloudflare.com` | `authoritative_dns` | `ada.ns.cloudflare.com` | Nameserver evidence does not imply reverse proxying. | [Nameserver assignment](https://developers.cloudflare.com/dns/zone-setups/reference/nameserver-assignment/) |
-| Google-hosted mail | Documented Google MX exchange | `mail_routing` | `aspmx.l.google.com` | Only the MX pattern emits `mail_routing`; verification and SPF rules emit other relations. | [Google Workspace MX](https://support.google.com/a/answer/174125) |
+| Google-hosted mail | Documented current or supported legacy Google MX exchange | `mail_routing` | `smtp.google.com`, `aspmx.l.google.com` | Exact current and legacy MX values match. Lookalikes and unrelated Google hosts do not. | [Google Workspace MX](https://knowledge.workspace.google.com/admin/domains/set-up-mx-records-for-google-workspace) |
 | Microsoft-hosted mail | MX below `mail.protection.outlook.com` | `mail_routing` | `tenant.mail.protection.outlook.com` | Only the MX pattern emits `mail_routing`; verification and SPF rules emit other relations. | [Microsoft 365 DNS records](https://learn.microsoft.com/en-us/microsoft-365/admin/dns/create-dns-records-at-any-dns-hosting-provider) |
 | Proofpoint | Gateway MX below `ppe-hosted.com` | `mail_routing` | `mx1-us1.ppe-hosted.com` | The mailbox backend behind the gateway remains unknown. | [Proofpoint inbound routing](https://help.proofpoint.com/Proofpoint_Essentials/Email_Security/Administrator_Topics/hostedemailservices/Configuring_Inbound_Delivery_Routing) |
 | Mimecast | Gateway MX below `mimecast.com` | `mail_routing` | `us-smtp-inbound-1.mimecast.com` | The mailbox backend behind the gateway remains unknown. | [Mimecast MX setup](https://mimecastsupport.zendesk.com/hc/en-us/articles/34000558291219) |
-| Google and Microsoft SPF | Parsed exact `include:` mechanisms | `sending_authorization` | `_spf.google.com`, `spf.protection.outlook.com` | Substrings, unrelated TXT, and MX-only signals do not match. | [Google SPF](https://support.google.com/a/answer/10685032), [Microsoft SPF](https://learn.microsoft.com/en-us/defender-office-365/email-authentication-spf-configure) |
+| Google and Microsoft SPF | Reachable positive exact `include:` mechanisms | `sending_authorization` | `_spf.google.com`, `spf.protection.outlook.com` | Negative, neutral, softfail, malformed, post-`all`, substring, unrelated TXT, and MX-only signals do not match. This is passive configuration evidence, not sender-specific SPF evaluation. | [Google SPF](https://support.google.com/a/answer/10685032), [Microsoft SPF](https://learn.microsoft.com/en-us/defender-office-365/email-authentication-spf-configure) |
 
 ## Other associations
 

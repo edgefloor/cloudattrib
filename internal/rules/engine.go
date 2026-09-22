@@ -335,6 +335,10 @@ func (r Rule) matchValue(value string) bool {
 
 func (r Rule) evidence(observation model.Observation, matchedField string) model.Evidence {
 	sum := sha256.Sum256([]byte(r.ID + "\x00" + observation.ID))
+	explanation := "reviewed rule matched " + matchedField
+	if r.Match.SPFInclude != "" {
+		explanation = "SPF record contains a reachable positive include for " + r.Match.SPFInclude + "; sender-specific authorization was not evaluated"
+	}
 	return model.Evidence{
 		ID:             "evidence-rule-" + hex.EncodeToString(sum[:12]),
 		ObservationIDs: []string{observation.ID},
@@ -348,7 +352,7 @@ func (r Rule) evidence(observation model.Observation, matchedField string) model
 		Strength:       r.Emit.Strength,
 		Activity:       r.Emit.Activity,
 		Scope:          observation.Scope,
-		Explanation:    "reviewed rule matched " + matchedField,
+		Explanation:    explanation,
 	}
 }
 
@@ -369,13 +373,75 @@ func spfIncludes(value, expected string) bool {
 		return false
 	}
 	expected = strings.ToLower(strings.TrimSuffix(expected, "."))
-	for _, field := range fields[1:] {
-		field = strings.TrimLeft(field, "+-~?")
-		if strings.HasPrefix(field, "include:") && strings.TrimSuffix(strings.TrimPrefix(field, "include:"), ".") == expected {
-			return true
+	matched := false
+	for _, term := range fields[1:] {
+		if term == "" {
+			continue
+		}
+		qualifier := byte('+')
+		hasQualifier := false
+		if isSPFQualifier(term[0]) {
+			hasQualifier = true
+			qualifier = term[0]
+			term = term[1:]
+			if term == "" || isSPFQualifier(term[0]) {
+				return false
+			}
+		}
+		if strings.Contains(term, "=") {
+			name, argument, _ := strings.Cut(term, "=")
+			if hasQualifier || !validSPFName(name) || argument == "" {
+				return false
+			}
+			continue
+		}
+		separator := strings.IndexAny(term, ":/")
+		mechanism := term
+		if separator >= 0 {
+			mechanism = term[:separator]
+		}
+		switch mechanism {
+		case "all":
+			if separator >= 0 {
+				return false
+			}
+			return matched
+		case "include":
+			if separator < 0 || term[separator] != ':' || separator == len(term)-1 {
+				return false
+			}
+			domain := strings.TrimSuffix(term[separator+1:], ".")
+			if qualifier == '+' && domain == expected {
+				matched = true
+			}
+		case "a", "mx", "ptr":
+			// These mechanisms do not affect passive include detection.
+		case "ip4", "ip6", "exists":
+			if separator < 0 || term[separator] != ':' || separator == len(term)-1 {
+				return false
+			}
+		default:
+			return false
 		}
 	}
-	return false
+	return matched
+}
+
+func isSPFQualifier(value byte) bool {
+	return value == '+' || value == '-' || value == '~' || value == '?'
+}
+
+func validSPFName(value string) bool {
+	if value == "" || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range value[1:] {
+		if character >= 'a' && character <= 'z' || character >= '0' && character <= '9' || strings.ContainsRune("-_.", character) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func scopeAllows(relation model.Relation, scope model.Scope) bool {

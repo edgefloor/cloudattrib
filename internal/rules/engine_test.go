@@ -3,6 +3,7 @@ package rules
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"cloudattrib/internal/model"
@@ -103,6 +104,96 @@ func TestDefaultRulesRejectUnsupportedConclusions(t *testing.T) {
 				if item.ProductID == tt.forbidden {
 					t.Fatalf("unexpected evidence = %#v", item)
 				}
+			}
+		})
+	}
+}
+
+func TestSPFIncludeRequiresReachablePositiveMechanism(t *testing.T) {
+	t.Parallel()
+
+	engine, err := Default()
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+	tests := []struct {
+		name  string
+		value string
+		match bool
+	}{
+		{name: "implicit positive", value: "v=spf1 include:_spf.google.com -all", match: true},
+		{name: "explicit positive", value: "v=spf1 +include:_spf.google.com -all", match: true},
+		{name: "case and terminal dot", value: "V=SPF1 +INCLUDE:_SPF.GOOGLE.COM. -ALL", match: true},
+		{name: "negative", value: "v=spf1 -include:_spf.google.com -all"},
+		{name: "neutral", value: "v=spf1 ?include:_spf.google.com -all"},
+		{name: "softfail", value: "v=spf1 ~include:_spf.google.com -all"},
+		{name: "repeated qualifier", value: "v=spf1 --include:_spf.google.com -all"},
+		{name: "other repeated qualifier", value: "v=spf1 +~include:_spf.google.com -all"},
+		{name: "missing domain", value: "v=spf1 include: -all"},
+		{name: "unknown mechanism invalidates record", value: "v=spf1 madeup:x include:_spf.google.com -all"},
+		{name: "empty modifier invalidates record", value: "v=spf1 include:_spf.google.com redirect="},
+		{name: "qualified modifier is invalid", value: "v=spf1 include:_spf.google.com +redirect=example.com"},
+		{name: "lookalike domain", value: "v=spf1 include:_spf.google.com.evil.example -all"},
+		{name: "after negative all", value: "v=spf1 -all include:_spf.google.com"},
+		{name: "after positive all", value: "v=spf1 +all include:_spf.google.com"},
+		{name: "malformed after all is unreachable", value: "v=spf1 -all --include:_spf.google.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			evidence, _ := engine.Detect(context.Background(), []model.Observation{
+				dnsObservation("TXT", tt.value, model.ScopeRoot),
+			}, model.AttributionView{})
+			got := hasEvidence(evidence, "google", "google.workspace-mail", model.RelationSendingAuthorization)
+			if got != tt.match {
+				t.Fatalf("sending authorization match = %t, want %t; evidence = %#v", got, tt.match, evidence)
+			}
+			if tt.match {
+				for _, item := range evidence {
+					if item.ProductID != "google.workspace-mail" || item.Relation != model.RelationSendingAuthorization {
+						continue
+					}
+					if item.Activity != model.ActivityConfigured || len(item.ObservationIDs) != 1 || item.ObservationIDs[0] != "TXT-observation" {
+						t.Fatalf("SPF evidence contract = %#v", item)
+					}
+					if !strings.Contains(item.Explanation, "sender-specific authorization was not evaluated") {
+						t.Fatalf("SPF explanation = %q", item.Explanation)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestGoogleWorkspaceMXCurrentAndLegacyValues(t *testing.T) {
+	t.Parallel()
+
+	engine, err := Default()
+	if err != nil {
+		t.Fatalf("Default() error = %v", err)
+	}
+	tests := []struct {
+		name  string
+		value string
+		match bool
+	}{
+		{name: "current", value: "1 smtp.google.com", match: true},
+		{name: "current case and terminal dot", value: "1 SMTP.GOOGLE.COM.", match: true},
+		{name: "legacy apex", value: "1 aspmx.l.google.com", match: true},
+		{name: "legacy alternate", value: "5 alt4.aspmx.l.google.com.", match: true},
+		{name: "current lookalike", value: "1 smtp.google.com.evil.example"},
+		{name: "missing boundary", value: "1 notsmtp.google.com"},
+		{name: "unrelated Google host", value: "1 mail.google.com"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			evidence, _ := engine.Detect(context.Background(), []model.Observation{
+				dnsObservation("MX", tt.value, model.ScopeRoot),
+			}, model.AttributionView{})
+			got := hasEvidence(evidence, "google", "google.workspace-mail", model.RelationMailRouting)
+			if got != tt.match {
+				t.Fatalf("mail routing match = %t, want %t; evidence = %#v", got, tt.match, evidence)
 			}
 		})
 	}
