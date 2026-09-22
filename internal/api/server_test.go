@@ -248,7 +248,8 @@ func TestMetricsExposeBoundedOperationalStateAndAdmissionRejections(t *testing.T
 		Jobs: store,
 		Metrics: fixtureMetricsProvider{snapshot: observability.Snapshot{
 			ReservedTargets: 1, MaximumTargets: 10, QueuedTargets: 1, RunningTargets: 2,
-			BundlePins: 3, CTCheckpoints: 4, CTIngestionLagSeconds: 5.25, UnavailableSources: 2, OldestSourceAgeSeconds: 86400, ActiveBundleID: "bundle-fixture",
+			BundlePins: 3, ResidentGenerations: 4, EstimatedRetainedBytes: 12345,
+			CTCheckpoints: 4, CTIngestionLagSeconds: 5.25, UnavailableSources: 2, OldestSourceAgeSeconds: 86400, ActiveBundleID: "bundle-fixture",
 		}},
 	})
 	first := serve(handler, http.MethodPost, "/v1/jobs", `{"idempotency_key":"first","targets":[{"target":"example.com","kind":"domain"}]}`, "127.0.0.1:1000", nil)
@@ -267,6 +268,8 @@ func TestMetricsExposeBoundedOperationalStateAndAdmissionRejections(t *testing.T
 		"cloudattrib_queue_queued_targets 1",
 		"cloudattrib_queue_running_targets 2",
 		"cloudattrib_bundle_pins 3",
+		"cloudattrib_bundle_resident_generations 4",
+		"cloudattrib_bundle_estimated_retained_bytes 12345",
 		"cloudattrib_ct_checkpoints 4",
 		"cloudattrib_ct_ingestion_lag_seconds 5.250",
 		"cloudattrib_dataset_unavailable_sources 2",

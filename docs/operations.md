@@ -82,7 +82,7 @@ All routes require the bearer token, including health and metrics.
 | --- | --- |
 | `/livez` | Is the process alive? |
 | `/readyz` | Which operations are ready, degraded, or unavailable? |
-| `/metrics` | Requests, admission rejections, queue capacity, targets, pins, bundle identity, source availability and age, and CT lag. |
+| `/metrics` | Requests, admission rejections, queue capacity, targets, pins, resident generations, estimated retained bytes, bundle identity, source availability and age, and CT lag. |
 
 A PostgreSQL outage disables durable operations while local lookup may remain usable. A 200 readiness response means at least one operation can run; inspect the operation you need. Before loading datasets, expect enrichment coverage to be unavailable or partial.
 
@@ -203,6 +203,16 @@ Start with the limits in [config/example.yaml](../config/example.yaml). The serv
 The `limits.target` settings apply to one admitted target execution except `http_destination_interval`, which is process-wide because every loaded generation shares one execution controller. Duration values use Go duration syntax. HTTP body byte values count decoded bytes. `http_response_headers` caps the headers that the transport accepts. `target_deadline` starts after target admission, but a shorter caller deadline also applies during the wait. `http_destination_interval` sets the minimum time between request starts to the same approved IP address and port; the default `100ms` is at most ten starts per second. `redirects: 0` collects the first HTTP response and does not follow its redirect. The other target limits must be positive.
 
 The `concurrent_targets`, `concurrent_http`, and `concurrent_dns` settings apply to the service process. Per-target HTTP and DNS concurrency remains bounded at 4 and 8. `maximum_backlog_targets` is a separate database-wide bound for all nonterminal reservations, including retries.
+
+### Control bundle residency
+
+Set `limits.maximum_resident_generations` to the maximum number of active, captured, or unused bundle analyzers that the service can retain. The default is 4. The minimum is 2 because activation loads a replacement before it releases last-known-good protection.
+
+The limit also reserves capacity for generation loads that have started but have not finished. If active or in-flight work consumes every slot, a worker waits with its claim context and continues to renew its lease. Cancellation removes the waiter without creating a resident analyzer.
+
+`cloudattrib_bundle_resident_generations` reports completed analyzers in the runtime cache. `cloudattrib_bundle_estimated_retained_bytes` sums the source artifact sizes from their bundle manifests. This deterministic estimate covers generation-owned input data. It is not a heap or RSS measurement, and compiled indexes can use more memory than their source files.
+
+`cloudattrib_bundle_pins` is independent of both residency gauges. Durable pins keep bundle files available on disk for nonterminal jobs. Queued pins do not keep analyzers in memory.
 
 Monitor queue use, CT lag, database size, and free space in the bundle volume before increasing concurrency. Reports accumulate until deleted. The [measured full-source import](qualification.md#full-upstream-compatibility) used about 1.42 GB of memory; allow at least 2 GiB for that source mix and measure yours.
 

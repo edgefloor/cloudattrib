@@ -824,6 +824,8 @@ Record the `wappalyzergo` engine, embedded fingerprint digest, rule digest, and 
 7. Commit a complete compatible activation generation in PostgreSQL. Each generation has a durable operation ID.
 8. Leave old views alive while in-flight jobs reference them. Keep on-disk bundles protected by durable batch pins, including queued targets and pending retries. Reclaim only after all applicable protections are released.
 
+Runtime analyzer residency is separate from durable pinning. Configuration sets a hard resident-generation capacity of at least two. Completed residents and in-progress generation loads consume this capacity. The runtime protects the committed active generation and every captured in-flight generation. If no unused generation can be evicted, acquisition waits with caller cancellation. Concurrent acquisitions of one unloaded generation share one load. A queued durable pin protects bundle files but does not keep its analyzer resident.
+
 In service mode, PostgreSQL is the authority for the desired generation. After the database commits, the updater reconciles the filesystem pointer as derived state. The service polls the committed generation, verifies the matching immutable candidate away from request handling, and then swaps its in-memory view. Loading must not depend on a target request.
 
 Standalone analysis remains database-independent. It can use the local repository pointer, but service processes never treat that pointer alone as a committed activation.
@@ -919,6 +921,8 @@ Expose request/job counts and latency, queue depth, active workers, DNS outcomes
 Do not use domain names, IPs, arbitrary URLs, rule values, or report IDs as metric labels. Structured logs carry request/attempt IDs, capability, error class, and duration. Sensitive target logging is opt-in and redacted.
 
 Health uses section 14.2's operation states and capability reasons. Expose reserved backlog capacity, admission rejections, durable bundle-pin counts, and CT ingestion lag alongside the existing metrics. PostgreSQL failure blocks durable job acceptance while usable local lookup can remain available; source degradation must be visible without hiding useful operations.
+
+Expose the number of completed resident generations and their estimated retained bytes. Estimate retained bytes from generation-owned source artifacts, and document that the estimate is not whole-process heap or RSS.
 
 ## 15. Testing, evaluation, and deployment
 

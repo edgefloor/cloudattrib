@@ -66,3 +66,13 @@ func TestCheckedInExampleLoads(t *testing.T) {
 		t.Fatalf("Load(example.yaml) = %#v", configuration)
 	}
 }
+
+func TestValidateRequiresCapacityForActiveAndReplacementGenerations(t *testing.T) {
+	t.Parallel()
+
+	configuration := Default()
+	configuration.Limits.MaximumResidentGenerations = 1
+	if err := configuration.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want resident generation capacity error")
+	}
+}

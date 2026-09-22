@@ -90,6 +90,14 @@ func newAnalyzerDetails(ctx context.Context, configuration config.Config, store 
 }
 
 func newAnalyzerDetailsWithController(ctx context.Context, configuration config.Config, store app.ResultStore, controller *policy.Controller) (app.Analyzer, string, []byte, lookupAvailability, error) {
+	return newAnalyzerDetailsWithResources(ctx, configuration, store, controller, nil)
+}
+
+// newAnalyzerDetailsWithResources builds a generation around process-owned,
+// immutable detector resources when supplied. The web detector only reads its
+// compiled embedded fingerprints after construction, so service generations
+// may share it safely.
+func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.Config, store app.ResultStore, controller *policy.Controller, sharedWebDetector app.WebDetector) (app.Analyzer, string, []byte, lookupAvailability, error) {
 	if err := configuration.Validate(); err != nil {
 		return nil, "", nil, lookupAvailability{}, fmt.Errorf("validate configuration: %w", err)
 	}
@@ -127,9 +135,12 @@ func newAnalyzerDetailsWithController(ctx context.Context, configuration config.
 		var dialer net.Dialer
 		return dialer.DialContext(ctx, network, net.JoinHostPort(address.String(), fmt.Sprint(port)))
 	}
-	webDetector, err := webtech.New()
-	if err != nil {
-		return nil, "", nil, lookupAvailability{}, fmt.Errorf("create passive web detector: %w", err)
+	webDetector := sharedWebDetector
+	if webDetector == nil {
+		webDetector, err = webtech.New()
+		if err != nil {
+			return nil, "", nil, lookupAvailability{}, fmt.Errorf("create passive web detector: %w", err)
+		}
 	}
 	bundleID := builtinBundleID
 	manifest := []byte(`{"schema_version":1,"bundle_id":"builtin-rules-v1"}`)
@@ -229,6 +240,10 @@ func newAnalyzerDetailsForBundle(ctx context.Context, configuration config.Confi
 }
 
 func newAnalyzerDetailsForBundleWithController(ctx context.Context, configuration config.Config, store app.ResultStore, bundleID string, controller *policy.Controller) (app.Analyzer, string, []byte, lookupAvailability, error) {
+	return newAnalyzerDetailsForBundleWithResources(ctx, configuration, store, bundleID, controller, nil)
+}
+
+func newAnalyzerDetailsForBundleWithResources(ctx context.Context, configuration config.Config, store app.ResultStore, bundleID string, controller *policy.Controller, sharedWebDetector app.WebDetector) (app.Analyzer, string, []byte, lookupAvailability, error) {
 	if bundleID == builtinBundleID {
 		configuration.Data.SourceDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", builtinBundleID, "absent")
 		configuration.Data.BundleDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", builtinBundleID)
@@ -239,5 +254,5 @@ func newAnalyzerDetailsForBundleWithController(ctx context.Context, configuratio
 		configuration.Data.SourceDirectory = filepath.Join(configuration.Data.BundleDirectory, "candidates", bundleID, "sources")
 		configuration.Data.BundleDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", bundleID)
 	}
-	return newAnalyzerDetailsWithController(ctx, configuration, store, controller)
+	return newAnalyzerDetailsWithResources(ctx, configuration, store, controller, sharedWebDetector)
 }

@@ -9,7 +9,10 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -17,8 +20,212 @@ import (
 	"cloudattrib/internal/app"
 	"cloudattrib/internal/config"
 	"cloudattrib/internal/datasets"
+	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/observability"
 )
+
+func TestBundleAnalyzerFactoryBoundsResidencyAndEvictsUnusedLRU(t *testing.T) {
+	t.Parallel()
+
+	var loads sync.Map
+	factory := newFixtureBundleAnalyzerFactory(2, "active", 10, func(_ context.Context, bundleID string) (app.Analyzer, lookupAvailability, int64, error) {
+		counter, _ := loads.LoadOrStore(bundleID, new(atomic.Int64))
+		counter.(*atomic.Int64).Add(1)
+		return runtimeFixtureAnalyzer{bundleID: bundleID}, lookupAvailability{}, 20, nil
+	})
+
+	for _, bundleID := range []string{"bundle-a", "bundle-b", "bundle-c"} {
+		captured, err := factory.CaptureAnalyzer(t.Context(), bundleID)
+		if err != nil {
+			t.Fatalf("CaptureAnalyzer(%q) error = %v", bundleID, err)
+		}
+		captured.Release()
+	}
+	resident, estimated := factory.residencySnapshot()
+	if resident != 2 || estimated != 30 {
+		t.Fatalf("residencySnapshot() = %d, %d, want 2, 30", resident, estimated)
+	}
+	captured, err := factory.CaptureAnalyzer(t.Context(), "bundle-a")
+	if err != nil {
+		t.Fatalf("CaptureAnalyzer(evicted) error = %v", err)
+	}
+	captured.Release()
+	value, _ := loads.Load("bundle-a")
+	if value.(*atomic.Int64).Load() != 2 {
+		t.Fatalf("bundle-a load count = %d, want 2", value.(*atomic.Int64).Load())
+	}
+}
+
+func TestBundleAnalyzerFactoryProtectsCapturedGenerationAndCancelsCapacityWait(t *testing.T) {
+	t.Parallel()
+
+	var loads atomic.Int64
+	factory := newFixtureBundleAnalyzerFactory(2, "active", 10, func(_ context.Context, bundleID string) (app.Analyzer, lookupAvailability, int64, error) {
+		loads.Add(1)
+		return runtimeFixtureAnalyzer{bundleID: bundleID}, lookupAvailability{}, 20, nil
+	})
+	captured, err := factory.CaptureAnalyzer(t.Context(), "captured")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitCtx, cancel := context.WithCancel(t.Context())
+	waitDone := make(chan error, 1)
+	go func() {
+		_, acquireErr := factory.CaptureAnalyzer(waitCtx, "waiting")
+		waitDone <- acquireErr
+	}()
+	deadline := time.Now().Add(time.Second)
+	for factory.capacityWaiterCount() != 1 && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	if factory.capacityWaiterCount() != 1 {
+		t.Fatal("acquisition did not wait for resident capacity")
+	}
+	cancel()
+	if err := <-waitDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled CaptureAnalyzer() error = %v", err)
+	}
+	if factory.capacityWaiterCount() != 0 {
+		t.Fatalf("capacity waiters after cancellation = %d, want 0", factory.capacityWaiterCount())
+	}
+	if loads.Load() != 1 {
+		t.Fatalf("load count after cancelled capacity wait = %d, want 1", loads.Load())
+	}
+	resident, _ := factory.residencySnapshot()
+	if resident != 2 {
+		t.Fatalf("resident generations while captured = %d, want 2", resident)
+	}
+	captured.Release()
+	next, err := factory.CaptureAnalyzer(t.Context(), "waiting")
+	if err != nil {
+		t.Fatal(err)
+	}
+	next.Release()
+}
+
+func TestBundleAnalyzerFactorySingleflightsSameGeneration(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var loads atomic.Int64
+	factory := newFixtureBundleAnalyzerFactory(2, "active", 10, func(ctx context.Context, bundleID string) (app.Analyzer, lookupAvailability, int64, error) {
+		loads.Add(1)
+		close(started)
+		select {
+		case <-ctx.Done():
+			return nil, lookupAvailability{}, 0, ctx.Err()
+		case <-release:
+			return runtimeFixtureAnalyzer{bundleID: bundleID}, lookupAvailability{}, 20, nil
+		}
+	})
+	captures := make(chan jobs.CapturedAnalyzer, 2)
+	errors := make(chan error, 2)
+	for range 2 {
+		go func() {
+			captured, err := factory.CaptureAnalyzer(t.Context(), "shared")
+			captures <- captured
+			errors <- err
+		}()
+	}
+	<-started
+	deadline := time.Now().Add(time.Second)
+	for factory.loadWaiterCount("shared") != 1 && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	if factory.loadWaiterCount("shared") != 1 {
+		t.Fatal("concurrent acquisition did not join the pending load")
+	}
+	close(release)
+	for range 2 {
+		if err := <-errors; err != nil {
+			t.Fatal(err)
+		}
+		(<-captures).Release()
+	}
+	if loads.Load() != 1 {
+		t.Fatalf("same-generation load count = %d, want 1", loads.Load())
+	}
+}
+
+func TestBundleAnalyzerFactoryFailedLoadLeavesNoResidentGeneration(t *testing.T) {
+	t.Parallel()
+
+	factory := newFixtureBundleAnalyzerFactory(2, "active", 10, func(context.Context, string) (app.Analyzer, lookupAvailability, int64, error) {
+		return nil, lookupAvailability{}, 0, errors.New("broken bundle")
+	})
+	if _, err := factory.CaptureAnalyzer(t.Context(), "broken"); err == nil {
+		t.Fatal("CaptureAnalyzer() error = nil")
+	}
+	resident, estimated := factory.residencySnapshot()
+	if resident != 1 || estimated != 10 {
+		t.Fatalf("residencySnapshot() after failure = %d, %d", resident, estimated)
+	}
+}
+
+func TestBundleAnalyzerFactorySharesFailedLoadWithoutRetainingGeneration(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var loads atomic.Int64
+	factory := newFixtureBundleAnalyzerFactory(2, "active", 10, func(ctx context.Context, _ string) (app.Analyzer, lookupAvailability, int64, error) {
+		loads.Add(1)
+		close(started)
+		select {
+		case <-ctx.Done():
+			return nil, lookupAvailability{}, 0, ctx.Err()
+		case <-release:
+			return nil, lookupAvailability{}, 0, errors.New("broken bundle")
+		}
+	})
+	done := make(chan error, 2)
+	for range 2 {
+		go func() {
+			_, err := factory.CaptureAnalyzer(t.Context(), "broken")
+			done <- err
+		}()
+	}
+	<-started
+	deadline := time.Now().Add(time.Second)
+	for factory.loadWaiterCount("broken") != 1 && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	if factory.loadWaiterCount("broken") != 1 {
+		t.Fatal("concurrent acquisition did not join the pending failed load")
+	}
+	close(release)
+	for range 2 {
+		if err := <-done; err == nil {
+			t.Fatal("CaptureAnalyzer() error = nil")
+		}
+	}
+	if loads.Load() != 1 {
+		t.Fatalf("failed load count = %d, want 1", loads.Load())
+	}
+	resident, estimated := factory.residencySnapshot()
+	if resident != 1 || estimated != 10 {
+		t.Fatalf("residencySnapshot() after shared failure = %d, %d", resident, estimated)
+	}
+}
+
+func TestServiceMetricsAddsProcessResidencyToDurableSnapshot(t *testing.T) {
+	t.Parallel()
+
+	factory := newFixtureBundleAnalyzerFactory(2, "active", 123, nil)
+	provider := serviceMetricsProvider{
+		durable:   fixtureOperationalMetrics{snapshot: observability.Snapshot{BundlePins: 7}},
+		analyzers: factory,
+	}
+	snapshot, err := provider.OperationalMetrics(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.BundlePins != 7 || snapshot.ResidentGenerations != 1 || snapshot.EstimatedRetainedBytes != 123 {
+		t.Fatalf("OperationalMetrics() = %#v", snapshot)
+	}
+}
 
 func TestReadDSNRequiresPrivateSingleLineFile(t *testing.T) {
 	t.Parallel()
@@ -198,18 +405,11 @@ func TestBundleAnalyzerFactoryReloadsDesiredAndRetainsPinnedBundle(t *testing.T)
 	if err != nil {
 		t.Fatalf("newAnalyzerDetails() error = %v", err)
 	}
-	factory := &bundleAnalyzerFactory{
-		configuration:  configuration,
-		store:          store,
-		active:         analyzer,
-		activeBundleID: bundleID,
-		activeLookup:   lookup,
-		analyzers:      map[string]app.Analyzer{bundleID: analyzer},
-		lookup:         map[string]lookupAvailability{bundleID: lookup},
-		authority:      &fixtureActivationAuthority{desired: &firstActivation},
-		repository:     repository,
-		loaded:         firstActivation,
-	}
+	factory := newBundleAnalyzerFactory(4, analyzer, bundleID, lookup, firstActivation, 0)
+	factory.configuration = configuration
+	factory.store = store
+	factory.authority = &fixtureActivationAuthority{desired: &firstActivation}
+	factory.repository = repository
 	second, err := repository.Import(context.Background(), runtimeFixtureSources(t, "runtime-second"))
 	if err != nil {
 		t.Fatalf("Import(second) error = %v", err)
@@ -244,9 +444,11 @@ func TestBundleAnalyzerFactoryReloadsDesiredAndRetainsPinnedBundle(t *testing.T)
 	if !factory.localLookupAvailability().complete() {
 		t.Fatal("local lookup is not ready after loading an attributed bundle")
 	}
-	if _, err := factory.AnalyzerForBundle(context.Background(), first.CandidateID); err != nil {
-		t.Fatalf("AnalyzerForBundle(first) error = %v", err)
+	captured, err := factory.CaptureAnalyzer(context.Background(), first.CandidateID)
+	if err != nil {
+		t.Fatalf("CaptureAnalyzer(first) error = %v", err)
 	}
+	captured.Release()
 }
 
 func TestBundleAnalyzerFactoryFailedLoadKeepsLastKnownGood(t *testing.T) {
@@ -267,14 +469,12 @@ func TestBundleAnalyzerFactoryFailedLoadKeepsLastKnownGood(t *testing.T) {
 		t.Fatal(err)
 	}
 	previous := datasets.Activation{OperationID: "activation-previous", Generation: desired.Generation - 1, BundleID: "previous-bundle"}
-	factory := &bundleAnalyzerFactory{
-		configuration: configuration, authority: &fixtureActivationAuthority{desired: &desired}, repository: repository,
-		active: runtimeFixtureAnalyzer{bundleID: previous.BundleID}, activeBundleID: previous.BundleID, loaded: previous,
-		analyzers: map[string]app.Analyzer{previous.BundleID: runtimeFixtureAnalyzer{bundleID: previous.BundleID}},
-		lookup:    make(map[string]lookupAvailability),
-		load: func(context.Context, string) (app.Analyzer, lookupAvailability, error) {
-			return nil, lookupAvailability{}, errors.New("corrupt candidate")
-		},
+	factory := newBundleAnalyzerFactory(4, runtimeFixtureAnalyzer{bundleID: previous.BundleID}, previous.BundleID, lookupAvailability{}, previous, 0)
+	factory.configuration = configuration
+	factory.authority = &fixtureActivationAuthority{desired: &desired}
+	factory.repository = repository
+	factory.load = func(context.Context, string) (app.Analyzer, lookupAvailability, int64, error) {
+		return nil, lookupAvailability{}, 0, errors.New("corrupt candidate")
 	}
 	if err := factory.reloadDesired(t.Context()); err == nil {
 		t.Fatal("reloadDesired() error = nil, want corrupt candidate failure")
@@ -295,11 +495,16 @@ func TestBundleAnalyzerFactoryActivationDoesNotChangeInflightAttempt(t *testing.
 	release := make(chan struct{})
 	previous := blockingRuntimeAnalyzer{bundleID: "previous-bundle", started: started, release: release}
 	next := runtimeFixtureAnalyzer{bundleID: "next-bundle"}
-	factory := &bundleAnalyzerFactory{
-		active: previous, activeBundleID: previous.bundleID,
-		analyzers: map[string]app.Analyzer{previous.bundleID: previous, next.bundleID: next},
-		lookup:    make(map[string]lookupAvailability),
+	factory := newFixtureBundleAnalyzerFactory(2, previous.bundleID, 0, func(context.Context, string) (app.Analyzer, lookupAvailability, int64, error) {
+		return next, lookupAvailability{}, 0, nil
+	})
+	factory.active = previous
+	factory.residents[previous.bundleID].analyzer = previous
+	nextCapture, err := factory.CaptureAnalyzer(t.Context(), next.bundleID)
+	if err != nil {
+		t.Fatal(err)
 	}
+	nextCapture.Release()
 	reportDone := make(chan model.Report, 1)
 	go func() {
 		report, _ := factory.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com"})
@@ -309,6 +514,7 @@ func TestBundleAnalyzerFactoryActivationDoesNotChangeInflightAttempt(t *testing.
 	factory.mu.Lock()
 	factory.active = next
 	factory.activeBundleID = next.bundleID
+	factory.notifyLocked()
 	factory.mu.Unlock()
 	close(release)
 	if report := <-reportDone; report.BundleID != previous.bundleID {
@@ -351,14 +557,14 @@ func TestBundleAnalyzerFactoryReconstructsBuiltinAfterDatasetActivation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	factory := &bundleAnalyzerFactory{
-		configuration: configuration, store: store, active: active, activeBundleID: bundleID, activeLookup: lookup,
-		analyzers: map[string]app.Analyzer{bundleID: active}, lookup: map[string]lookupAvailability{bundleID: lookup},
-	}
-	builtin, err := factory.AnalyzerForBundle(t.Context(), builtinBundleID)
+	factory := newBundleAnalyzerFactory(4, active, bundleID, lookup, datasets.Activation{}, 0)
+	factory.configuration = configuration
+	factory.store = store
+	builtin, err := factory.CaptureAnalyzer(t.Context(), builtinBundleID)
 	if err != nil || builtin == nil {
-		t.Fatalf("AnalyzerForBundle(%q) = %T, %v", builtinBundleID, builtin, err)
+		t.Fatalf("CaptureAnalyzer(%q) = %T, %v", builtinBundleID, builtin, err)
 	}
+	builtin.Release()
 }
 
 func TestBundleAnalyzerFactoryLoadsDifferentBundlesConcurrently(t *testing.T) {
@@ -366,22 +572,23 @@ func TestBundleAnalyzerFactoryLoadsDifferentBundlesConcurrently(t *testing.T) {
 
 	started := make(chan string, 2)
 	release := make(chan struct{})
-	factory := &bundleAnalyzerFactory{
-		analyzers: make(map[string]app.Analyzer), lookup: make(map[string]lookupAvailability),
-		load: func(ctx context.Context, bundleID string) (app.Analyzer, lookupAvailability, error) {
+	factory := newFixtureBundleAnalyzerFactory(4, "active", 0,
+		func(ctx context.Context, bundleID string) (app.Analyzer, lookupAvailability, int64, error) {
 			started <- bundleID
 			select {
 			case <-ctx.Done():
-				return nil, lookupAvailability{}, ctx.Err()
+				return nil, lookupAvailability{}, 0, ctx.Err()
 			case <-release:
-				return runtimeFixtureAnalyzer{bundleID: bundleID}, lookupAvailability{}, nil
+				return runtimeFixtureAnalyzer{bundleID: bundleID}, lookupAvailability{}, 0, nil
 			}
-		},
-	}
+		})
 	done := make(chan error, 2)
 	for _, bundleID := range []string{"bundle-a", "bundle-b"} {
 		go func() {
-			_, err := factory.AnalyzerForBundle(t.Context(), bundleID)
+			captured, err := factory.CaptureAnalyzer(t.Context(), bundleID)
+			if captured != nil {
+				captured.Release()
+			}
 			done <- err
 		}()
 	}
@@ -424,20 +631,15 @@ func TestBundleAnalyzerFactoryReloadLoopCancelsBlockedLoad(t *testing.T) {
 	}
 	loadStarted := make(chan struct{})
 	loadStopped := make(chan struct{})
-	factory := &bundleAnalyzerFactory{
-		configuration:  configuration,
-		authority:      &fixtureActivationAuthority{desired: &desiredActivation},
-		repository:     repository,
-		active:         runtimeFixtureAnalyzer{bundleID: "previous-bundle"},
-		activeBundleID: "previous-bundle",
-		analyzers:      make(map[string]app.Analyzer),
-		lookup:         make(map[string]lookupAvailability),
-		load: func(ctx context.Context, _ string) (app.Analyzer, lookupAvailability, error) {
-			close(loadStarted)
-			<-ctx.Done()
-			close(loadStopped)
-			return nil, lookupAvailability{}, ctx.Err()
-		},
+	factory := newBundleAnalyzerFactory(4, runtimeFixtureAnalyzer{bundleID: "previous-bundle"}, "previous-bundle", lookupAvailability{}, datasets.Activation{}, 0)
+	factory.configuration = configuration
+	factory.authority = &fixtureActivationAuthority{desired: &desiredActivation}
+	factory.repository = repository
+	factory.load = func(ctx context.Context, _ string) (app.Analyzer, lookupAvailability, int64, error) {
+		close(loadStarted)
+		<-ctx.Done()
+		close(loadStopped)
+		return nil, lookupAvailability{}, 0, ctx.Err()
 	}
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -478,6 +680,27 @@ func TestBundleAnalyzerFactoryReloadLoopCancelsBlockedLoad(t *testing.T) {
 }
 
 type runtimeFixtureAnalyzer struct{ bundleID string }
+
+func newFixtureBundleAnalyzerFactory(
+	maximumResident int,
+	activeBundleID string,
+	estimatedBytes int64,
+	load func(context.Context, string) (app.Analyzer, lookupAvailability, int64, error),
+) *bundleAnalyzerFactory {
+	active := runtimeFixtureAnalyzer{bundleID: activeBundleID}
+	factory := newBundleAnalyzerFactory(maximumResident, active, activeBundleID, lookupAvailability{}, datasets.Activation{BundleID: activeBundleID}, estimatedBytes)
+	factory.load = load
+	return factory
+}
+
+type fixtureOperationalMetrics struct {
+	snapshot observability.Snapshot
+	err      error
+}
+
+func (m fixtureOperationalMetrics) OperationalMetrics(context.Context) (observability.Snapshot, error) {
+	return m.snapshot, m.err
+}
 
 type blockingRuntimeAnalyzer struct {
 	bundleID string

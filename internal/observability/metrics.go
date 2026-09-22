@@ -10,6 +10,8 @@ type Snapshot struct {
 	QueuedTargets          int64
 	RunningTargets         int64
 	BundlePins             int64
+	ResidentGenerations    int64
+	EstimatedRetainedBytes int64
 	CTCheckpoints          int64
 	CTIngestionLagSeconds  float64
 	UnavailableSources     int64

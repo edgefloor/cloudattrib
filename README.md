@@ -166,6 +166,8 @@ See the [source contracts](docs/source-contracts.md) for the supported files and
 
 Set `CLOUDATTRIB_CONFIG` to a YAML or JSON configuration file. Use `CLOUDATTRIB_RESOLVER` to override its DNS resolver. [config/example.yaml](config/example.yaml) contains every setting.
 
+Service mode keeps at most `limits.maximum_resident_generations` bundle analyzers in memory. The default is 4, and the minimum is 2 so that the service can load a replacement while it keeps the last-known-good generation available. See [bundle residency](docs/operations.md#control-bundle-residency) for the ownership and metrics contract.
+
 Certificate Transparency discovery uses a local PostgreSQL index. Follow [CT operations](docs/ct-operations.md) to import certificates or collect from a configured log.
 
 ## Documentation

@@ -30,6 +30,7 @@ limits:
   maximum_request_bytes: 1048576
   maximum_batch_targets: 1000
   maximum_backlog_targets: 10000
+  maximum_resident_generations: 4
 ct:
   enabled: false
   maximum_seed_names: 20

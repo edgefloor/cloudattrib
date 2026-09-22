@@ -10,9 +10,16 @@ import (
 	"cloudattrib/internal/model"
 )
 
+// CapturedAnalyzer keeps one immutable analyzer generation resident.
+// Analyzer remains valid until the caller calls Release exactly once.
+type CapturedAnalyzer interface {
+	Analyzer() app.Analyzer
+	Release()
+}
+
 // AnalyzerFactory captures the pinned bundle, or the active bundle for an unpinned claim.
 type AnalyzerFactory interface {
-	AnalyzerForBundle(context.Context, string) (app.Analyzer, error)
+	CaptureAnalyzer(context.Context, string) (CapturedAnalyzer, error)
 }
 
 // Runner executes one claimed target while renewing its bounded lease.
@@ -40,13 +47,24 @@ func (r Runner) RunOnce(ctx context.Context) error {
 	go r.renewLease(analysisCtx, cancel, analysisDone, renewResult, claim)
 	var report model.Report
 	var analyzeErr error
-	analyzer, captureErr := r.Factory.AnalyzerForBundle(analysisCtx, claim.BundleID)
+	captured, captureErr := r.Factory.CaptureAnalyzer(analysisCtx, claim.BundleID)
+	if captureErr == nil && captured == nil {
+		captureErr = model.NewError(model.CodeCapabilityUnavailable, "analyzer capture is unavailable", nil)
+	}
 	if captureErr == nil {
-		if claim.Reclassify != nil {
-			report, analyzeErr = analyzer.Reclassify(analysisCtx, *claim.Reclassify)
-		} else {
-			report, analyzeErr = analyzer.Analyze(analysisCtx, claim.Request)
-		}
+		func() {
+			defer captured.Release()
+			analyzer := captured.Analyzer()
+			if analyzer == nil {
+				analyzeErr = model.NewError(model.CodeCapabilityUnavailable, "captured analyzer is unavailable", nil)
+				return
+			}
+			if claim.Reclassify != nil {
+				report, analyzeErr = analyzer.Reclassify(analysisCtx, *claim.Reclassify)
+			} else {
+				report, analyzeErr = analyzer.Analyze(analysisCtx, claim.Request)
+			}
+		}()
 	} else {
 		analyzeErr = fmt.Errorf("capture attribution bundle: %w", captureErr)
 	}

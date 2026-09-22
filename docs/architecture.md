@@ -76,6 +76,12 @@ Bundle activation commits an operation ID and an ordered generation under the li
 
 Service reloaders read the committed generation from PostgreSQL. They do not authorize a load from the filesystem pointer. A reload verifies the immutable candidate, preserves the current analyzer on failure, and publishes the replacement only after the complete analyzer is ready. Each attempt keeps the analyzer that it captured at its start.
 
+The runtime cache separates memory ownership from durable pins. `maximum_resident_generations` bounds completed resident analyzers and in-progress load reservations together. The active generation and each captured generation remain resident. If those protected generations consume the limit, another capture waits until its context ends or capacity becomes available. Concurrent captures of one unloaded generation share one load.
+
+The cache evicts the least-recently-used generation that is neither active nor captured. A durable pin protects bundle files for queued work, retries, and restart recovery. It does not keep an analyzer resident. Workers reload a pinned historical generation when they claim its work.
+
+All generation analyzers use the process-wide execution controller. They also share the compiled passive web detector because its embedded fingerprint tables are immutable after construction. Prefix and ASN indexes remain generation-owned and become unreachable after the runtime evicts their analyzer.
+
 ## Reclassification time and provenance
 
 Reclassification creates a new report from retained observations and reusable detector outputs. It selects a compatible bundle and records a new classification time. Collection times and original collection coverage remain unchanged. Reclassification performs no collection.

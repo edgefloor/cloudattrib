@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,8 +22,10 @@ import (
 	"cloudattrib/internal/app"
 	"cloudattrib/internal/config"
 	"cloudattrib/internal/datasets"
+	"cloudattrib/internal/detect/webtech"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/observability"
 	"cloudattrib/internal/policy"
 	"cloudattrib/internal/store/postgres"
 )
@@ -95,16 +98,17 @@ func loadServiceAnalyzer(
 	repository *datasets.Repository,
 	desired *datasets.Activation,
 	controller *policy.Controller,
-) (app.Analyzer, string, lookupAvailability, datasets.Activation, error) {
+	sharedWebDetector app.WebDetector,
+) (app.Analyzer, string, lookupAvailability, datasets.Activation, int64, error) {
 	history, err := store.ActivationHistory(ctx, 3)
 	if err != nil {
-		return nil, "", lookupAvailability{}, datasets.Activation{}, err
+		return nil, "", lookupAvailability{}, datasets.Activation{}, 0, err
 	}
 	if desired != nil && (len(history) == 0 || history[0].OperationID != desired.OperationID) {
 		history = append([]datasets.Activation{*desired}, history...)
 	}
 	if len(history) == 0 {
-		return nil, "", lookupAvailability{}, datasets.Activation{}, model.NewError(model.CodeBundleUnavailable, "no committed service bundle is available", nil)
+		return nil, "", lookupAvailability{}, datasets.Activation{}, 0, model.NewError(model.CodeBundleUnavailable, "no committed service bundle is available", nil)
 	}
 	var failures []error
 	for index, activation := range history {
@@ -115,7 +119,7 @@ func loadServiceAnalyzer(
 				continue
 			}
 		}
-		analyzer, bundleID, _, lookup, loadErr := newAnalyzerDetailsForBundleWithController(ctx, configuration, store, activation.BundleID, controller)
+		analyzer, bundleID, manifest, lookup, loadErr := newAnalyzerDetailsForBundleWithResources(ctx, configuration, store, activation.BundleID, controller, sharedWebDetector)
 		if loadErr != nil || bundleID != activation.BundleID {
 			if loadErr == nil {
 				loadErr = fmt.Errorf("loaded bundle identity %q differs from committed bundle %q", bundleID, activation.BundleID)
@@ -129,11 +133,11 @@ func loadServiceAnalyzer(
 			reason = "desired generation could not be loaded: " + errors.Join(failures...).Error()
 		}
 		if err := repository.RecordLoad(activation, "loaded", reason); err != nil {
-			return nil, "", lookupAvailability{}, datasets.Activation{}, err
+			return nil, "", lookupAvailability{}, datasets.Activation{}, 0, err
 		}
-		return analyzer, bundleID, lookup, activation, nil
+		return analyzer, bundleID, lookup, activation, estimatedGenerationBytes(manifest), nil
 	}
-	return nil, "", lookupAvailability{}, datasets.Activation{}, fmt.Errorf("load committed service bundle: %w", errors.Join(failures...))
+	return nil, "", lookupAvailability{}, datasets.Activation{}, 0, fmt.Errorf("load committed service bundle: %w", errors.Join(failures...))
 }
 
 func manifestDigest(manifest []byte) string {
@@ -164,6 +168,10 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	if err != nil {
 		return fmt.Errorf("create execution controller: %w", err)
 	}
+	sharedWebDetector, err := webtech.New()
+	if err != nil {
+		return fmt.Errorf("create shared passive web detector: %w", err)
+	}
 	repository, err := datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
 	if err != nil {
 		return err
@@ -172,23 +180,28 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	if err != nil {
 		return err
 	}
-	analyzer, activeBundleID, lookup, loaded, err := loadServiceAnalyzer(ctx, configuration, store, repository, desired, controller)
+	analyzer, activeBundleID, lookup, loaded, retainedBytes, err := loadServiceAnalyzer(ctx, configuration, store, repository, desired, controller, sharedWebDetector)
 	if err != nil {
 		return err
 	}
-	analyzerFactory := &bundleAnalyzerFactory{
-		configuration: configuration, store: store, authority: store, repository: repository,
-		active: analyzer, activeBundleID: activeBundleID, activeLookup: lookup, loaded: loaded,
-		controller: controller,
-		analyzers:  map[string]app.Analyzer{activeBundleID: analyzer}, lookup: map[string]lookupAvailability{activeBundleID: lookup},
-	}
+	analyzerFactory := newBundleAnalyzerFactory(
+		configuration.Limits.MaximumResidentGenerations,
+		analyzer, activeBundleID, lookup, loaded, retainedBytes,
+	)
+	analyzerFactory.configuration = configuration
+	analyzerFactory.store = store
+	analyzerFactory.authority = store
+	analyzerFactory.repository = repository
+	analyzerFactory.controller = controller
+	analyzerFactory.sharedWebDetector = sharedWebDetector
 	authentication, err := serviceAuthentication(configuration.API)
 	if err != nil {
 		return err
 	}
 	handler, err := api.NewHandler(api.Config{
 		Analyzer: analyzerFactory, Jobs: store, Results: store, Findings: store, Authentication: authentication,
-		Readiness: serviceReadiness{store: store, analyzers: analyzerFactory}, Metrics: store,
+		Readiness:           serviceReadiness{store: store, analyzers: analyzerFactory},
+		Metrics:             serviceMetricsProvider{durable: store, analyzers: analyzerFactory},
 		MaximumRequestBytes: configuration.Limits.MaximumRequestBytes,
 	})
 	if err != nil {
@@ -272,20 +285,24 @@ func Serve(ctx context.Context, configuration config.Config) error {
 }
 
 type bundleAnalyzerFactory struct {
-	configuration  config.Config
-	store          app.ResultStore
-	authority      bundleActivationAuthority
-	repository     *datasets.Repository
-	active         app.Analyzer
-	activeBundleID string
-	activeLookup   lookupAvailability
-	loaded         datasets.Activation
-	mu             sync.Mutex
-	analyzers      map[string]app.Analyzer
-	lookup         map[string]lookupAvailability
-	loads          map[string]*bundleLoad
-	load           func(context.Context, string) (app.Analyzer, lookupAvailability, error)
-	controller     *policy.Controller
+	configuration     config.Config
+	store             app.ResultStore
+	authority         bundleActivationAuthority
+	repository        *datasets.Repository
+	active            app.Analyzer
+	activeBundleID    string
+	activeLookup      lookupAvailability
+	loaded            datasets.Activation
+	mu                sync.Mutex
+	maximumResident   int
+	residents         map[string]*residentAnalyzer
+	loads             map[string]*bundleLoad
+	changed           chan struct{}
+	sequence          uint64
+	capacityWaiters   int
+	load              func(context.Context, string) (app.Analyzer, lookupAvailability, int64, error)
+	controller        *policy.Controller
+	sharedWebDetector app.WebDetector
 }
 
 type bundleActivationAuthority interface {
@@ -293,78 +310,274 @@ type bundleActivationAuthority interface {
 }
 
 type bundleLoad struct {
-	done     chan struct{}
-	analyzer app.Analyzer
-	lookup   lookupAvailability
-	err      error
+	done    chan struct{}
+	err     error
+	waiters int
 }
 
-func (f *bundleAnalyzerFactory) AnalyzerForBundle(ctx context.Context, bundleID string) (app.Analyzer, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+type residentAnalyzer struct {
+	analyzer       app.Analyzer
+	lookup         lookupAvailability
+	references     int
+	lastUsed       uint64
+	estimatedBytes int64
+}
+
+type bundleCapture struct {
+	factory  *bundleAnalyzerFactory
+	bundleID string
+	analyzer app.Analyzer
+	lookup   lookupAvailability
+	once     sync.Once
+}
+
+func (c *bundleCapture) Analyzer() app.Analyzer {
+	if c == nil {
+		return nil
 	}
-	f.mu.Lock()
-	if bundleID == "" || bundleID == f.activeBundleID {
-		analyzer := f.active
-		f.mu.Unlock()
-		return analyzer, nil
+	return c.analyzer
+}
+
+func (c *bundleCapture) Release() {
+	if c == nil || c.factory == nil {
+		return
 	}
-	if analyzer := f.analyzers[bundleID]; analyzer != nil {
-		f.mu.Unlock()
-		return analyzer, nil
+	c.once.Do(func() { c.factory.release(c.bundleID) })
+}
+
+func newBundleAnalyzerFactory(maximumResident int, active app.Analyzer, activeBundleID string, lookup lookupAvailability, loaded datasets.Activation, estimatedBytes int64) *bundleAnalyzerFactory {
+	factory := &bundleAnalyzerFactory{
+		active: active, activeBundleID: activeBundleID, activeLookup: lookup, loaded: loaded,
+		maximumResident: maximumResident,
+		residents:       make(map[string]*residentAnalyzer),
+		loads:           make(map[string]*bundleLoad),
+		changed:         make(chan struct{}),
 	}
-	if pending := f.loads[bundleID]; pending != nil {
-		f.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-pending.done:
-			return pending.analyzer, pending.err
+	if active != nil && activeBundleID != "" {
+		factory.residents[activeBundleID] = &residentAnalyzer{analyzer: active, lookup: lookup, estimatedBytes: estimatedBytes}
+	}
+	return factory
+}
+
+func (f *bundleAnalyzerFactory) ensureStateLocked() {
+	if f.maximumResident < 2 {
+		f.maximumResident = f.configuration.Limits.MaximumResidentGenerations
+		if f.maximumResident < 2 {
+			f.maximumResident = config.Default().Limits.MaximumResidentGenerations
 		}
+	}
+	if f.residents == nil {
+		f.residents = make(map[string]*residentAnalyzer)
 	}
 	if f.loads == nil {
 		f.loads = make(map[string]*bundleLoad)
 	}
-	pending := &bundleLoad{done: make(chan struct{})}
-	f.loads[bundleID] = pending
-	f.mu.Unlock()
-
-	loader := f.load
-	if loader == nil {
-		loader = f.loadBundle
+	if f.changed == nil {
+		f.changed = make(chan struct{})
 	}
-	pending.analyzer, pending.lookup, pending.err = loader(ctx, bundleID)
-	f.mu.Lock()
-	if pending.err == nil {
-		if f.analyzers == nil {
-			f.analyzers = make(map[string]app.Analyzer)
-		}
-		if f.lookup == nil {
-			f.lookup = make(map[string]lookupAvailability)
-		}
-		f.analyzers[bundleID] = pending.analyzer
-		f.lookup[bundleID] = pending.lookup
+	if f.active != nil && f.activeBundleID != "" && f.residents[f.activeBundleID] == nil {
+		f.residents[f.activeBundleID] = &residentAnalyzer{analyzer: f.active, lookup: f.activeLookup}
 	}
-	delete(f.loads, bundleID)
-	close(pending.done)
-	f.mu.Unlock()
-	return pending.analyzer, pending.err
 }
 
-func (f *bundleAnalyzerFactory) loadBundle(ctx context.Context, bundleID string) (app.Analyzer, lookupAvailability, error) {
+func (f *bundleAnalyzerFactory) nextSequenceLocked() uint64 {
+	f.sequence++
+	return f.sequence
+}
+
+func (f *bundleAnalyzerFactory) notifyLocked() {
+	close(f.changed)
+	f.changed = make(chan struct{})
+}
+
+func (f *bundleAnalyzerFactory) reserveCapacityLocked() bool {
+	for len(f.residents)+len(f.loads) >= f.maximumResident {
+		var candidate string
+		var oldest uint64
+		for bundleID, resident := range f.residents {
+			if bundleID == f.activeBundleID || resident.references != 0 {
+				continue
+			}
+			if candidate == "" || resident.lastUsed < oldest {
+				candidate = bundleID
+				oldest = resident.lastUsed
+			}
+		}
+		if candidate == "" {
+			return false
+		}
+		delete(f.residents, candidate)
+	}
+	return true
+}
+
+func (f *bundleAnalyzerFactory) capture(ctx context.Context, requestedBundleID string) (*bundleCapture, error) {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		f.mu.Lock()
+		f.ensureStateLocked()
+		bundleID := requestedBundleID
+		if bundleID == "" {
+			bundleID = f.activeBundleID
+		}
+		if resident := f.residents[bundleID]; resident != nil {
+			resident.references++
+			resident.lastUsed = f.nextSequenceLocked()
+			capture := &bundleCapture{factory: f, bundleID: bundleID, analyzer: resident.analyzer, lookup: resident.lookup}
+			f.mu.Unlock()
+			return capture, nil
+		}
+		if pending := f.loads[bundleID]; pending != nil {
+			done := pending.done
+			pending.waiters++
+			f.mu.Unlock()
+			var waitErr error
+			select {
+			case <-ctx.Done():
+				waitErr = ctx.Err()
+			case <-done:
+			}
+			f.mu.Lock()
+			pending.waiters--
+			loadErr := pending.err
+			f.mu.Unlock()
+			if waitErr != nil {
+				return nil, waitErr
+			}
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			continue
+		}
+		if !f.reserveCapacityLocked() {
+			changed := f.changed
+			f.capacityWaiters++
+			f.mu.Unlock()
+			var waitErr error
+			select {
+			case <-ctx.Done():
+				waitErr = ctx.Err()
+			case <-changed:
+			}
+			f.mu.Lock()
+			f.capacityWaiters--
+			f.mu.Unlock()
+			if waitErr != nil {
+				return nil, waitErr
+			}
+			continue
+		}
+		pending := &bundleLoad{done: make(chan struct{})}
+		f.loads[bundleID] = pending
+		f.mu.Unlock()
+
+		loader := f.load
+		if loader == nil {
+			loader = f.loadBundle
+		}
+		analyzer, lookup, estimatedBytes, loadErr := loader(ctx, bundleID)
+		if loadErr == nil {
+			loadErr = ctx.Err()
+		}
+		if loadErr == nil && analyzer == nil {
+			loadErr = model.NewError(model.CodeBundleUnavailable, "bundle analyzer load returned no analyzer", nil)
+		}
+		f.mu.Lock()
+		delete(f.loads, bundleID)
+		pending.err = loadErr
+		if loadErr == nil {
+			resident := &residentAnalyzer{
+				analyzer: analyzer, lookup: lookup, references: 1,
+				lastUsed: f.nextSequenceLocked(), estimatedBytes: estimatedBytes,
+			}
+			f.residents[bundleID] = resident
+		}
+		close(pending.done)
+		f.notifyLocked()
+		f.mu.Unlock()
+		if loadErr != nil {
+			return nil, loadErr
+		}
+		return &bundleCapture{factory: f, bundleID: bundleID, analyzer: analyzer, lookup: lookup}, nil
+	}
+}
+
+func (f *bundleAnalyzerFactory) CaptureAnalyzer(ctx context.Context, bundleID string) (jobs.CapturedAnalyzer, error) {
+	return f.capture(ctx, bundleID)
+}
+
+func (f *bundleAnalyzerFactory) release(bundleID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	resident := f.residents[bundleID]
+	if resident == nil || resident.references == 0 {
+		return
+	}
+	resident.references--
+	resident.lastUsed = f.nextSequenceLocked()
+	f.notifyLocked()
+}
+
+func (f *bundleAnalyzerFactory) residencySnapshot() (int64, int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensureStateLocked()
+	var estimatedBytes int64
+	for _, resident := range f.residents {
+		estimatedBytes += resident.estimatedBytes
+	}
+	return int64(len(f.residents)), estimatedBytes
+}
+
+func (f *bundleAnalyzerFactory) capacityWaiterCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.capacityWaiters
+}
+
+func (f *bundleAnalyzerFactory) loadWaiterCount(bundleID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if pending := f.loads[bundleID]; pending != nil {
+		return pending.waiters
+	}
+	return 0
+}
+
+func (f *bundleAnalyzerFactory) loadBundle(ctx context.Context, bundleID string) (app.Analyzer, lookupAvailability, int64, error) {
 	var analyzer app.Analyzer
 	var loadedBundleID string
+	var manifest []byte
 	var lookup lookupAvailability
 	var err error
 	if f.controller == nil {
-		analyzer, loadedBundleID, _, lookup, err = newAnalyzerDetailsForBundle(ctx, f.configuration, f.store, bundleID)
+		analyzer, loadedBundleID, manifest, lookup, err = newAnalyzerDetailsForBundle(ctx, f.configuration, f.store, bundleID)
 	} else {
-		analyzer, loadedBundleID, _, lookup, err = newAnalyzerDetailsForBundleWithController(ctx, f.configuration, f.store, bundleID, f.controller)
+		analyzer, loadedBundleID, manifest, lookup, err = newAnalyzerDetailsForBundleWithResources(ctx, f.configuration, f.store, bundleID, f.controller, f.sharedWebDetector)
 	}
 	if err != nil || loadedBundleID != bundleID {
-		return nil, lookupAvailability{}, model.NewError(model.CodeBundleUnavailable, "bundle is unavailable to this detector build", err)
+		return nil, lookupAvailability{}, 0, model.NewError(model.CodeBundleUnavailable, "bundle is unavailable to this detector build", err)
 	}
-	return analyzer, lookup, nil
+	return analyzer, lookup, estimatedGenerationBytes(manifest), nil
+}
+
+func estimatedGenerationBytes(manifest []byte) int64 {
+	var parsed datasets.Manifest
+	if json.Unmarshal(manifest, &parsed) != nil {
+		return 0
+	}
+	var total int64
+	for _, artifact := range parsed.Artifacts {
+		if artifact.Size > 0 {
+			if artifact.Size > int64(^uint64(0)>>1)-total {
+				return int64(^uint64(0) >> 1)
+			}
+			total += artifact.Size
+		}
+	}
+	return total
 }
 
 func (f *bundleAnalyzerFactory) localLookupAvailability() lookupAvailability {
@@ -374,35 +587,39 @@ func (f *bundleAnalyzerFactory) localLookupAvailability() lookupAvailability {
 }
 
 func (f *bundleAnalyzerFactory) Analyze(ctx context.Context, request model.AnalyzeRequest) (model.Report, error) {
-	analyzer, err := f.AnalyzerForBundle(ctx, "")
+	captured, err := f.capture(ctx, "")
 	if err != nil {
 		return model.Report{}, err
 	}
-	return analyzer.Analyze(ctx, request)
+	defer captured.Release()
+	return captured.analyzer.Analyze(ctx, request)
 }
 
 func (f *bundleAnalyzerFactory) LookupIP(ctx context.Context, request model.IPLookupRequest) (model.IPLookupResult, error) {
-	analyzer, err := f.AnalyzerForBundle(ctx, "")
+	captured, err := f.capture(ctx, "")
 	if err != nil {
 		return model.IPLookupResult{}, err
 	}
-	return analyzer.LookupIP(ctx, request)
+	defer captured.Release()
+	return captured.analyzer.LookupIP(ctx, request)
 }
 
 func (f *bundleAnalyzerFactory) Reclassify(ctx context.Context, request model.ReclassifyRequest) (model.Report, error) {
-	analyzer, err := f.AnalyzerForBundle(ctx, request.BundleID)
+	captured, err := f.capture(ctx, request.BundleID)
 	if err != nil {
 		return model.Report{}, err
 	}
-	return analyzer.Reclassify(ctx, request)
+	defer captured.Release()
+	return captured.analyzer.Reclassify(ctx, request)
 }
 
 func (f *bundleAnalyzerFactory) ValidateReclassify(ctx context.Context, request model.ReclassifyRequest) error {
-	analyzer, err := f.AnalyzerForBundle(ctx, request.BundleID)
+	captured, err := f.capture(ctx, request.BundleID)
 	if err != nil {
 		return err
 	}
-	validator, ok := analyzer.(app.ReclassificationValidator)
+	defer captured.Release()
+	validator, ok := captured.analyzer.(app.ReclassificationValidator)
 	if !ok {
 		return model.NewError(model.CodeCapabilityUnavailable, "bundle cannot validate replay", nil)
 	}
@@ -462,7 +679,7 @@ func (f *bundleAnalyzerFactory) reloadDesired(ctx context.Context) error {
 		return nil
 	}
 	f.mu.Unlock()
-	analyzer, err := f.AnalyzerForBundle(ctx, activation.BundleID)
+	captured, err := f.capture(ctx, activation.BundleID)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -471,19 +688,40 @@ func (f *bundleAnalyzerFactory) reloadDesired(ctx context.Context) error {
 		return err
 	}
 	if err := ctx.Err(); err != nil {
+		captured.Release()
 		return err
 	}
 	f.mu.Lock()
-	f.active = analyzer
+	f.active = captured.analyzer
 	f.activeBundleID = activation.BundleID
-	f.activeLookup = f.lookup[activation.BundleID]
+	f.activeLookup = captured.lookup
 	f.loaded = *activation
+	f.notifyLocked()
 	f.mu.Unlock()
+	captured.Release()
 	return repository.RecordLoad(*activation, "loaded", "")
 }
 
 var _ app.Analyzer = (*bundleAnalyzerFactory)(nil)
 var _ app.ReclassificationValidator = (*bundleAnalyzerFactory)(nil)
+var _ jobs.AnalyzerFactory = (*bundleAnalyzerFactory)(nil)
+var _ jobs.CapturedAnalyzer = (*bundleCapture)(nil)
+
+type serviceMetricsProvider struct {
+	durable   observability.Provider
+	analyzers *bundleAnalyzerFactory
+}
+
+func (p serviceMetricsProvider) OperationalMetrics(ctx context.Context) (observability.Snapshot, error) {
+	snapshot, err := p.durable.OperationalMetrics(ctx)
+	if err != nil {
+		return observability.Snapshot{}, err
+	}
+	if p.analyzers != nil {
+		snapshot.ResidentGenerations, snapshot.EstimatedRetainedBytes = p.analyzers.residencySnapshot()
+	}
+	return snapshot, nil
+}
 
 type serviceReadiness struct {
 	store     *postgres.Store

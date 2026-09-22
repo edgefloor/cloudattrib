@@ -26,6 +26,9 @@ func TestRunnerUsesPinnedBundleAndCommitsTerminalReport(t *testing.T) {
 	if factory.bundleID != "bundle-1" {
 		t.Fatalf("factory bundle = %q", factory.bundleID)
 	}
+	if factory.releases != 1 {
+		t.Fatalf("capture releases = %d, want 1", factory.releases)
+	}
 	loaded, err := store.Job(context.Background(), job.ID)
 	if err != nil || loaded.Status != JobCompleted || loaded.Targets[0].ReportID != "report" {
 		t.Fatalf("Job() = %#v, %v", loaded, err)
@@ -96,7 +99,7 @@ func TestRunnerRenewsLeaseAndCancelsDuringBundleAcquisition(t *testing.T) {
 	}
 	renewed := make(chan struct{})
 	store := &renewObservedStore{MemoryStore: memory, renewed: renewed}
-	factory := &blockingBundleFactory{started: make(chan struct{}), analyzerCalled: make(chan struct{}, 1)}
+	factory := &blockingBundleFactory{started: make(chan struct{})}
 	runner := Runner{Store: store, Factory: factory, WorkerID: "worker", Lease: 30 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() { done <- runner.RunOnce(context.Background()) }()
@@ -118,11 +121,6 @@ func TestRunnerRenewsLeaseAndCancelsDuringBundleAcquisition(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("runner did not stop after acquisition cancellation")
 	}
-	select {
-	case <-factory.analyzerCalled:
-		t.Fatal("analysis started after acquisition was cancelled")
-	default:
-	}
 	loaded, err := memory.Job(t.Context(), job.ID)
 	if err != nil || loaded.Targets[0].Status != TargetCancelled {
 		t.Fatalf("Job() = %#v, %v", loaded, err)
@@ -141,39 +139,36 @@ func (s *renewObservedStore) Renew(ctx context.Context, targetID, token string, 
 }
 
 type blockingBundleFactory struct {
-	started        chan struct{}
-	analyzerCalled chan struct{}
+	started chan struct{}
 }
 
-func (f *blockingBundleFactory) AnalyzerForBundle(ctx context.Context, _ string) (app.Analyzer, error) {
+func (f *blockingBundleFactory) CaptureAnalyzer(ctx context.Context, _ string) (CapturedAnalyzer, error) {
 	close(f.started)
 	<-ctx.Done()
-	return neverCalledAnalyzer{called: f.analyzerCalled}, ctx.Err()
-}
-
-type neverCalledAnalyzer struct{ called chan<- struct{} }
-
-func (a neverCalledAnalyzer) Analyze(context.Context, model.AnalyzeRequest) (model.Report, error) {
-	a.called <- struct{}{}
-	return model.Report{}, nil
-}
-func (neverCalledAnalyzer) LookupIP(context.Context, model.IPLookupRequest) (model.IPLookupResult, error) {
-	return model.IPLookupResult{}, nil
-}
-func (a neverCalledAnalyzer) Reclassify(context.Context, model.ReclassifyRequest) (model.Report, error) {
-	a.called <- struct{}{}
-	return model.Report{}, nil
+	return nil, ctx.Err()
 }
 
 type fixtureAnalyzerFactory struct {
 	bundleID     string
 	reclassified *bool
+	releases     int
 }
 
-func (f *fixtureAnalyzerFactory) AnalyzerForBundle(_ context.Context, bundleID string) (app.Analyzer, error) {
+func (f *fixtureAnalyzerFactory) CaptureAnalyzer(_ context.Context, bundleID string) (CapturedAnalyzer, error) {
 	f.bundleID = bundleID
-	return fixtureAnalyzer{bundleID: bundleID, reclassified: f.reclassified}, nil
+	return &fixtureCapturedAnalyzer{
+		analyzer: fixtureAnalyzer{bundleID: bundleID, reclassified: f.reclassified},
+		release:  func() { f.releases++ },
+	}, nil
 }
+
+type fixtureCapturedAnalyzer struct {
+	analyzer app.Analyzer
+	release  func()
+}
+
+func (c *fixtureCapturedAnalyzer) Analyzer() app.Analyzer { return c.analyzer }
+func (c *fixtureCapturedAnalyzer) Release()               { c.release() }
 
 type fixtureAnalyzer struct {
 	bundleID     string
@@ -195,8 +190,8 @@ func (f fixtureAnalyzer) Reclassify(_ context.Context, request model.ReclassifyR
 
 type blockingAnalyzerFactory struct{ started chan<- struct{} }
 
-func (f blockingAnalyzerFactory) AnalyzerForBundle(context.Context, string) (app.Analyzer, error) {
-	return blockingAnalyzer(f), nil
+func (f blockingAnalyzerFactory) CaptureAnalyzer(context.Context, string) (CapturedAnalyzer, error) {
+	return &fixtureCapturedAnalyzer{analyzer: blockingAnalyzer(f), release: func() {}}, nil
 }
 
 type blockingAnalyzer struct{ started chan<- struct{} }
