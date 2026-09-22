@@ -448,20 +448,24 @@ func validSPFModifiers(terms []string) bool {
 		if !isModifier {
 			continue
 		}
-		if !validSPFName(name) || argument == "" {
+		if !validSPFName(name) {
 			return false
 		}
 		switch name {
 		case "redirect":
-			if seenRedirect || !validSPFDomainSpec(argument) {
+			if argument == "" || seenRedirect || !validSPFDomainSpec(argument) {
 				return false
 			}
 			seenRedirect = true
 		case "exp":
-			if seenExplanation || !validSPFDomainSpec(argument) {
+			if argument == "" || seenExplanation || !validSPFDomainSpec(argument) {
 				return false
 			}
 			seenExplanation = true
+		default:
+			if !validSPFMacroString(argument) {
+				return false
+			}
 		}
 	}
 	return true
@@ -572,30 +576,60 @@ func validSPFDomainSpec(value string) bool {
 	if value == "" {
 		return false
 	}
-	var normalized strings.Builder
-	normalized.Grow(len(value))
+	previousDot := -1
+	lastDot := -1
+	lastTokenMacro := false
 	for index := 0; index < len(value); {
-		character := value[index]
-		switch {
-		case isSPFDomainLiteral(character):
-			normalized.WriteByte(character)
-			index++
-		case character == '%':
+		if value[index] == '%' {
 			next, ok := validSPFMacro(value, index)
 			if !ok {
 				return false
 			}
-			normalized.WriteByte('x')
 			index = next
-		default:
+			lastTokenMacro = true
+			continue
+		}
+		if !isSPFMacroLiteral(value[index]) {
 			return false
 		}
+		if value[index] == '.' {
+			previousDot = lastDot
+			lastDot = index
+		}
+		lastTokenMacro = false
+		index++
 	}
-	return normalized.Len() <= 253 && validSPFDomainLabels(normalized.String())
+	if lastTokenMacro {
+		return true
+	}
+	end := len(value)
+	if value[end-1] == '.' {
+		end--
+		lastDot = previousDot
+	}
+	return lastDot >= 0 && validSPFTopLabel(value[lastDot+1:end])
 }
 
-func isSPFDomainLiteral(value byte) bool {
-	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9' || strings.ContainsRune("-._", rune(value))
+func validSPFMacroString(value string) bool {
+	for index := 0; index < len(value); {
+		if value[index] == '%' {
+			next, ok := validSPFMacro(value, index)
+			if !ok {
+				return false
+			}
+			index = next
+			continue
+		}
+		if !isSPFMacroLiteral(value[index]) {
+			return false
+		}
+		index++
+	}
+	return true
+}
+
+func isSPFMacroLiteral(value byte) bool {
+	return value >= 0x21 && value <= 0x7e && value != '%'
 }
 
 func validSPFMacro(value string, start int) (int, bool) {
@@ -637,20 +671,27 @@ func validSPFMacro(value string, start int) (int, bool) {
 	}
 }
 
-func validSPFDomainLabels(value string) bool {
-	labels := strings.Split(value, ".")
-	if labels[len(labels)-1] == "" {
-		labels = labels[:len(labels)-1]
-	}
-	if len(labels) == 0 {
+func validSPFTopLabel(value string) bool {
+	if value == "" || len(value) > 63 {
 		return false
 	}
-	for _, label := range labels {
-		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+	hasLetter := false
+	hasHyphen := false
+	for _, character := range value {
+		switch {
+		case character >= 'a' && character <= 'z':
+			hasLetter = true
+		case character >= '0' && character <= '9':
+		case character == '-':
+			hasHyphen = true
+		default:
 			return false
 		}
 	}
-	return true
+	if !hasHyphen {
+		return hasLetter
+	}
+	return value[0] != '-' && value[len(value)-1] != '-'
 }
 
 func isSPFQualifier(value byte) bool {
