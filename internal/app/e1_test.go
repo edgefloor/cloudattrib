@@ -206,6 +206,40 @@ func TestE1MissingPrefixSourcePreservesDNSAndHTTP(t *testing.T) {
 	}
 }
 
+func TestE1HTTPFallsBackToSecondApprovedSeedAddress(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	first := netip.MustParseAddr("93.184.216.34")
+	second := netip.MustParseAddr("1.1.1.1")
+	dialer := &addressFallbackDialer{working: second, destination: server.Listener.Addr().String()}
+	dnsCollector := collectdns.New(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		result := model.DNSResult{Question: question, ResponseCode: 0}
+		if question.Type == 1 {
+			result.Addresses = []netip.Addr{first, second}
+		}
+		return result, nil
+	}, policy.PublicDestinationPolicy())
+	service := app.NewService(app.Dependencies{
+		DNS: dnsCollector, HTTP: collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20),
+		View: model.NewAttributionView("fixture-bundle", "public-v1", nil, nil), HTTPScheme: "http", Now: time.Now,
+	})
+	includeWWW := false
+	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull, IncludeWWW: &includeWWW})
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	if got := dialer.Addresses(); !slices.Equal(got, []netip.Addr{first, second}) {
+		t.Fatalf("dial addresses = %v", got)
+	}
+	if observationByType(report.Observations, "http_response").ID == "" {
+		t.Fatalf("report has no HTTP response after fallback: %#v", report)
+	}
+}
+
 func TestE1ConvergingSeedsRetainBothObservationHistories(t *testing.T) {
 	t.Parallel()
 
@@ -403,6 +437,30 @@ type fixtureDialer struct {
 	mu             sync.Mutex
 	selected       netip.Addr
 	prohibited     int
+}
+
+type addressFallbackDialer struct {
+	mu          sync.Mutex
+	working     netip.Addr
+	destination string
+	addresses   []netip.Addr
+}
+
+func (d *addressFallbackDialer) DialContext(ctx context.Context, network string, address netip.Addr, _ uint16) (net.Conn, error) {
+	d.mu.Lock()
+	d.addresses = append(d.addresses, address)
+	d.mu.Unlock()
+	if address != d.working {
+		return nil, errors.New("fixture connection refused")
+	}
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, network, d.destination)
+}
+
+func (d *addressFallbackDialer) Addresses() []netip.Addr {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.addresses)
 }
 
 func (d *fixtureDialer) DialContext(ctx context.Context, network string, address netip.Addr, _ uint16) (net.Conn, error) {

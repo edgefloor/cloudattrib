@@ -97,15 +97,25 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 	}()
 
 	collected := Result{Coverage: model.Coverage{Capability: "dns", Status: model.CoverageComplete, Attempted: len(questionTypes)}}
+	publishedAddresses := make(map[netip.Addr]struct{})
 	for item := range results {
-		collected.Coverage.Completed++
+		outcome := normalizeOutcome(item.result, item.err)
 		if item.err != nil {
 			collected.Coverage.Status = model.CoveragePartial
 			collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, errorCode(item.err))
-			collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, "failed", item.result, item.err.Error(), item.occurrence))
+			collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, outcome, item.result, item.err.Error(), item.occurrence))
 			continue
 		}
-		collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, "answered", item.result, "", item.occurrence))
+		if dnsOutcomeCompleted(outcome) {
+			collected.Coverage.Completed++
+		} else {
+			collected.Coverage.Status = model.CoveragePartial
+			collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, model.CodeCollectionFailed)
+		}
+		collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, outcome, item.result, "", item.occurrence))
+		if outcome != model.DNSOutcomeAnswered {
+			continue
+		}
 		if item.result.Omitted > 0 {
 			collected.Coverage.Status = model.CoveragePartial
 			collected.Coverage.Omitted += item.result.Omitted
@@ -149,7 +159,10 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 				Payload:    marshalPayload(payload),
 			})
 			if decision.Allowed && onCandidate != nil {
-				onCandidate(Candidate{Hostname: hostname, Address: address, Port: port})
+				if _, published := publishedAddresses[address]; !published {
+					publishedAddresses[address] = struct{}{}
+					onCandidate(Candidate{Hostname: hostname, Address: address, Port: port})
+				}
 			}
 		}
 	}
@@ -160,10 +173,11 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 	return collected
 }
 
-func (c *Collector) queryObservation(hostname string, question model.DNSQuestion, status string, result model.DNSResult, reason string, occurrence model.ObservationOccurrence) model.Observation {
+func (c *Collector) queryObservation(hostname string, question model.DNSQuestion, outcome model.DNSOutcome, result model.DNSResult, reason string, occurrence model.ObservationOccurrence) model.Observation {
 	payload := model.DNSPayload{
 		RRType:       typeName(question.Type),
 		Owner:        hostname,
+		Outcome:      outcome,
 		ResponseCode: result.ResponseCode,
 		Resolver:     result.Resolver,
 		Transport:    result.Transport,
@@ -175,9 +189,37 @@ func (c *Collector) queryObservation(hostname string, question model.DNSQuestion
 		Subject:    hostname,
 		Scope:      model.ScopeRoot,
 		ObservedAt: c.now(),
-		Status:     status,
+		Status:     string(outcome),
 		Payload:    marshalPayload(payload),
 	}
+}
+
+func normalizeOutcome(result model.DNSResult, err error) model.DNSOutcome {
+	if result.Outcome != "" {
+		return result.Outcome
+	}
+	if err != nil {
+		return outcomeForError(err)
+	}
+	switch result.ResponseCode {
+	case 0:
+		if len(result.Records) == 0 && len(result.Addresses) == 0 {
+			return model.DNSOutcomeNoData
+		}
+		return model.DNSOutcomeAnswered
+	case 2:
+		return model.DNSOutcomeSERVFAIL
+	case 3:
+		return model.DNSOutcomeNXDomain
+	case 5:
+		return model.DNSOutcomeRefused
+	default:
+		return model.DNSOutcomeFailed
+	}
+}
+
+func dnsOutcomeCompleted(outcome model.DNSOutcome) bool {
+	return outcome == model.DNSOutcomeAnswered || outcome == model.DNSOutcomeNoData || outcome == model.DNSOutcomeNXDomain
 }
 
 func marshalPayload(value any) model.JSONValue {

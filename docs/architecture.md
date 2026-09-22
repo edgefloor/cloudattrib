@@ -23,11 +23,19 @@ See the [package map](../internal/README.md) for paths. Updaters and CT collecto
 
 The DNS collector validates each candidate address and publishes approved public addresses as they arrive. HTTP can start before another address family or unrelated DNS questions finish.
 
-The HTTP collector dials the selected address exactly. It preserves the requested hostname for HTTP Host and TLS SNI. Redirects, retries, and alternate-address attempts repeat resolution and validation. The transport must never resolve and dial a different address after approval.
+The HTTP collector dials each selected address exactly. It preserves the requested hostname for HTTP Host and TLS SNI. After a connection failure, the collector can try another approved address from the same bounded resolution. Every attempt repeats destination validation and consumes the shared HTTP request budget. The transport never resolves and dials a different address after approval.
 
 Mixed answers remain evidence. A prohibited address retains its observation and policy reason. It does not block an approved address. Record failed or delayed AAAA queries even when HTTP succeeds through IPv4.
 
+The collector follows `Location` only for HTTP 301, 302, 303, 307, and 308 responses. A failed redirect continuation keeps completed hop observations and marks HTTP coverage partial. This rule applies to malformed URLs, prohibited destinations, resolver failures, and exhausted limits.
+
 Tests instrument dial attempts and require zero attempts to prohibited addresses. See SPEC sections [3.4](../SPEC.md#34-execution-order-and-consistency), [4.2](../SPEC.md#42-dns-result-semantics), and [5.2](../SPEC.md#52-request-destination-policy).
+
+## DNS query outcomes
+
+Each `dns_query` observation has a typed outcome. `answered`, `nodata`, and `nxdomain` are completed work. `servfail`, `refused`, `timeout`, `cancelled`, `budget_exhausted`, and `failed` leave DNS coverage incomplete. The payload also retains the raw DNS response code.
+
+The DNS client retries transport failures and `servfail` responses within the configured attempt count. It does not retry `refused`, caller cancellation, or exhausted budgets. Every network attempt consumes the shared DNS question budget.
 
 ## Availability and report status
 

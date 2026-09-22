@@ -91,6 +91,216 @@ func TestCollectTargetDistinguishesRequestPaths(t *testing.T) {
 	}
 }
 
+func TestCollectDoesNotFollowLocationOnNonRedirectResponse(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{stdhttp.StatusOK, stdhttp.StatusCreated} {
+		t.Run(stdhttp.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+				writer.Header().Set("Location", "http://redirect.example/")
+				writer.WriteHeader(status)
+			}))
+			t.Cleanup(server.Close)
+			address := netip.MustParseAddr("93.184.216.34")
+			resolved := false
+			collector := New(
+				(&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext,
+				policy.PublicDestinationPolicy(), 2<<20,
+				WithRedirectResolver(func(context.Context, string) ([]netip.Addr, error) {
+					resolved = true
+					return nil, nil
+				}),
+			)
+			result, err := collector.Collect(t.Context(), "http", "example.com", address)
+			if err != nil {
+				t.Fatalf("Collect() error = %v", err)
+			}
+			if resolved || len(result.Observations) != 1 || result.Coverage.Status != model.CoverageComplete {
+				t.Fatalf("Collect() result = %#v, resolved = %t", result, resolved)
+			}
+		})
+	}
+}
+
+func TestCollectFollowsOnlySupportedRedirectStatuses(t *testing.T) {
+	t.Parallel()
+
+	for _, status := range []int{
+		stdhttp.StatusMovedPermanently,
+		stdhttp.StatusFound,
+		stdhttp.StatusSeeOther,
+		stdhttp.StatusTemporaryRedirect,
+		stdhttp.StatusPermanentRedirect,
+	} {
+		t.Run(stdhttp.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			landing := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+				writer.WriteHeader(stdhttp.StatusNoContent)
+			}))
+			t.Cleanup(landing.Close)
+			start := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+				writer.Header().Set("Location", "http://redirect.example/")
+				writer.WriteHeader(status)
+			}))
+			t.Cleanup(start.Close)
+			first := netip.MustParseAddr("93.184.216.34")
+			second := netip.MustParseAddr("1.1.1.1")
+			dialer := &mappedDialer{destinations: map[netip.Addr]string{first: start.Listener.Addr().String(), second: landing.Listener.Addr().String()}}
+			collector := New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20, WithRedirectResolver(func(context.Context, string) ([]netip.Addr, error) {
+				return []netip.Addr{second}, nil
+			}))
+			result, err := collector.Collect(t.Context(), "http", "example.com", first)
+			if err != nil {
+				t.Fatalf("Collect() error = %v", err)
+			}
+			if len(result.Observations) != 2 || result.Coverage.Status != model.CoverageComplete {
+				t.Fatalf("Collect() result = %#v", result)
+			}
+		})
+	}
+}
+
+func TestCollectPreservesCompletedHopWhenRedirectIsMalformed(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.Header().Set("Location", "://bad redirect")
+		writer.WriteHeader(stdhttp.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := New(
+		(&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext,
+		policy.PublicDestinationPolicy(), 2<<20,
+		WithRedirectResolver(func(context.Context, string) ([]netip.Addr, error) { return nil, nil }),
+	)
+	result, err := collector.Collect(t.Context(), "http", "example.com", address)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if len(result.Observations) != 1 || result.Coverage.Status != model.CoveragePartial || !slices.Contains(result.Coverage.ErrorCodes, model.CodeInvalidTarget) {
+		t.Fatalf("Collect() result = %#v", result)
+	}
+}
+
+func TestCollectFallsBackToSecondApprovedInitialAddress(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	first := netip.MustParseAddr("93.184.216.34")
+	second := netip.MustParseAddr("1.1.1.1")
+	dialer := &mappedDialer{destinations: map[netip.Addr]string{second: server.Listener.Addr().String()}}
+	collector := New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20)
+	candidates := make(chan netip.Addr, 2)
+	candidates <- first
+	candidates <- second
+	close(candidates)
+	result, err := collector.CollectTargetCandidatesOccurrence(t.Context(), "http://example.com/", candidates, model.ObservationOccurrence{CollectionRunID: "run-1", Seed: "example.com", Attempt: 1})
+	if err != nil {
+		t.Fatalf("CollectTargetCandidatesOccurrence() error = %v", err)
+	}
+	if len(result.Observations) != 1 || result.PeerAddress != second || !equalAddresses(dialer.Addresses(), []netip.Addr{first, second}) {
+		t.Fatalf("CollectTargetCandidatesOccurrence() result = %#v, dials = %v", result, dialer.Addresses())
+	}
+}
+
+func TestCollectRedirectFallsBackToSecondApprovedAddress(t *testing.T) {
+	t.Parallel()
+
+	landing := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	t.Cleanup(landing.Close)
+	start := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.Header().Set("Location", "http://redirect.example/")
+		writer.WriteHeader(stdhttp.StatusFound)
+	}))
+	t.Cleanup(start.Close)
+	root := netip.MustParseAddr("93.184.216.34")
+	failed := netip.MustParseAddr("8.8.8.8")
+	working := netip.MustParseAddr("1.1.1.1")
+	dialer := &mappedDialer{destinations: map[netip.Addr]string{root: start.Listener.Addr().String(), working: landing.Listener.Addr().String()}}
+	collector := New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20, WithRedirectResolver(func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{failed, working}, nil
+	}))
+	result, err := collector.Collect(t.Context(), "http", "example.com", root)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	want := []netip.Addr{root, failed, working}
+	if len(result.Observations) != 2 || !equalAddresses(dialer.Addresses(), want) {
+		t.Fatalf("Collect() result = %#v, dials = %v", result, dialer.Addresses())
+	}
+	if result.Observations[0].ID == result.Observations[1].ID {
+		t.Fatalf("redirect observations reused ID %q", result.Observations[0].ID)
+	}
+}
+
+func TestCollectFallbackConsumesSharedRequestBudget(t *testing.T) {
+	t.Parallel()
+
+	first := netip.MustParseAddr("93.184.216.34")
+	second := netip.MustParseAddr("1.1.1.1")
+	dialer := &mappedDialer{destinations: map[netip.Addr]string{}}
+	limits := policy.DefaultLimits()
+	limits.HTTPRequests = 1
+	controller, err := policy.NewController(limits, 1, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, release, err := controller.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	collector := New(dialer.DialContext, policy.PublicDestinationPolicy(), limits.HTTPDocumentBytes, WithLimits(limits))
+	candidates := make(chan netip.Addr, 2)
+	candidates <- first
+	candidates <- second
+	close(candidates)
+	result, err := collector.CollectTargetCandidatesOccurrence(ctx, "http://example.com/", candidates, model.ObservationOccurrence{CollectionRunID: "run-1", Seed: "example.com", Attempt: 1})
+	if model.ErrorCodeOf(err) != model.CodeBudgetExceeded {
+		t.Fatalf("CollectTargetCandidatesOccurrence() error = %v", err)
+	}
+	if got := dialer.Addresses(); !equalAddresses(got, []netip.Addr{first}) {
+		t.Fatalf("dial addresses = %v", got)
+	}
+	if result.Coverage.Status != model.CoveragePartial || !slices.Contains(result.Coverage.ErrorCodes, model.CodeBudgetExceeded) {
+		t.Fatalf("coverage = %#v", result.Coverage)
+	}
+}
+
+func TestCollectRevalidatesEveryInitialCandidate(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	blocked := netip.MustParseAddr("169.254.169.254")
+	approved := netip.MustParseAddr("1.1.1.1")
+	dialer := &mappedDialer{destinations: map[netip.Addr]string{approved: server.Listener.Addr().String()}}
+	collector := New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20)
+	candidates := make(chan netip.Addr, 2)
+	candidates <- blocked
+	candidates <- approved
+	close(candidates)
+	result, err := collector.CollectTargetCandidatesOccurrence(t.Context(), "http://example.com/", candidates, model.ObservationOccurrence{CollectionRunID: "run-1", Seed: "example.com", Attempt: 1})
+	if err != nil {
+		t.Fatalf("CollectTargetCandidatesOccurrence() error = %v", err)
+	}
+	if got := dialer.Addresses(); !equalAddresses(got, []netip.Addr{approved}) {
+		t.Fatalf("dial addresses = %v", got)
+	}
+	if result.Coverage.Status != model.CoveragePartial || !slices.Contains(result.Coverage.ErrorCodes, model.CodePolicyBlocked) {
+		t.Fatalf("coverage = %#v", result.Coverage)
+	}
+}
+
 func TestCollectTargetOccurrenceDistinguishesRequestAndAttemptWithoutUsingQueryValues(t *testing.T) {
 	t.Parallel()
 
@@ -169,6 +379,7 @@ func TestCollectUsesSharedRequestAndCumulativeBodyBudgets(t *testing.T) {
 	t.Cleanup(landing.Close)
 	start := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
 		writer.Header().Set("Location", "http://redirect.example/")
+		writer.WriteHeader(stdhttp.StatusFound)
 		_, _ = writer.Write([]byte("root"))
 	}))
 	t.Cleanup(start.Close)

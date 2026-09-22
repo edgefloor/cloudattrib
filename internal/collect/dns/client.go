@@ -3,6 +3,7 @@ package dns
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -65,16 +66,23 @@ func (c *Client) Query(ctx context.Context, question model.DNSQuestion) (model.D
 		response, transport, err := c.exchange(ctx, message)
 		if err != nil {
 			if model.ErrorCodeOf(err) == model.CodeBudgetExceeded || model.ErrorCodeOf(err) == model.CodeCancelled {
-				return model.DNSResult{Question: question, Resolver: c.resolver}, err
+				return model.DNSResult{Question: question, Attempt: attempt, Resolver: c.resolver, Outcome: outcomeForError(err)}, err
+			}
+			if ctx.Err() != nil {
+				return model.DNSResult{Question: question, Attempt: attempt, Resolver: c.resolver, Outcome: outcomeForError(ctx.Err())}, ctx.Err()
 			}
 			lastErr = err
 			continue
 		}
 		result, err := c.convert(question, response, transport)
 		result.Attempt = attempt
+		if result.Outcome == model.DNSOutcomeSERVFAIL && attempt < c.attempts {
+			continue
+		}
 		return result, err
 	}
-	return model.DNSResult{Question: question, Attempt: c.attempts, Resolver: c.resolver}, fmt.Errorf("query DNS %s type %d: %w", question.Name, question.Type, lastErr)
+	result := model.DNSResult{Question: question, Attempt: c.attempts, Resolver: c.resolver, Outcome: outcomeForError(lastErr)}
+	return result, fmt.Errorf("query DNS %s type %d: %w", question.Name, question.Type, lastErr)
 }
 
 func (c *Client) exchange(ctx context.Context, message *mdns.Msg) (*mdns.Msg, string, error) {
@@ -113,6 +121,7 @@ func (c *Client) convert(question model.DNSQuestion, response *mdns.Msg, transpo
 	result := model.DNSResult{
 		Question:     question,
 		ResponseCode: response.Rcode,
+		Outcome:      outcomeForResponse(response),
 		Transport:    transport,
 		Resolver:     c.resolver,
 	}
@@ -145,6 +154,47 @@ func (c *Client) convert(question model.DNSQuestion, response *mdns.Msg, transpo
 		}
 	}
 	return result, nil
+}
+
+func outcomeForResponse(response *mdns.Msg) model.DNSOutcome {
+	switch response.Rcode {
+	case mdns.RcodeSuccess:
+		if len(response.Answer) == 0 {
+			return model.DNSOutcomeNoData
+		}
+		return model.DNSOutcomeAnswered
+	case mdns.RcodeNameError:
+		return model.DNSOutcomeNXDomain
+	case mdns.RcodeServerFailure:
+		return model.DNSOutcomeSERVFAIL
+	case mdns.RcodeRefused:
+		return model.DNSOutcomeRefused
+	default:
+		return model.DNSOutcomeFailed
+	}
+}
+
+func outcomeForError(err error) model.DNSOutcome {
+	if err == nil {
+		return model.DNSOutcomeFailed
+	}
+	switch model.ErrorCodeOf(err) {
+	case model.CodeBudgetExceeded:
+		return model.DNSOutcomeBudgetExhausted
+	case model.CodeCancelled:
+		return model.DNSOutcomeCancelled
+	}
+	if errors.Is(err, context.Canceled) {
+		return model.DNSOutcomeCancelled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return model.DNSOutcomeTimeout
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return model.DNSOutcomeTimeout
+	}
+	return model.DNSOutcomeFailed
 }
 
 func dnsPayload(record mdns.RR) (model.DNSPayload, netip.Addr, bool) {

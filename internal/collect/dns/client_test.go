@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -58,6 +59,62 @@ func TestClientCountsActualAttemptsAgainstExecutionBudget(t *testing.T) {
 	}
 	if got := queries.Load(); got != 1 {
 		t.Fatalf("DNS queries = %d, want 1", got)
+	}
+}
+
+func TestClientRetriesSERVFAILWithinConfiguredAttempts(t *testing.T) {
+	packetConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var queries atomic.Int64
+	server := &mdns.Server{PacketConn: packetConn, Handler: mdns.HandlerFunc(func(writer mdns.ResponseWriter, request *mdns.Msg) {
+		response := new(mdns.Msg)
+		response.SetReply(request)
+		if queries.Add(1) == 1 {
+			response.Rcode = mdns.RcodeServerFailure
+		} else {
+			response.Answer = []mdns.RR{&mdns.A{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeA, Class: mdns.ClassINET, Ttl: 60}, A: net.ParseIP("93.184.216.34")}}
+		}
+		if writeErr := writer.WriteMsg(response); writeErr != nil {
+			t.Errorf("WriteMsg() error = %v", writeErr)
+		}
+	})}
+	go func() { _ = server.ActivateAndServe() }()
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = server.ShutdownContext(shutdownCtx)
+	})
+
+	client, err := NewClient(ClientConfig{Resolver: packetConn.LocalAddr().String(), Network: "udp", Timeout: time.Second, Attempts: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := client.Query(t.Context(), model.DNSQuestion{Name: "example.com", Type: mdns.TypeA})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if result.Attempt != 2 || len(result.Addresses) != 1 || queries.Load() != 2 {
+		t.Fatalf("Query() result = %#v, queries = %d", result, queries.Load())
+	}
+}
+
+func TestClientDoesNotRetryCallerCancellation(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewClient(ClientConfig{Resolver: "127.0.0.1:53", Network: "udp", Timeout: time.Second, Attempts: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	result, err := client.Query(ctx, model.DNSQuestion{Name: "example.com", Type: mdns.TypeA})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if result.Attempt != 1 || result.Outcome != model.DNSOutcomeCancelled {
+		t.Fatalf("Query() result = %#v", result)
 	}
 }
 
@@ -165,5 +222,37 @@ func TestClientBoundsCNAMEChainRecords(t *testing.T) {
 	}
 	if len(result.Records) != 1 || result.Omitted != 1 {
 		t.Fatalf("convert() result = %#v", result)
+	}
+}
+
+func TestConvertClassifiesDNSProtocolOutcomes(t *testing.T) {
+	t.Parallel()
+
+	client := &Client{resolver: "fixture", cnameChainDepth: 16, now: time.Now}
+	tests := []struct {
+		name    string
+		rcode   int
+		answers []mdns.RR
+		want    model.DNSOutcome
+	}{
+		{name: "nodata", rcode: mdns.RcodeSuccess, want: model.DNSOutcomeNoData},
+		{name: "answered", rcode: mdns.RcodeSuccess, answers: []mdns.RR{&mdns.A{Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeA}, A: net.ParseIP("93.184.216.34")}}, want: model.DNSOutcomeAnswered},
+		{name: "nxdomain", rcode: mdns.RcodeNameError, want: model.DNSOutcomeNXDomain},
+		{name: "servfail", rcode: mdns.RcodeServerFailure, want: model.DNSOutcomeSERVFAIL},
+		{name: "refused", rcode: mdns.RcodeRefused, want: model.DNSOutcomeRefused},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			response := new(mdns.Msg)
+			response.Rcode = tt.rcode
+			response.Answer = tt.answers
+			result, err := client.convert(model.DNSQuestion{Name: "example.com", Type: mdns.TypeA}, response, "udp")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Outcome != tt.want || result.ResponseCode != tt.rcode {
+				t.Fatalf("convert() = %#v", result)
+			}
+		})
 	}
 }

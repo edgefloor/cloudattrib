@@ -147,8 +147,8 @@ Live public-log performance remains unmeasured. No approved log URL, key, and st
 | R01 End-to-end attribution | `internal/app/e1_test.go`, multi-vendor rule fixture, CLI and API report tests. |
 | R02 No proprietary APIs | Dependency boundary tests, local-file importers, passive Wappalyzer use, no-credential Compose drill. |
 | R03 Targets and scope | `internal/target/normalize_test.go`, redirect-scope, CT-scope, CLI batch tests. |
-| R04 DNS | Controlled UDP/TCP retry, TTL/record payload, chain, failure, and E1 DNS fixtures. |
-| R05 HTTP/HTTPS | Exact-address dialing, redirect revalidation, Host/SNI preservation, certificate verification, timeout/body-limit/cancellation tests. TLS certificate evidence remains unsupported and is reported unavailable. |
+| R04 DNS | Controlled UDP/TCP retry, typed negative and failure outcomes, shared retry budgets, TTL/record payload, chain, failure, and E1 DNS fixtures. |
+| R05 HTTP/HTTPS | Exact-address dialing, alternate approved-address fallback, redirect-status and continuation coverage, Host/SNI preservation, certificate verification, timeout/body-limit/cancellation tests. TLS certificate evidence remains unsupported and is reported unavailable. |
 | R06 Web fingerprints | Supplied-response-only detector test, retained sanitized HTTP capture, detector identity in reports. |
 | R07 Cloud dataset | Full 91-file `cloud-ip-ranges` import plus immutable manifest and lifecycle tests. |
 | R08 Service/region | Full AWS/GCP/Azure imports and conservative metadata fixtures, including empty Azure service handling. |

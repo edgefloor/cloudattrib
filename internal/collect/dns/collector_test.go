@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"encoding/json"
 	"net/netip"
 	"slices"
 	"testing"
@@ -9,6 +10,73 @@ import (
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/policy"
 )
+
+func TestCollectDistinguishesNegativeAnswersFromProtocolFailures(t *testing.T) {
+	t.Parallel()
+
+	collector := New(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		responseCode := 0
+		switch question.Type {
+		case typeAAAA:
+			responseCode = 3
+		case typeCNAME:
+			responseCode = 2
+		case typeMX:
+			responseCode = 5
+		}
+		return model.DNSResult{Question: question, ResponseCode: responseCode}, nil
+	}, policy.PublicDestinationPolicy())
+
+	result := collector.Collect(t.Context(), "example.com", 443, nil)
+	statuses := make(map[string]string)
+	for _, observation := range result.Observations {
+		if observation.Type != "dns_query" {
+			continue
+		}
+		var payload model.DNSPayload
+		if err := json.Unmarshal(observation.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		statuses[payload.RRType] = observation.Status
+	}
+	if statuses["A"] != "nodata" || statuses["AAAA"] != "nxdomain" || statuses["CNAME"] != "servfail" || statuses["MX"] != "refused" {
+		t.Fatalf("query statuses = %#v", statuses)
+	}
+	if result.Coverage.Status != model.CoveragePartial || result.Coverage.Completed != 4 {
+		t.Fatalf("coverage = %#v", result.Coverage)
+	}
+}
+
+func TestCollectDoesNotPublishAddressesFromFailedDNSResponse(t *testing.T) {
+	t.Parallel()
+
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := New(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		return model.DNSResult{Question: question, ResponseCode: 2, Addresses: []netip.Addr{address}}, nil
+	}, policy.PublicDestinationPolicy())
+	published := 0
+	result := collector.Collect(t.Context(), "example.com", 443, func(Candidate) { published++ })
+	if published != 0 || len(result.Addresses) != 0 {
+		t.Fatalf("published = %d, addresses = %v", published, result.Addresses)
+	}
+}
+
+func TestCollectPublishesEachApprovedAddressOnce(t *testing.T) {
+	t.Parallel()
+
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := New(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		if question.Type != typeA {
+			return model.DNSResult{Question: question, ResponseCode: 0}, nil
+		}
+		return model.DNSResult{Question: question, ResponseCode: 0, Addresses: []netip.Addr{address, address}}, nil
+	}, policy.PublicDestinationPolicy())
+	published := 0
+	collector.Collect(t.Context(), "example.com", 443, func(Candidate) { published++ })
+	if published != 1 {
+		t.Fatalf("published candidates = %d, want 1", published)
+	}
+}
 
 func TestCollectBoundsResolvedAddressesAcrossQuestions(t *testing.T) {
 	limits := policy.DefaultLimits()

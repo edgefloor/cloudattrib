@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,13 @@ type DialFunc func(context.Context, string, netip.Addr, uint16) (net.Conn, error
 
 // ResolveFunc resolves a redirect hostname through the configured resolver.
 type ResolveFunc func(context.Context, string) ([]netip.Addr, error)
+
+type addressSource func(context.Context) (netip.Addr, bool, error)
+
+type preResponseError struct{ err error }
+
+func (e *preResponseError) Error() string { return e.err.Error() }
+func (e *preResponseError) Unwrap() error { return e.err }
 
 // Option configures a Collector.
 type Option func(*Collector)
@@ -112,6 +120,16 @@ func (c *Collector) CollectTarget(ctx context.Context, rawURL string, address ne
 // CollectTargetOccurrence fetches one normalized HTTP URL with caller-owned
 // collection occurrence context.
 func (c *Collector) CollectTargetOccurrence(ctx context.Context, rawURL string, address netip.Addr, occurrence model.ObservationOccurrence) (Result, error) {
+	candidates := make(chan netip.Addr, 1)
+	candidates <- address
+	close(candidates)
+	return c.CollectTargetCandidatesOccurrence(ctx, rawURL, candidates, occurrence)
+}
+
+// CollectTargetCandidatesOccurrence fetches one normalized HTTP URL and tries
+// approved addresses in publication order after eligible connection failures.
+// The candidate channel must be closed when resolution completes.
+func (c *Collector) CollectTargetCandidatesOccurrence(ctx context.Context, rawURL string, candidates <-chan netip.Addr, occurrence model.ObservationOccurrence) (Result, error) {
 	currentURL, err := url.Parse(rawURL)
 	if err != nil {
 		return Result{}, fmt.Errorf("parse HTTP target: %w", err)
@@ -122,39 +140,26 @@ func (c *Collector) CollectTargetOccurrence(ctx context.Context, rawURL string, 
 	if currentURL.Port() != "" && currentURL.Port() != "80" && currentURL.Port() != "443" {
 		return Result{}, model.NewError(model.CodePolicyBlocked, "HTTP target port is prohibited", nil)
 	}
-	currentAddress := address.Unmap()
 	originalHostname := currentURL.Hostname()
 	coverage := model.Coverage{Capability: "http", Status: model.CoverageComplete}
 	var observations []model.Observation
 	var final Result
+	currentCandidates := channelAddressSource(candidates)
 	for hop := 0; ; hop++ {
-		release, acquireErr := policy.AcquireHTTP(ctx)
-		if acquireErr != nil {
-			coverage.Status = model.CoveragePartial
-			coverage.Omitted++
-			coverage.ErrorCodes = append(coverage.ErrorCodes, model.ErrorCodeOf(acquireErr))
-			if len(observations) > 0 {
-				return finish(final, observations, coverage), nil
-			}
-			return Result{Observations: observations, Coverage: coverage}, acquireErr
-		}
-		coverage.Attempted++
-		requestCtx := ctx
-		cancel := func() {}
-		if c.requestTimeout > 0 {
-			requestCtx, cancel = context.WithTimeout(ctx, c.requestTimeout)
-		}
 		hopOccurrence := occurrence
 		hopOccurrence.Hop = hop
-		hopResult, location, collectErr := c.collectHop(requestCtx, currentURL, currentAddress, originalHostname, hopOccurrence)
-		cancel()
-		release()
+		hopResult, location, collectErr := c.collectHopCandidates(ctx, currentURL, currentCandidates, originalHostname, hopOccurrence, &coverage)
 		if collectErr != nil {
 			coverage.Status = model.CoveragePartial
 			coverage.ErrorCodes = append(coverage.ErrorCodes, collectionErrorCode(collectErr))
+			if model.ErrorCodeOf(collectErr) == model.CodeBudgetExceeded {
+				coverage.Omitted++
+			}
+			if len(observations) > 0 {
+				return finish(final, observations, coverage), nil
+			}
 			return Result{Observations: observations, Coverage: coverage}, collectErr
 		}
-		coverage.Completed++
 		observations = append(observations, hopResult.Observation)
 		if hopResult.Coverage.Status == model.CoveragePartial {
 			coverage.Status = model.CoveragePartial
@@ -178,35 +183,88 @@ func (c *Collector) CollectTargetOccurrence(ctx context.Context, rawURL string, 
 		}
 		nextURL, resolveErr := currentURL.Parse(location)
 		if resolveErr != nil || nextURL.Hostname() == "" || nextURL.User != nil || (nextURL.Scheme != "http" && nextURL.Scheme != "https") {
-			return Result{Observations: observations, Coverage: coverage}, model.NewError(model.CodeInvalidTarget, "HTTP redirect URL is invalid", resolveErr)
+			coverage.Status = model.CoveragePartial
+			coverage.Omitted++
+			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeInvalidTarget)
+			return finish(final, observations, coverage), nil
 		}
 		if nextURL.Port() != "" && nextURL.Port() != "80" && nextURL.Port() != "443" {
-			return Result{Observations: observations, Coverage: coverage}, model.NewError(model.CodePolicyBlocked, "HTTP redirect port is prohibited", nil)
+			coverage.Status = model.CoveragePartial
+			coverage.Omitted++
+			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodePolicyBlocked)
+			return finish(final, observations, coverage), nil
 		}
 		addresses, resolveErr := c.resolve(ctx, nextURL.Hostname())
 		if resolveErr != nil {
 			coverage.Status = model.CoveragePartial
-			code := model.ErrorCodeOf(resolveErr)
-			if code == "" {
-				code = model.CodeTimeout
-			}
-			coverage.ErrorCodes = append(coverage.ErrorCodes, code)
+			coverage.ErrorCodes = append(coverage.ErrorCodes, collectionErrorCode(resolveErr))
 			return finish(final, observations, coverage), nil
 		}
-		approved, blocked := c.firstApproved(addresses, portForURL(nextURL))
+		approved, blocked := c.approvedAddresses(addresses, portForURL(nextURL))
 		if blocked {
 			coverage.Status = model.CoveragePartial
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodePolicyBlocked)
 		}
-		if !approved.IsValid() {
+		if len(approved) == 0 {
 			coverage.Status = model.CoveragePartial
 			coverage.Omitted++
+			if !blocked {
+				coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeCollectionFailed)
+			}
 			return finish(final, observations, coverage), nil
 		}
 		currentURL = nextURL
-		currentAddress = approved
+		currentCandidates = sliceAddressSource(approved)
 	}
 	return finish(final, observations, coverage), nil
+}
+
+func (c *Collector) collectHopCandidates(ctx context.Context, targetURL *url.URL, next addressSource, originalHostname string, occurrence model.ObservationOccurrence, coverage *model.Coverage) (Result, string, error) {
+	var lastErr error
+	dialAttempt := 0
+	for {
+		address, ok, err := next(ctx)
+		if err != nil {
+			return Result{}, "", err
+		}
+		if !ok {
+			if lastErr != nil {
+				return Result{}, "", lastErr
+			}
+			return Result{}, "", model.NewError(model.CodeCapabilityUnavailable, "no approved HTTP destination address", nil)
+		}
+		address = address.Unmap()
+		if decision := c.policy.Check(address, portForURL(targetURL)); !decision.Allowed {
+			coverage.Status = model.CoveragePartial
+			coverage.Omitted++
+			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodePolicyBlocked)
+			continue
+		}
+		release, acquireErr := policy.AcquireHTTP(ctx)
+		if acquireErr != nil {
+			return Result{}, "", acquireErr
+		}
+		coverage.Attempted++
+		requestCtx := ctx
+		cancel := func() {}
+		if c.requestTimeout > 0 {
+			requestCtx, cancel = context.WithTimeout(ctx, c.requestTimeout)
+		}
+		attemptOccurrence := occurrence
+		attemptOccurrence.Attempt += dialAttempt
+		dialAttempt++
+		result, location, collectErr := c.collectHop(requestCtx, targetURL, address, originalHostname, attemptOccurrence)
+		cancel()
+		release()
+		if collectErr == nil {
+			coverage.Completed++
+			return result, location, nil
+		}
+		lastErr = collectErr
+		if !eligibleAddressFallback(collectErr) {
+			return Result{}, "", collectErr
+		}
+	}
 }
 
 func collectionErrorCode(err error) model.ErrorCode {
@@ -217,6 +275,10 @@ func collectionErrorCode(err error) model.ErrorCode {
 		return model.CodeCancelled
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
+		return model.CodeTimeout
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
 		return model.CodeTimeout
 	}
 	if strings.Contains(err.Error(), "response headers exceeded") {
@@ -240,14 +302,13 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 		},
 	}
 	defer transport.CloseIdleConnections()
-	client := &stdhttp.Client{Transport: transport, CheckRedirect: func(_ *stdhttp.Request, _ []*stdhttp.Request) error { return stdhttp.ErrUseLastResponse }}
 	request, err := stdhttp.NewRequestWithContext(ctx, stdhttp.MethodGet, targetURL.String(), nil)
 	if err != nil {
 		return Result{}, "", fmt.Errorf("create HTTP request: %w", err)
 	}
-	response, err := client.Do(request)
+	response, err := transport.RoundTrip(request)
 	if err != nil {
-		return Result{}, "", fmt.Errorf("collect HTTP response: %w", err)
+		return Result{}, "", &preResponseError{err: fmt.Errorf("collect HTTP response: %w", err)}
 	}
 	allowance, commitBody := policy.ReserveHTTPBody(ctx, c.maxBody)
 	retained := int64(0)
@@ -289,7 +350,35 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 		Type: "http_response", Subject: targetURL.Hostname(), Relation: model.RelationWebDelivery, Scope: scope,
 		ObservedAt: c.now(), Status: "responded", Payload: encoded, ContentHash: payload.BodyHash,
 	}
-	return Result{Observation: observation, Coverage: coverage, PeerAddress: address, Headers: response.Header.Clone(), Body: slices.Clone(body)}, response.Header.Get("Location"), nil
+	location := ""
+	if isRedirectStatus(response.StatusCode) {
+		location = response.Header.Get("Location")
+	}
+	return Result{Observation: observation, Coverage: coverage, PeerAddress: address, Headers: response.Header.Clone(), Body: slices.Clone(body)}, location, nil
+}
+
+func isRedirectStatus(status int) bool {
+	switch status {
+	case stdhttp.StatusMovedPermanently, stdhttp.StatusFound, stdhttp.StatusSeeOther, stdhttp.StatusTemporaryRedirect, stdhttp.StatusPermanentRedirect:
+		return true
+	default:
+		return false
+	}
+}
+
+func eligibleAddressFallback(err error) bool {
+	var preResponse *preResponseError
+	if !errors.As(err, &preResponse) {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if strings.Contains(err.Error(), "response headers exceeded") {
+		return false
+	}
+	var verificationError *tls.CertificateVerificationError
+	return !errors.As(err, &verificationError)
 }
 
 func scriptURLs(body []byte, base *url.URL, limit int) []string {
@@ -330,17 +419,48 @@ func scriptURLs(body []byte, base *url.URL, limit int) []string {
 	return result
 }
 
-func (c *Collector) firstApproved(addresses []netip.Addr, port uint16) (netip.Addr, bool) {
-	var approved netip.Addr
+func (c *Collector) approvedAddresses(addresses []netip.Addr, port uint16) ([]netip.Addr, bool) {
+	approved := make([]netip.Addr, 0, len(addresses))
+	seen := make(map[netip.Addr]struct{}, len(addresses))
 	blocked := false
 	for _, address := range addresses {
-		decision := c.policy.Check(address.Unmap(), port)
-		if decision.Allowed && !approved.IsValid() {
-			approved = address.Unmap()
+		address = address.Unmap()
+		decision := c.policy.Check(address, port)
+		if decision.Allowed {
+			if _, exists := seen[address]; !exists {
+				seen[address] = struct{}{}
+				approved = append(approved, address)
+			}
 		}
 		blocked = blocked || !decision.Allowed
 	}
 	return approved, blocked
+}
+
+func channelAddressSource(addresses <-chan netip.Addr) addressSource {
+	return func(ctx context.Context) (netip.Addr, bool, error) {
+		select {
+		case address, ok := <-addresses:
+			return address, ok, nil
+		case <-ctx.Done():
+			return netip.Addr{}, false, ctx.Err()
+		}
+	}
+}
+
+func sliceAddressSource(addresses []netip.Addr) addressSource {
+	index := 0
+	return func(ctx context.Context) (netip.Addr, bool, error) {
+		if err := ctx.Err(); err != nil {
+			return netip.Addr{}, false, err
+		}
+		if index >= len(addresses) {
+			return netip.Addr{}, false, nil
+		}
+		address := addresses[index]
+		index++
+		return address, true, nil
+	}
 }
 
 func finish(final Result, observations []model.Observation, coverage model.Coverage) Result {

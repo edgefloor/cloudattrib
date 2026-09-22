@@ -152,10 +152,28 @@ type DNSQuestion struct {
 	Type uint16 `json:"type"`
 }
 
+// DNSOutcome distinguishes successful answers and absence from resolver or
+// transport failures.
+type DNSOutcome string
+
+// DNSOutcome values describe one DNS question's terminal result.
+const (
+	DNSOutcomeAnswered        DNSOutcome = "answered"
+	DNSOutcomeNoData          DNSOutcome = "nodata"
+	DNSOutcomeNXDomain        DNSOutcome = "nxdomain"
+	DNSOutcomeSERVFAIL        DNSOutcome = "servfail"
+	DNSOutcomeRefused         DNSOutcome = "refused"
+	DNSOutcomeTimeout         DNSOutcome = "timeout"
+	DNSOutcomeCancelled       DNSOutcome = "cancelled"
+	DNSOutcomeBudgetExhausted DNSOutcome = "budget_exhausted"
+	DNSOutcomeFailed          DNSOutcome = "failed"
+)
+
 // DNSResult contains raw record observations and addresses from one question.
 type DNSResult struct {
 	Question     DNSQuestion   `json:"question"`
 	Attempt      int           `json:"attempt,omitempty"`
+	Outcome      DNSOutcome    `json:"outcome"`
 	ResponseCode int           `json:"response_code"`
 	Transport    string        `json:"transport"`
 	Resolver     string        `json:"resolver"`
@@ -168,10 +186,11 @@ type DNSResult struct {
 type DNSPayload struct {
 	RRType       string     `json:"rrtype"`
 	Owner        string     `json:"owner"`
+	Outcome      DNSOutcome `json:"outcome,omitempty"`
 	Value        string     `json:"value,omitempty"`
 	Address      netip.Addr `json:"address,omitempty"`
 	TTL          uint32     `json:"ttl,omitempty"`
-	ResponseCode int        `json:"response_code,omitempty"`
+	ResponseCode int        `json:"response_code"`
 	Resolver     string     `json:"resolver,omitempty"`
 	Transport    string     `json:"transport,omitempty"`
 	PolicyReason string     `json:"policy_reason,omitempty"`

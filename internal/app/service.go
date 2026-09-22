@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 	"net/url"
@@ -141,69 +142,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	}
 	ctObservations, ctCoverage := s.planCTDiscovery(ctx, &normalized)
 
-	hostname := normalized.SeedHostnames[0]
 	collectHTTP := normalized.Mode == model.ModeFull && s.http != nil
-	port := seedPort(normalized, hostname, s.httpScheme)
-	type dnsOutcome struct {
-		result collectdns.Result
-	}
-	type httpOutcome struct {
-		result collecthttp.Result
-		err    error
-	}
-	dnsDone := make(chan dnsOutcome, 1)
-	candidates := make(chan collectdns.Candidate, 1)
-	firstOccurrence := model.ObservationOccurrence{CollectionRunID: collectionRunID, Seed: hostname, SeedIndex: 0, Attempt: 1}
-	go func() {
-		result := s.dns.CollectOccurrence(ctx, hostname, port, firstOccurrence, func(candidate collectdns.Candidate) {
-			select {
-			case candidates <- candidate:
-			default:
-			}
-		})
-		dnsDone <- dnsOutcome{result: result}
-	}()
-
-	var dnsResult collectdns.Result
-	var httpResult collecthttp.Result
-	var httpErr error
-	httpStarted := false
-	httpDone := make(chan httpOutcome, 1)
-	for dnsDone != nil || (httpStarted && httpDone != nil) {
-		select {
-		case candidate := <-candidates:
-			if httpStarted || !collectHTTP {
-				continue
-			}
-			httpStarted = true
-			go func() {
-				result, collectErr := s.http.CollectTargetOccurrence(ctx, seedURL(normalized, candidate.Hostname, s.httpScheme), candidate.Address, firstOccurrence)
-				httpDone <- httpOutcome{result: result, err: collectErr}
-			}()
-		case outcome := <-dnsDone:
-			dnsResult = outcome.result
-			dnsDone = nil
-			if !httpStarted && collectHTTP {
-				select {
-				case candidate := <-candidates:
-					httpStarted = true
-					go func() {
-						result, collectErr := s.http.CollectTargetOccurrence(ctx, seedURL(normalized, candidate.Hostname, s.httpScheme), candidate.Address, firstOccurrence)
-						httpDone <- httpOutcome{result: result, err: collectErr}
-					}()
-				default:
-				}
-			}
-			if !httpStarted {
-				httpDone = nil
-			}
-		case outcome := <-httpDone:
-			httpResult = outcome.result
-			httpErr = outcome.err
-			httpDone = nil
-		}
-	}
-
 	type dnsRun struct {
 		hostname string
 		result   collectdns.Result
@@ -213,25 +152,47 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		result   collecthttp.Result
 		err      error
 	}
-	dnsRuns := []dnsRun{{hostname: hostname, result: dnsResult}}
+	dnsRuns := make([]dnsRun, 0, len(normalized.SeedHostnames))
 	httpRuns := make([]httpRun, 0, len(normalized.SeedHostnames))
-	if httpStarted {
-		httpRuns = append(httpRuns, httpRun{hostname: hostname, result: httpResult, err: httpErr})
-	}
-	for seedOffset, seed := range normalized.SeedHostnames[1:] {
-		var selected collectdns.Candidate
+	for seedIndex, seed := range normalized.SeedHostnames {
 		portForSeed := seedPort(normalized, seed, s.httpScheme)
-		occurrence := model.ObservationOccurrence{CollectionRunID: collectionRunID, Seed: seed, SeedIndex: seedOffset + 1, Attempt: 1}
-		result := s.dns.CollectOccurrence(ctx, seed, portForSeed, occurrence, func(candidate collectdns.Candidate) {
-			if !selected.Address.IsValid() {
-				selected = candidate
-			}
-		})
-		dnsRuns = append(dnsRuns, dnsRun{hostname: seed, result: result})
-		if collectHTTP && selected.Address.IsValid() {
-			result, collectErr := s.http.CollectTargetOccurrence(ctx, seedURL(normalized, selected.Hostname, s.httpScheme), selected.Address, occurrence)
-			httpRuns = append(httpRuns, httpRun{hostname: seed, result: result, err: collectErr})
+		occurrence := model.ObservationOccurrence{CollectionRunID: collectionRunID, Seed: seed, SeedIndex: seedIndex, Attempt: 1}
+		if !collectHTTP {
+			result := s.dns.CollectOccurrence(ctx, seed, portForSeed, occurrence, nil)
+			dnsRuns = append(dnsRuns, dnsRun{hostname: seed, result: result})
+			continue
 		}
+
+		// The buffer equals the configured retained-address limit. DNS can finish
+		// without blocking after HTTP succeeds and stops reading candidates.
+		candidates := make(chan netip.Addr, s.addressLimit())
+		dnsDone := make(chan collectdns.Result, 1)
+		go func() {
+			dropped := 0
+			result := s.dns.CollectOccurrence(ctx, seed, portForSeed, occurrence, func(candidate collectdns.Candidate) {
+				select {
+				case candidates <- candidate.Address:
+				default:
+					dropped++
+				}
+			})
+			if dropped > 0 {
+				result.Coverage.Status = model.CoveragePartial
+				result.Coverage.Omitted += dropped
+				result.Coverage.ErrorCodes = append(result.Coverage.ErrorCodes, model.CodeBudgetExceeded)
+			}
+			close(candidates)
+			dnsDone <- result
+		}()
+		httpResult, httpErr := s.http.CollectTargetCandidatesOccurrence(ctx, seedURL(normalized, seed, s.httpScheme), candidates, occurrence)
+		dnsResult := <-dnsDone
+		dnsRuns = append(dnsRuns, dnsRun{hostname: seed, result: dnsResult})
+		if model.ErrorCodeOf(httpErr) == model.CodeCapabilityUnavailable {
+			httpResult.Coverage.Status = model.CoverageUnavailable
+			httpResult.Coverage.Reason = "no approved address"
+			httpErr = nil
+		}
+		httpRuns = append(httpRuns, httpRun{hostname: seed, result: httpResult, err: httpErr})
 	}
 
 	observations := slices.Clone(ctObservations)
@@ -268,7 +229,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 
 	if s.webDetector != nil {
 		for _, run := range httpRuns {
-			if run.err != nil {
+			if run.err != nil || run.result.Observation.ID == "" {
 				continue
 			}
 			source := run.result.Observation
@@ -428,6 +389,13 @@ func (s *Service) seedLimit() int {
 		return s.limits.SeedHostnames
 	}
 	return policy.DefaultLimits().SeedHostnames
+}
+
+func (s *Service) addressLimit() int {
+	if s.limits.ResolvedAddresses > 0 {
+		return s.limits.ResolvedAddresses
+	}
+	return policy.DefaultLimits().ResolvedAddresses
 }
 
 func boundedSeeds(request model.NormalizedRequest, limit int) []string {
@@ -972,12 +940,12 @@ func scopeForSeed(hostname string, roots []string) model.Scope {
 }
 
 func reportStatus(ctx context.Context, observations []model.Observation, coverage []model.Coverage) model.ReportStatus {
-	if ctx.Err() != nil {
+	if errors.Is(ctx.Err(), context.Canceled) {
 		return model.StatusCancelled
 	}
 	useful := false
 	for _, observation := range observations {
-		if observation.Status == "answered" || observation.Status == "responded" || observation.Status == "policy_blocked" {
+		if observation.Status == string(model.DNSOutcomeAnswered) || observation.Status == string(model.DNSOutcomeNoData) || observation.Status == string(model.DNSOutcomeNXDomain) || observation.Status == "responded" || observation.Status == "policy_blocked" {
 			useful = true
 			break
 		}
