@@ -485,7 +485,10 @@ func validSPFDomainCIDR(suffix string, hasSuffix bool) bool {
 		if suffix == "" {
 			return false
 		}
-		beforeCIDR, cidr, hasCIDR := strings.Cut(suffix, "/")
+		beforeCIDR, cidr, hasCIDR, ok := splitSPFDomainCIDR(suffix)
+		if !ok {
+			return false
+		}
 		if !validSPFDomainSpec(beforeCIDR) {
 			return false
 		}
@@ -498,6 +501,24 @@ func validSPFDomainCIDR(suffix string, hasSuffix bool) bool {
 		return false
 	}
 	return validSPFDualCIDR(suffix[1:])
+}
+
+func splitSPFDomainCIDR(value string) (string, string, bool, bool) {
+	for index := 0; index < len(value); {
+		if value[index] == '%' {
+			next, ok := validSPFMacro(value, index)
+			if !ok {
+				return "", "", false, false
+			}
+			index = next
+			continue
+		}
+		if value[index] == '/' {
+			return value[:index], value[index+1:], true, true
+		}
+		index++
+	}
+	return value, "", false, true
 }
 
 func validSPFPtr(suffix string, hasSuffix bool) bool {
@@ -548,25 +569,29 @@ func validSPFCIDRLength(value string, maximum int) bool {
 }
 
 func validSPFDomainSpec(value string) bool {
-	if value == "" || len(value) > 253 {
+	if value == "" {
 		return false
 	}
+	var normalized strings.Builder
+	normalized.Grow(len(value))
 	for index := 0; index < len(value); {
 		character := value[index]
 		switch {
 		case isSPFDomainLiteral(character):
+			normalized.WriteByte(character)
 			index++
 		case character == '%':
 			next, ok := validSPFMacro(value, index)
 			if !ok {
 				return false
 			}
+			normalized.WriteByte('x')
 			index = next
 		default:
 			return false
 		}
 	}
-	return validSPFDomainLabels(value)
+	return normalized.Len() <= 253 && validSPFDomainLabels(normalized.String())
 }
 
 func isSPFDomainLiteral(value byte) bool {
@@ -587,12 +612,18 @@ func validSPFMacro(value string, start int) (int, bool) {
 		}
 		end += start + 2
 		body := value[start+2 : end]
-		if body == "" || !strings.ContainsRune("slodiphcrt", rune(body[0])) {
+		if body == "" || !strings.ContainsRune("slodipvh", rune(body[0])) {
 			return 0, false
 		}
 		index := 1
+		digitStart := index
+		nonzeroTransformer := false
 		for index < len(body) && body[index] >= '0' && body[index] <= '9' {
+			nonzeroTransformer = nonzeroTransformer || body[index] != '0'
 			index++
+		}
+		if index > digitStart && !nonzeroTransformer {
+			return 0, false
 		}
 		if index < len(body) && body[index] == 'r' {
 			index++
