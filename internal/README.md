@@ -7,7 +7,7 @@
 | `app` | Domain analysis, local IP lookup, and reclassification. |
 | `model` | Targets, observations, dataset references, evidence, findings, reports, and error contracts. |
 | `target`, `policy` | Normalize input, bound scope, validate destinations, and track collection budgets. |
-| `collect/dns`, `collect/http` | Collect DNS records and bounded HTTP responses with TLS metadata. |
+| `collect/dns`, `collect/http` | Collect DNS records and bounded HTTP responses while verifying HTTPS transport. Certificate evidence is not retained. |
 | `detect/dnsrules`, `detect/webtech`, `rules` | Interpret DNS and HTTP signals with local rules and fingerprints. |
 | `enrich/prefix`, `enrich/asn` | Query immutable prefix and ASN indexes. |
 | `ingest` | Parse provider, service-range, CDN, and IPtoASN source formats. |

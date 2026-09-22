@@ -1,6 +1,6 @@
 # cloudattrib
 
-`cloudattrib` checks a domain's DNS records, HTTP responses, TLS certificates, and IP addresses. It returns cloud and SaaS matches with the records that produced them.
+`cloudattrib` checks a domain's DNS records, HTTP responses, and IP addresses. HTTPS collection verifies the server certificate but does not yet retain certificate evidence. Reports mark TLS certificate collection unavailable instead of treating a successful handshake as certificate inspection.
 
 Rules and IP lookups run from local data. Domain analysis contacts the configured DNS resolver and the target website.
 
@@ -92,7 +92,7 @@ flowchart TB
 
 	subgraph collection["Live collection"]
 		dns["DNS records and query results"]
-		http["HTTP and TLS<br/>Headers, redirects, HTML, and peer IPs"]
+		http["HTTP and verified HTTPS transport<br/>Headers, redirects, HTML, and peer IPs"]
 		dns -->|"approved public address"| http
 	end
 
@@ -117,7 +117,7 @@ flowchart TB
 ## Other commands
 
 ```sh
-# Skip HTTP and TLS
+# Skip HTTP and HTTPS
 ./bin/cloudattrib analyze example.com --mode dns
 
 # Analyze a file of targets

@@ -228,6 +228,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 			observations = append(observations, observation)
 		}
 	}
+	coverage = append(coverage, tlsCertificateCoverage(normalized, observations, s.httpScheme))
 
 	classifiedAt := s.now()
 	var evidence []model.Evidence
@@ -858,6 +859,39 @@ func seedURL(request model.NormalizedRequest, hostname, fallbackScheme string) s
 		}
 	}
 	return fallbackScheme + "://" + hostname + "/"
+}
+
+func tlsCertificateCoverage(request model.NormalizedRequest, observations []model.Observation, fallbackScheme string) model.Coverage {
+	coverage := model.Coverage{Capability: "tls_certificate"}
+	if request.Mode == model.ModeDNS {
+		coverage.Status = model.CoverageSkipped
+		coverage.Reason = "DNS-only mode"
+		return coverage
+	}
+	applicable := false
+	for _, hostname := range request.SeedHostnames {
+		parsed, err := url.Parse(seedURL(request, hostname, fallbackScheme))
+		applicable = applicable || err == nil && strings.EqualFold(parsed.Scheme, "https")
+	}
+	for _, observation := range observations {
+		if observation.Type != "http_response" {
+			continue
+		}
+		var payload model.HTTPPayload
+		if json.Unmarshal(observation.Payload, &payload) != nil {
+			continue
+		}
+		parsed, err := url.Parse(payload.URL)
+		applicable = applicable || err == nil && strings.EqualFold(parsed.Scheme, "https")
+	}
+	if !applicable {
+		coverage.Status = model.CoverageSkipped
+		coverage.Reason = "plain HTTP has no TLS session"
+		return coverage
+	}
+	coverage.Status = model.CoverageUnavailable
+	coverage.Reason = "TLS certificate evidence collection is unsupported"
+	return coverage
 }
 
 func seedPort(request model.NormalizedRequest, hostname, fallbackScheme string) uint16 {

@@ -97,6 +97,9 @@ func TestE1DomainAnalysisStartsHTTPBeforeAAAAAndKeepsPartialEvidence(t *testing.
 	if report.Status != model.StatusPartial {
 		t.Fatalf("Analyze() status = %q, want partial", report.Status)
 	}
+	if !hasCoverage(report.Coverage, "tls_certificate", model.CoverageSkipped) {
+		t.Fatalf("TLS coverage = %#v, want skipped for plain HTTP", report.Coverage)
+	}
 	if err := report.ValidateReferences(); err != nil {
 		t.Fatalf("ValidateReferences() error = %v", err)
 	}
@@ -144,6 +147,15 @@ func TestE1DomainAnalysisStartsHTTPBeforeAAAAAndKeepsPartialEvidence(t *testing.
 			t.Fatalf("rendered report contains unsupported claim %q", forbidden)
 		}
 	}
+}
+
+func hasCoverage(coverage []model.Coverage, capability string, status model.CoverageStatus) bool {
+	for _, item := range coverage {
+		if item.Capability == capability && item.Status == status {
+			return true
+		}
+	}
+	return false
 }
 
 func TestE1MissingPrefixSourcePreservesDNSAndHTTP(t *testing.T) {

@@ -393,8 +393,11 @@ func TestServiceReadinessReportsMissingLocalLookupData(t *testing.T) {
 	if snapshot.State != api.ReadinessDegraded || states["analyze"].State != api.ReadinessDegraded || states["lookup_ip"].State != api.ReadinessUnavailable {
 		t.Fatalf("readiness = %#v", snapshot)
 	}
-	if len(states["analyze"].Capabilities) != 2 || len(states["lookup_ip"].Capabilities) != 2 {
+	if len(states["analyze"].Capabilities) != 3 || len(states["lookup_ip"].Capabilities) != 2 {
 		t.Fatalf("lookup capabilities = %#v", states["lookup_ip"].Capabilities)
+	}
+	if states["analyze"].Capabilities[0].Name != "tls_certificate" || states["analyze"].Capabilities[0].Status != model.CoverageUnavailable {
+		t.Fatalf("analyze capabilities = %#v", states["analyze"].Capabilities)
 	}
 }
 
