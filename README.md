@@ -1,192 +1,183 @@
 # cloudattrib
 
-`cloudattrib` checks a domain's DNS records, HTTP responses, and IP addresses. HTTPS collection verifies the server certificate but does not yet retain certificate evidence. Reports mark TLS certificate collection unavailable instead of treating a successful handshake as certificate inspection.
+cloudattrib identifies cloud providers, SaaS services, and web technologies associated with a domain. It collects DNS records and website responses, then matches them against local rules and IP datasets. Each finding includes the relationship detected and references to the evidence that supports it.
 
-Rules and IP lookups run from local data. Domain analysis contacts the configured DNS resolver and the target website.
+Use it to inspect a domain's public infrastructure, process lists of domains, or look up IP addresses in local provider and ASN data. The CLI writes JSON. The HTTP API stores reports and runs durable batch jobs in PostgreSQL.
 
-## Measured on TypeSafe and GitLab
+Attribution runs locally and requires no commercial enrichment API or API key. Domain analysis contacts your configured DNS resolver and the target's public website. IP lookup and reclassification of saved reports require no target requests.
 
-On 2026-09-21, we measured hostname discovery and DNS enrichment, then compared DNS-only and full analysis on the names that resolved.
+## What it detects
 
-**Built-in Certificate Transparency discovery is experimental and has not yet been tested against live CT logs.** We therefore used crt.name to discover hostnames, then checked every returned name through Cloudattrib's DNS API.
+Findings distinguish relationships that a single provider label would hide:
 
-Discovery and DNS enrichment covered every discovered hostname:
+| Observed signal | Reported relationship |
+| --- | --- |
+| A CNAME pointing to a CloudFront distribution | CloudFront web delivery |
+| Cloudflare authoritative nameservers | Cloudflare DNS |
+| A supported Google MX record | Google-hosted mail routing |
+| A supported SPF include | Authorization for a service to send mail |
+| A supported verification TXT record | Domain verification with that service |
+| A recognized website script or framework fingerprint | A web integration or technology |
+| An IP address in a local provider dataset | A provider association, with service or region metadata when available |
 
-| Domain | Names discovered | Names with addresses | Total time |
-| --- | ---: | ---: | ---: |
-| `typesafe.ai` | 9 | 9 | 10.33 s |
-| `gitlab.com` | 747 | 143 | 52.70 s |
-
-Total time sums the separately timed discovery and DNS stages. The remaining 604 GitLab names had no address at measurement time.
-
-For names with addresses, we ran a fresh DNS-only baseline and full analysis. Full analysis also fetches websites, follows redirects, and runs HTTP rules and technology fingerprints.
-
-| Domain | DNS-only time | Full analysis time | Findings, DNS-only → full |
-| --- | ---: | ---: | ---: |
-| `typesafe.ai` | 0.20 s | 2.62 s | 19 → 61 |
-| `gitlab.com` | 2.62 s | 52.64 s | 430 → 1,168 |
-
-Added fingerprints included Next.js, Vercel, and Ruby on Rails for TypeSafe, and Google Cloud services, CloudFront, and Marketo for GitLab. Counts include repeated findings across hosts and redirects, not unique vendors.
-
-All 9 TypeSafe reports completed. GitLab produced 128 complete reports and 15 partial reports due to HTTP collection failures. No DNS finding disappeared in the full-analysis comparison.
-
-Both runs used the local API at `a504ec0`, resolver `192.168.50.211:53`, four concurrent analyses, the same datasets, and PostgreSQL persistence. Startup is excluded from all timings; discovery is excluded from the follow-up comparison. These are single-run network measurements, not a load test.
-
-Raw results: [discovery and DNS](docs/benchmarks/2026-09-21-company-api-measurements.json), [full-analysis comparison](docs/benchmarks/2026-09-21-subdomain-full-measurements.json).
+Findings describe the public evidence. A CDN match does not reveal the origin server, and a verification record does not establish active use of a paid product. See the [rule coverage matrix](rules/coverage-matrix.md) for supported products, matching signals, and their limits.
 
 ## Run it
 
-Install Go 1.25 or later and Make, then build the binary:
+To build from source, install Go 1.25 or later, Git, and Make:
 
 ```sh
+git clone https://github.com/edgefloor/cloudattrib.git
+cd cloudattrib
 make build
+```
+
+Domain analysis requires a reachable recursive DNS resolver. The default is `127.0.0.1:53`. If you already run a resolver there, analyze a domain with:
+
+```sh
 ./bin/cloudattrib analyze example.com
 ```
 
-Domain analysis needs a recursive DNS resolver. The default address is `127.0.0.1:53`. To use another resolver, set `CLOUDATTRIB_RESOLVER`:
+To use another resolver, replace `192.168.1.1:53` with its address and port:
 
 ```sh
 CLOUDATTRIB_RESOLVER=192.168.1.1:53 ./bin/cloudattrib analyze example.com
 ```
 
-URL targets must be query-free. Cloudattrib rejects caller-supplied query values before collection or durable job storage because this release has no restricted credential-storage path for retryable URL queries.
+The standalone CLI works without PostgreSQL when Certificate Transparency discovery is disabled, as it is by default. Product rules and web fingerprints are included in the binary. Cloud, CDN, and ASN datasets are separate inputs. Without those datasets, domain analysis can still return findings, but IP enrichment is unavailable.
 
-The command writes JSON to stdout. A shortened report looks like this:
+The command writes a report to standard output. Expect `status: "partial"` when useful results remain but a required data source or collection step is unavailable. Current full HTTPS analysis also reports unavailable TLS certificate evidence, even when the website request succeeds. A partial report exits with code `3`.
+
+For a service installation with PostgreSQL and an Unbound resolver, follow the [Compose setup guide](docs/operations.md#compose-installation).
+
+## Read a report
+
+Reports contain collected observations, evidence from matching rules and datasets, findings, and coverage for each capability.
+
+This illustrative excerpt shows a CloudFront finding for a hostname with a matching CNAME. It is not live output from `example.com`. Other report fields are omitted:
 
 ```json
 {
-  "target": {
-    "canonical": "example.com"
-  },
-  "status": "complete",
-  "findings": [
-    {
-      "subject": "www.example.com",
-      "provider_id": "aws",
-      "product_id": "aws.cloudfront",
-      "relation": "web_delivery",
-      "strength": "strong",
-      "evidence_ids": ["fixture-cname-cloudfront"]
-    }
-  ],
-  "coverage": [
-    {
-      "capability": "dns",
-      "status": "complete"
-    }
-  ]
+	"target": {
+		"canonical": "example.com"
+	},
+	"status": "partial",
+	"findings": [
+		{
+			"subject": "www.example.com",
+			"provider_id": "aws",
+			"product_id": "aws.cloudfront",
+			"relation": "web_delivery",
+			"strength": "strong",
+			"evidence_ids": ["illustrative-cname-evidence"]
+		}
+	],
+	"coverage": [
+		{
+			"capability": "tls_certificate",
+			"status": "unavailable",
+			"reason": "TLS certificate evidence collection is unsupported"
+		}
+	]
 }
 ```
 
-If a lookup fails or a local data file is missing, `status` is `partial` and `coverage` names the affected lookup.
+Use `evidence_ids` to find the supporting entries in the full report's `evidence` array. `strength` describes the evidence supporting a finding, not a probability. Inspect `coverage` before interpreting an empty findings list. `complete` means the requested work completed within its reported coverage, not that every real-world service was discovered.
 
-## How it works
+The CLI uses these exit codes:
 
-```mermaid
-flowchart TB
-	accTitle: Cloudattrib domain analysis
-	accDescr: DNS and HTTP collection produce observations. Local rules and datasets turn those observations into findings. The CLI or API returns the report, and service mode stores it in PostgreSQL.
+| Code | Meaning |
+| --- | --- |
+| `0` | Requested results completed, including a completed search with no matches. |
+| `2` | Invalid command, configuration, or input; an idempotency conflict; or a capacity rejection. |
+| `3` | At least one accepted target returned a partial, failed, or cancelled report. |
+| `4` | A required capability, bundle, startup step, or persistence operation was unavailable or failed. |
 
-	input["Domain, hostname, or URL<br/>CLI or HTTP API"] --> plan["Normalize target<br/>Set scope and budgets"]
-	ct[("Local CT index")] -. "seed names" .-> plan
+See the [report schema](schema/report.schema.json) for all fields and the [result-status contract](SPEC.md#142-result-status) for failure behavior.
 
-	subgraph collection["Live collection"]
-		dns["DNS records and query results"]
-		http["HTTP and verified HTTPS transport<br/>Headers, redirects, HTML, and peer IPs"]
-		dns -->|"approved public address"| http
-	end
+## Common commands
 
-	plan --> dns
-	dns --> observations["Observations"]
-	http --> observations
-
-	subgraph local["Local matching"]
-		classify["Product rules, web fingerprints,<br/>cloud ranges, CDN data, and ASN data"]
-		aggregate["Group matches by<br/>provider, product, and relationship"]
-		classify --> aggregate
-	end
-
-	observations --> classify
-	sources["Local source files"] --> bundle[("Data bundle")]
-	bundle -. "lookup data" .-> classify
-	aggregate --> report["Report<br/>Findings, evidence, and coverage"]
-	report --> output["CLI JSON or HTTP response"]
-	report --> storage[("PostgreSQL<br/>Reports and jobs")]
-```
-
-## Other commands
+Analyze DNS without fetching the website:
 
 ```sh
-# Skip HTTP and HTTPS
 ./bin/cloudattrib analyze example.com --mode dns
-
-# Analyze a file of targets
-./bin/cloudattrib batch --input domains.txt --format jsonl
-
-# Look up an IP address in local data
-./bin/cloudattrib lookup-ip 198.51.100.7 --match all
-
-# Run the API and job workers
-./bin/cloudattrib serve --config config/example.yaml
 ```
 
-`reclassify` runs saved observations against another data bundle without contacting the target:
+Analyze a URL. URLs containing a query string are rejected:
+
+```sh
+./bin/cloudattrib analyze https://example.com/ --kind url
+```
+
+Analyze a text file containing one target per line. JSONL output contains one result or error envelope per input, with its `input_index`:
+
+```sh
+./bin/cloudattrib batch --input domains.txt --format jsonl
+```
+
+After loading local IP data, look up an address. Replace this documentation address with the IP you want to inspect:
+
+```sh
+./bin/cloudattrib lookup-ip 198.51.100.7 --match all
+```
+
+Reclassify a saved report using the built-in rule bundle, without collecting new observations:
 
 ```sh
 ./bin/cloudattrib reclassify --report report.json --bundle builtin-rules-v1
 ```
 
-## Add local data
+Replay requires retained inputs that the selected bundle can classify. To use another compatible bundle, replace `builtin-rules-v1` with its ID.
 
-Put source files in `data/sources`, or set `data.source_directory` in the configuration file. You can load any supported subset. Missing sources produce partial coverage instead of an empty successful lookup.
+## Local data and configuration
 
-```text
-data/sources/
-├── cloudranges/
-│   └── json/
-│       ├── <provider>.json
-│       └── <provider>-details.json
-├── aws-ip-ranges.json
-├── gcp-cloud.json
-├── azure-service-tags.json
-├── cdncheck-sources-data.json
-├── iptoasn-v4.tsv
-└── iptoasn-v6.tsv
-```
+Place supported source files in `data/sources`, or set `data.source_directory` in your configuration. Sources include cloud provider ranges, official AWS, GCP, and Azure metadata, CDN data, and IP-to-ASN records. Production datasets are not included in the repository.
 
-Keep each `disposable/cloud-ip-ranges` primary file and its optional `*-details.json` companion from the same pinned revision. Primary files create provider associations. Companion files only add validated metadata to matching provider prefixes, so the importer never treats them as duplicate providers.
+The standalone CLI loads these files when no active bundle is selected. The service supports versioned data bundles with activation and rollback. Missing sources are reported in coverage. IP lookup requires at least one usable local IP source.
 
-The broad feed retains recently retired prefixes. The importer joins `retired_at` records by provider and canonical prefix, and normal analysis and IP lookup exclude those associations. An API lookup with `include_retired: true` returns them with their retirement time and source provenance. Historical matches do not claim current ownership.
+Use the [source format reference](docs/source-contracts.md) to prepare files and the [bundle operations guide](docs/operations.md#import-and-activate-data) to import and activate them. These guides cover source revisions, retired ranges, and update procedures.
 
-See the [source contracts](docs/source-contracts.md) for the supported files and formats. See the [operations guide](docs/operations.md#import-and-activate-data) to import and activate a data bundle.
+Set `CLOUDATTRIB_CONFIG` to a YAML or JSON configuration file. `CLOUDATTRIB_RESOLVER` overrides the resolver loaded through that environment variable. Start with the [example configuration](config/example.yaml). For service setup, authentication, and resource limits, see the [operations guide](docs/operations.md).
 
-## Configure it
+## Current limits
 
-Set `CLOUDATTRIB_CONFIG` to a YAML or JSON configuration file. Use `CLOUDATTRIB_RESOLVER` to override its DNS resolver. [config/example.yaml](config/example.yaml) contains every setting.
+- HTTPS requests verify server certificates, but reports do not retain certificate evidence. Applicable reports mark `tls_certificate` as unavailable.
+- Certificate Transparency discovery is experimental and disabled by default. It uses a local PostgreSQL index. Live log collection has not yet been tested against public CT logs. See [CT operations](docs/ct-operations.md).
+- Collection does not execute JavaScript, authenticate to websites, or discover hidden origin servers. Results depend on public observations, supported rules, and the datasets you load.
 
-Service mode keeps at most `limits.maximum_resident_generations` bundle analyzers in memory. The default is 4, and the minimum is 2 so that the service can load a replacement while it keeps the last-known-good generation available. See [bundle residency](docs/operations.md#control-bundle-residency) for the ownership and metrics contract.
-
-Certificate Transparency discovery uses a local PostgreSQL index. Follow [CT operations](docs/ct-operations.md) to import certificates or collect from a configured log.
+The [qualification report](docs/qualification.md) records tested behavior, operating environments, and remaining release conditions.
 
 ## Documentation
 
-- [Operations](docs/operations.md)
-- [Architecture](docs/architecture.md)
-- [Data source formats](docs/source-contracts.md)
-- [Specification](SPEC.md)
+| Topic | Reference |
+| --- | --- |
+| Install, operate, and update the service | [Operations guide](docs/operations.md) |
+| Integrate with the HTTP API | [OpenAPI definition](schema/openapi.yaml) |
+| Understand collection and classification | [Architecture](docs/architecture.md) |
+| Inspect supported rules | [Rule coverage matrix](rules/coverage-matrix.md) |
+| Review required behavior | [Specification](SPEC.md) |
+| Review dependencies and data provenance | [Dependency audit](docs/dependency-audit.md) and [third-party notices](NOTICE.md) |
 
-## Develop
+Historical network measurements from 2026-09-21 cover [discovery and DNS enrichment](docs/benchmarks/2026-09-21-company-api-measurements.json) and a [DNS-only versus full-analysis comparison](docs/benchmarks/2026-09-21-subdomain-full-measurements.json). They used crt.name for discovery and commit `a504ec0` for analysis. These single-run measurements do not establish current performance, detection accuracy, or built-in CT coverage.
 
-Run the repository checks before submitting a change:
+## Contributing
+
+Report bugs and propose changes through [GitHub issues](https://github.com/edgefloor/cloudattrib/issues). Include the command, configuration relevant to the problem, expected behavior, and actual result. Remove credentials and sensitive report data from examples.
+
+Before submitting a pull request, run:
 
 ```sh
 make check
 ```
 
-Ordinary `go test` and `make check` runs skip PostgreSQL integration tests when no test database is configured. To run the required PostgreSQL lifecycle and contention suite, set `CLOUDATTRIB_POSTGRES_TEST_DSN` to a disposable database and run:
+This runs formatting checks, static analysis, tests, race detection, repository validation, and a build. PostgreSQL integration tests require a separate disposable database. Set `CLOUDATTRIB_POSTGRES_TEST_DSN` to its connection string, then run:
 
 ```sh
 make test-postgres
 ```
 
-`make test-postgres` fails when the variable is unset or the database is unavailable. CI runs this command against a disposable PostgreSQL service.
+CI runs both commands. Changes to attribution rules need positive fixtures and negative cases that check unsupported conclusions. Follow the [repository contribution rules](AGENTS.md).
+
+## License
+
+cloudattrib is licensed under the [MIT License](LICENSE). Third-party components and imported datasets have their own terms. See [NOTICE.md](NOTICE.md).
