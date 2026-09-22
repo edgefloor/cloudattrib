@@ -85,3 +85,29 @@ func TestRedirectResolverRetainsAcceptedAddressesAtAddressLimit(t *testing.T) {
 		t.Fatalf("resolve() = %v, %#v", addresses, partial)
 	}
 }
+
+func TestRedirectResolverReportsQueryOmissionsWithUsableAddresses(t *testing.T) {
+	t.Parallel()
+
+	want := netip.MustParseAddr("93.184.216.34")
+	resolve := newRedirectResolver(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		if question.Type == 1 {
+			return model.DNSResult{
+				Question:  question,
+				Outcome:   model.DNSOutcomeAnswered,
+				Addresses: []netip.Addr{want},
+				Omitted:   2,
+			}, nil
+		}
+		return model.DNSResult{Question: question, Outcome: model.DNSOutcomeNoData}, nil
+	})
+
+	addresses, err := resolve(t.Context(), "redirect.example")
+	var partial *http.PartialResolutionError
+	if !errors.As(err, &partial) {
+		t.Fatalf("resolve() error = %v, want PartialResolutionError", err)
+	}
+	if !slices.Equal(addresses, []netip.Addr{want}) || partial.Omitted != 2 || model.ErrorCodeOf(partial.Err) != model.CodeBudgetExceeded {
+		t.Fatalf("resolve() = %v, %#v", addresses, partial)
+	}
+}

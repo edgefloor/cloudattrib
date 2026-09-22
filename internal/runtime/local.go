@@ -224,6 +224,10 @@ func newRedirectResolver(query collectdns.QueryFunc) collecthttp.ResolveFunc {
 				omitted += max(result.Omitted, 1)
 				continue
 			}
+			if result.Omitted > 0 {
+				failures = append(failures, model.NewError(model.CodeBudgetExceeded, "redirect DNS response was truncated by a collection limit", nil))
+				omitted += result.Omitted
+			}
 			for _, address := range result.Addresses {
 				if addressBudgetExhausted || !policy.ReserveAddress(ctx) {
 					if !addressBudgetExhausted {

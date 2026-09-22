@@ -732,7 +732,8 @@ func sameActivation(left, right *datasets.Activation) bool {
 		left.Generation == right.Generation &&
 		left.BundleID == right.BundleID &&
 		left.CandidateHash == right.CandidateHash &&
-		left.Action == right.Action
+		left.Action == right.Action &&
+		left.At.Equal(right.At)
 }
 
 var _ app.Analyzer = (*bundleAnalyzerFactory)(nil)

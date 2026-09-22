@@ -326,7 +326,11 @@ func (r *Repository) publishCommitted(activation Activation, allowRegression boo
 			return fmt.Errorf("committed activation generation is stale")
 		}
 		if active.Generation == activation.Generation {
-			if active.OperationID == activation.OperationID && active.BundleID == activation.BundleID {
+			if active.OperationID == activation.OperationID &&
+				active.BundleID == activation.BundleID &&
+				active.CandidateHash == activation.CandidateHash &&
+				active.Action == activation.Action &&
+				active.At.Equal(activation.At) {
 				return nil
 			}
 			if !allowRegression {

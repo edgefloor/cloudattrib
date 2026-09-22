@@ -597,6 +597,27 @@ func TestBundleAnalyzerFactoryRepairsMissingAndCorruptPointers(t *testing.T) {
 				}
 			},
 		},
+		{
+			name: "timestamp drift",
+			mutate: func(t *testing.T, path string) {
+				encoded, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var activation datasets.Activation
+				if err := json.Unmarshal(encoded, &activation); err != nil {
+					t.Fatal(err)
+				}
+				activation.At = activation.At.Add(time.Second)
+				encoded, err = json.Marshal(activation)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, encoded, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
@@ -624,7 +645,7 @@ func TestBundleAnalyzerFactoryRepairsMissingAndCorruptPointers(t *testing.T) {
 				t.Fatalf("reloadDesired() error = %v", err)
 			}
 			published, err := repository.Active()
-			if err != nil || !sameActivation(published, &activation) {
+			if err != nil || !sameActivation(published, &activation) || !published.At.Equal(activation.At) {
 				t.Fatalf("Active() = %#v, %v; want repaired activation %#v", published, err, activation)
 			}
 		})
