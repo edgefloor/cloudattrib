@@ -106,16 +106,28 @@ func TestCanonicalTechnologyReportMatchesSchema(t *testing.T) {
 
 	now := time.Date(2026, 9, 21, 8, 0, 0, 0, time.UTC)
 	report := Report{
-		SchemaVersion: SchemaVersion,
-		ID:            "report-1",
-		Target:        Target{Original: "example.com", Canonical: "example.com", Kind: TargetDomain},
-		Mode:          ModeFull,
-		StartedAt:     now,
-		EndedAt:       now,
-		ClassifiedAt:  now,
-		BundleID:      "bundle-1",
-		BuildID:       "build-1",
-		Status:        StatusPartial,
+		SchemaVersion:    SchemaVersion,
+		ContentIDVersion: ReportContentIDVersion,
+		ID:               "report-1",
+		Target:           Target{Original: "example.com", Canonical: "example.com", Kind: TargetDomain},
+		Mode:             ModeFull,
+		StartedAt:        now,
+		EndedAt:          now,
+		ClassifiedAt:     now,
+		BundleID:         "bundle-1",
+		BuildID:          "build-1",
+		Provenance: &ReportProvenance{
+			Collection: CollectionProvenance{
+				Build:             BuildProvenance{Revision: KnownProvenance("revision-1"), Dirty: BuildClean},
+				PolicyRevision:    KnownProvenance("policy-1"),
+				FingerprintDigest: KnownProvenance("sha256:fingerprints"),
+			},
+			Classification: ClassificationProvenance{
+				Build:       BuildProvenance{Revision: KnownProvenance("revision-1"), Dirty: BuildClean},
+				RulesDigest: KnownProvenance("sha256:rules"),
+			},
+		},
+		Status: StatusPartial,
 		Evidence: []Evidence{{
 			ID: "evidence-1", ClassifiedAt: now, DetectorID: "wappalyzergo-v0.3.2", Subject: "example.com",
 			ProductID: "webtech.react", Category: "web_technology", Relation: RelationWebIntegration, Strength: StrengthModerate,
@@ -135,6 +147,11 @@ func TestCanonicalTechnologyReportMatchesSchema(t *testing.T) {
 	}
 	if err := compileJSONSchema(t, "report.schema.json").Validate(document); err != nil {
 		t.Fatalf("canonical report does not match schema: %v\n%s", err, encoded)
+	}
+	withoutProvenance := document.(map[string]any)
+	delete(withoutProvenance, "provenance")
+	if err := compileJSONSchema(t, "report.schema.json").Validate(withoutProvenance); err == nil {
+		t.Fatal("content ID version 2 report without provenance matched schema")
 	}
 }
 

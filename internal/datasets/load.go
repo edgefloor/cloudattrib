@@ -23,6 +23,7 @@ import (
 	"cloudattrib/internal/ingest/gcp"
 	"cloudattrib/internal/ingest/iptoasn"
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/policy"
 )
 
 const maximumSourceBytes = 64 << 20
@@ -226,7 +227,7 @@ func LoadSources(ctx context.Context, directory, buildID string) (LoadedBundle, 
 	loaded.Counts.ASNIntervals = len(intervals)
 	loaded.Candidate = Candidate{
 		Manifest: Manifest{SchemaVersion: 1, BundleID: bundleID, Sources: sources, Artifacts: artifacts, CompatibleDetectorBuilds: []string{buildID}},
-		View:     model.NewAttributionView(bundleID, "public-destination-v1", []string{buildID, "rules-v1", "wappalyzergo-v0.3.2"}, capabilities),
+		View:     model.NewAttributionView(bundleID, policy.PublicDestinationPolicyRevision, []string{buildID, "rules-v1", "wappalyzergo-v0.3.2"}, capabilities),
 	}
 	return loaded, nil
 }

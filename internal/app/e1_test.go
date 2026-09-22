@@ -64,13 +64,18 @@ func TestE1DomainAnalysisStartsHTTPBeforeAAAAAndKeepsPartialEvidence(t *testing.
 		},
 	)
 	service := app.NewService(app.Dependencies{
-		DNS:        collectdns.New(dnsClient.Query, policy.PublicDestinationPolicy()),
-		HTTP:       collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20),
-		Detectors:  []app.Detector{dnsrules.NewDefault()},
-		Prefixes:   prefixIndex,
-		View:       view,
-		HTTPScheme: "http",
-		Now:        func() time.Time { return time.Date(2026, 9, 20, 8, 0, 0, 0, time.UTC) },
+		DNS:       collectdns.New(dnsClient.Query, policy.PublicDestinationPolicy()),
+		HTTP:      collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20),
+		Detectors: []app.Detector{dnsrules.NewDefault()},
+		Prefixes:  prefixIndex,
+		View:      view,
+		BuildProvenance: model.BuildProvenance{
+			Revision: model.KnownProvenance("0123456789abcdef"), Dirty: model.BuildClean,
+		},
+		RulesDigest:       model.KnownProvenance("sha256:fixture-rules"),
+		FingerprintDigest: model.KnownProvenance("sha256:fixture-fingerprints"),
+		HTTPScheme:        "http",
+		Now:               func() time.Time { return time.Date(2026, 9, 20, 8, 0, 0, 0, time.UTC) },
 	})
 
 	reportCh := make(chan model.Report, 1)
@@ -97,6 +102,12 @@ func TestE1DomainAnalysisStartsHTTPBeforeAAAAAndKeepsPartialEvidence(t *testing.
 	}
 	if report.Status != model.StatusPartial {
 		t.Fatalf("Analyze() status = %q, want partial", report.Status)
+	}
+	if report.Provenance == nil || report.BuildID != "git:0123456789abcdef" {
+		t.Fatalf("report build provenance = %#v, build ID = %q", report.Provenance, report.BuildID)
+	}
+	if report.Provenance.Collection.PolicyRevision.Value != "public-v1" || report.Provenance.Collection.FingerprintDigest.Value != "sha256:fixture-fingerprints" || report.Provenance.Classification.RulesDigest.Value != "sha256:fixture-rules" {
+		t.Fatalf("report classifier provenance = %#v", report.Provenance)
 	}
 	if !hasCoverage(report.Coverage, "tls_certificate", model.CoverageSkipped) {
 		t.Fatalf("TLS coverage = %#v, want skipped for plain HTTP", report.Coverage)

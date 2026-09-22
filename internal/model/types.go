@@ -11,7 +11,7 @@ const (
 	// SchemaVersion is the current report and interface schema version.
 	SchemaVersion = "1"
 	// ReportContentIDVersion identifies the current canonical report projection.
-	ReportContentIDVersion = "1"
+	ReportContentIDVersion = "2"
 
 	// ExplanationGranularityDetectorResult means the detector identified a
 	// technology but did not expose a more specific matching primitive.
@@ -285,23 +285,24 @@ type Coverage struct {
 
 // Report is the versioned attribution result envelope.
 type Report struct {
-	SchemaVersion    string        `json:"schema_version"`
-	ContentIDVersion string        `json:"content_id_version,omitempty"`
-	ID               string        `json:"report_id"`
-	OriginalReportID string        `json:"original_report_id,omitempty"`
-	Target           Target        `json:"target"`
-	Mode             Mode          `json:"mode"`
-	StartedAt        time.Time     `json:"started_at"`
-	EndedAt          time.Time     `json:"ended_at"`
-	ClassifiedAt     time.Time     `json:"classified_at"`
-	BundleID         string        `json:"bundle_id"`
-	BuildID          string        `json:"build_id"`
-	Status           ReportStatus  `json:"status"`
-	Observations     []Observation `json:"observations"`
-	Evidence         []Evidence    `json:"evidence"`
-	Findings         []Finding     `json:"findings"`
-	Coverage         []Coverage    `json:"coverage"`
-	Warnings         []string      `json:"warnings"`
+	SchemaVersion    string            `json:"schema_version"`
+	ContentIDVersion string            `json:"content_id_version,omitempty"`
+	ID               string            `json:"report_id"`
+	OriginalReportID string            `json:"original_report_id,omitempty"`
+	Target           Target            `json:"target"`
+	Mode             Mode              `json:"mode"`
+	StartedAt        time.Time         `json:"started_at"`
+	EndedAt          time.Time         `json:"ended_at"`
+	ClassifiedAt     time.Time         `json:"classified_at"`
+	BundleID         string            `json:"bundle_id"`
+	BuildID          string            `json:"build_id"`
+	Provenance       *ReportProvenance `json:"provenance,omitempty"`
+	Status           ReportStatus      `json:"status"`
+	Observations     []Observation     `json:"observations"`
+	Evidence         []Evidence        `json:"evidence"`
+	Findings         []Finding         `json:"findings"`
+	Coverage         []Coverage        `json:"coverage"`
+	Warnings         []string          `json:"warnings"`
 }
 
 // CTCheckStatus is the outcome of one independent CT verification step.

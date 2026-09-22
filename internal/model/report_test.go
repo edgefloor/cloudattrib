@@ -240,6 +240,114 @@ func TestContentIDChangesWhenParticipatingFieldChanges(t *testing.T) {
 	}
 }
 
+func TestContentIDVersionOneKeepsHistoricalProjection(t *testing.T) {
+	t.Parallel()
+
+	base := Report{
+		ContentIDVersion: "1",
+		Target:           Target{Canonical: "example.com", Kind: TargetDomain},
+		BuildID:          "historical-build",
+	}
+	withProvenance := base
+	withProvenance.Provenance = &ReportProvenance{
+		Collection: CollectionProvenance{
+			Build:             BuildProvenance{Revision: KnownProvenance("aaaaaaaa"), Dirty: BuildDirty},
+			PolicyRevision:    KnownProvenance("policy-a"),
+			FingerprintDigest: KnownProvenance("sha256:fingerprint-a"),
+		},
+		Classification: ClassificationProvenance{
+			Build:       BuildProvenance{Revision: KnownProvenance("bbbbbbbb"), Dirty: BuildClean},
+			RulesDigest: KnownProvenance("sha256:rules-a"),
+		},
+	}
+
+	want, err := base.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() historical projection error = %v", err)
+	}
+	got, err := withProvenance.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() historical report with provenance error = %v", err)
+	}
+	if got != want {
+		t.Fatalf("version 1 ContentID() = %q, want historical %q", got, want)
+	}
+}
+
+func TestContentIDVersionTwoCoversProvenance(t *testing.T) {
+	t.Parallel()
+
+	base := Report{
+		ContentIDVersion: ReportContentIDVersion,
+		Target:           Target{Canonical: "example.com", Kind: TargetDomain},
+		Provenance: &ReportProvenance{
+			Collection: CollectionProvenance{
+				Build:             BuildProvenance{Revision: KnownProvenance("aaaaaaaa"), Dirty: BuildClean},
+				PolicyRevision:    KnownProvenance("policy-a"),
+				FingerprintDigest: KnownProvenance("sha256:fingerprint-a"),
+			},
+			Classification: ClassificationProvenance{
+				Build:       BuildProvenance{Revision: KnownProvenance("aaaaaaaa"), Dirty: BuildClean},
+				RulesDigest: KnownProvenance("sha256:rules-a"),
+			},
+		},
+	}
+	first, err := base.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() error = %v", err)
+	}
+	tests := []struct {
+		name   string
+		change func(*ReportProvenance)
+	}{
+		{name: "collection build", change: func(value *ReportProvenance) {
+			value.Collection.Build.Revision = KnownProvenance("bbbbbbbb")
+		}},
+		{name: "dirty state", change: func(value *ReportProvenance) {
+			value.Collection.Build.Dirty = BuildDirty
+		}},
+		{name: "policy", change: func(value *ReportProvenance) {
+			value.Collection.PolicyRevision = KnownProvenance("policy-b")
+		}},
+		{name: "fingerprints", change: func(value *ReportProvenance) {
+			value.Collection.FingerprintDigest = KnownProvenance("sha256:fingerprint-b")
+		}},
+		{name: "classification build", change: func(value *ReportProvenance) {
+			value.Classification.Build.Revision = KnownProvenance("bbbbbbbb")
+		}},
+		{name: "rules", change: func(value *ReportProvenance) {
+			value.Classification.RulesDigest = KnownProvenance("sha256:rules-b")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			changed := base.Clone()
+			test.change(changed.Provenance)
+			second, err := changed.ContentID()
+			if err != nil {
+				t.Fatalf("ContentID() changed provenance error = %v", err)
+			}
+			if first == second {
+				t.Fatalf("ContentID() did not cover %s: %q", test.name, first)
+			}
+		})
+	}
+}
+
+func TestReportCloneOwnsProvenance(t *testing.T) {
+	t.Parallel()
+
+	original := Report{Provenance: &ReportProvenance{
+		Collection: CollectionProvenance{Build: BuildProvenance{Revision: KnownProvenance("aaaaaaaa"), Dirty: BuildClean}},
+	}}
+	clone := original.Clone()
+	clone.Provenance.Collection.Build.Revision.Value = "bbbbbbbb"
+	if original.Provenance.Collection.Build.Revision.Value != "aaaaaaaa" {
+		t.Fatalf("mutating cloned provenance changed original: %#v", original.Provenance)
+	}
+}
+
 func TestReportCanonicalJSONEmitsRequiredCollectionsAsArrays(t *testing.T) {
 	t.Parallel()
 

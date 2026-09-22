@@ -71,6 +71,10 @@ func (r Report) MarshalJSON() ([]byte, error) {
 // Clone returns a report whose mutable fields do not alias r.
 func (r Report) Clone() Report {
 	clone := r
+	if r.Provenance != nil {
+		provenance := *r.Provenance
+		clone.Provenance = &provenance
+	}
 	clone.Observations = cloneObservations(r.Observations)
 	clone.Evidence = cloneEvidence(r.Evidence)
 	clone.Findings = cloneFindings(r.Findings)
@@ -128,7 +132,7 @@ func (r Report) contentCanonicalJSON() ([]byte, error) {
 	if version == "" {
 		version = ReportContentIDVersion
 	}
-	if version != ReportContentIDVersion {
+	if version != "1" && version != ReportContentIDVersion {
 		return nil, fmt.Errorf("unsupported content ID version %q", version)
 	}
 	canonical := r.canonicalReport()
@@ -161,6 +165,9 @@ func (r Report) contentCanonicalJSON() ([]byte, error) {
 		return nil, err
 	}
 	delete(projection, "report_id")
+	if version == "1" {
+		delete(projection, "provenance")
+	}
 	var result bytes.Buffer
 	if err := writeCanonicalJSON(&result, projection); err != nil {
 		return nil, err

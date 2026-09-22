@@ -28,7 +28,6 @@ import (
 
 const (
 	builtinBundleID      = "builtin-rules-v1"
-	detectorBuildID      = "cloudattrib-runtime-v1"
 	serviceShutdownGrace = 10 * time.Second
 	workerCommitTimeout  = 5 * time.Second
 )

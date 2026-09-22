@@ -30,6 +30,8 @@ The selected `wappalyzergo` revision embeds these assets:
 - `fingerprints_data.json`: SHA-256 `c662ae9244c255b35ccc6d5e92c05aa0f9ca95af5f6cd552217524e6f7e464e5`
 - `categories_data.json`: SHA-256 `195f9a946c5b3a855839882cb8365a4d9758e8054fbec77f8bfd662f2211ddf3`
 
+Reports compute `provenance.collection.fingerprint_digest` from the exact `fingerprints_data.json` bytes returned by the dependency's embedded-data accessor. The detector-build identity combines that digest with the engine identity, the embedded application-rule digest, and the destination-policy revision.
+
 The passive API returns technology labels. It does not promise a stable explanation for each matching regular expression. Reports use `explanation_granularity=detector_result`, retain the raw names, and reference the HTTP observation.
 
 Review the embedded data's provenance before redistributing it independently from the binary.

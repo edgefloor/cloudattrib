@@ -72,9 +72,13 @@ Reclassification creates a new report from retained observations and reusable de
 
 Passive web fingerprinting returns typed raw technology labels with detector identity and detector-result explanation granularity. The application retains those labels as technology observations before running product rules. Live analysis and replay therefore apply the same taxonomy to the same observation shape; human-readable evidence explanations are generated output and are never parsed as classifier input. A retained framework label can produce a providerless `web_technology` finding, but it cannot establish cloud-provider ownership.
 
+Report provenance has two parts. `provenance.collection` identifies the build, the destination policy, and the embedded fingerprint data that produced retained observations. `provenance.classification` identifies the build and rules that produced the current evidence and findings. A replay copies collection provenance and writes new classification provenance. Historical inputs use explicit unknown values instead of fixed labels.
+
+The Go tool supplies the VCS revision and dirty state at the runtime boundary. The rules package hashes the embedded rule artifact. The passive detector hashes the embedded `wappalyzergo` fingerprint artifact. The detector-build identity covers the engine, both digests, and the destination-policy revision. `build_id` remains in the report for compatibility, but structured provenance is authoritative.
+
 Evidence references both observations and consulted dataset records. Each dataset record retains its source, revision or digest, record reference, and known publication and effective times. Unknown times stay unknown. A new ownership association does not imply that it existed when the observations were collected.
 
-The `model` package owns observation occurrence IDs and report content IDs. Collectors supply run, seed, request or query, hop, attempt, and item context. Reclassification preserves the collected observation IDs. Report content IDs use the versioned canonical projection in [SPEC section 9.2](../SPEC.md#92-core-fields), while PostgreSQL keeps historical report IDs unchanged.
+The `model` package owns observation occurrence IDs and report content IDs. Collectors supply run, seed, request or query, hop, attempt, and item context. Reclassification preserves the collected observation IDs. Content ID version 2 covers structured provenance. Version 1 keeps its original field set, and PostgreSQL keeps historical report IDs unchanged. See [SPEC section 9.2](../SPEC.md#92-core-fields).
 
 If one replay path lacks inputs but another works, return a partial report. If none works, return `capability_unavailable`. See SPEC sections [9.1 through 9.5](../SPEC.md#91-collected-observations-source-records-and-conclusions) and [12.3](../SPEC.md#123-history-and-retention).
 

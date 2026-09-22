@@ -496,16 +496,24 @@ Use explicit relations: `web_delivery`, `authoritative_dns`, `mail_routing`, `se
 | Dataset record | Source ID, revision/digest, record reference, consulted normalized fields, publication time and effective time when known |
 | Evidence | ID, observation IDs, dataset-record references, classification time, detector ID, rule ID if applicable, source revision/digest, subject, provider/product IDs when known, relation, strength, activity, explanation |
 | Finding | ID, subject, provider ID unless the finding is technology-only, optional product ID, category, relation, strength, activity, evidence IDs, conflict IDs, limitations |
-| Report | Schema version, report ID, normalized target, mode, start/end times, collection times, classification time, bundle/build identity, status, findings, evidence, dataset-record provenance, coverage, warnings |
+| Report | Schema version, report ID, normalized target, mode, start/end times, collection times, classification time, bundle identity, structured collection and classification provenance, compatibility build ID, status, findings, evidence, dataset-record provenance, coverage, warnings |
 | Coverage entry | Capability, status, attempted/completed counts, error codes, truncation/omission counts, relevant data age |
 
 Provider-only evidence has a null product. A technology-only finding omits `provider_id`. It has a nonempty `product_id`, `category=web_technology`, and `relation=web_integration`. If `provider_id` is present, it is a nonempty string. Unknown fields, including source publication/effective times, remain unknown rather than receiving fabricated defaults. All references must resolve within the report or its retained supporting records. Retain the consulted dataset fields and provenance needed to explain findings even after a bundle's large indexes are pruned.
 
 Observation IDs identify collection occurrences, not payload equality. The version 1 occurrence input contains the collection-run ID, seed and seed index, request or query index, redirect hop, attempt, and item index. HTTP occurrence input also contains the method, scheme, host, escaped path, and approved address. It excludes URL user information and raw query values. A separate `content_hash` records content equality where the collector can compute one. Reclassification copies source observation IDs without creating new collection occurrences.
 
-New reports set `content_id_version` to `1`. The version 1 content projection contains every report field and nested field except `report_id`. It therefore includes `content_id_version`, `original_report_id`, target data, mode, timestamps, bundle and build IDs, status, observations, evidence, findings, coverage, and warnings. The projection sorts report collections and reference sets by their documented stable keys. It preserves array order where order is part of a typed payload.
+New reports set `content_id_version` to `2`. Version 2 contains every current report field and nested field except `report_id`. The projection includes the structured `provenance` field.
 
-The version 1 projection converts typed timestamps to UTC before RFC 3339 encoding. It sorts JSON object keys recursively, including keys in observation payloads and dataset-record fields. JSON zero is `0`. Each other JSON number uses an exact base-10 coefficient without leading or trailing zeroes and a base-10 exponent, such as `1e0`, `1.25e2`, or `1e-2`. These rules make equivalent JSON object ordering, decimal spelling, timestamp offsets, and PostgreSQL JSONB storage produce the same content ID. Assigning the computed value to `report_id` does not change the next computation.
+The version 1 projection remains fixed for reports that declare `content_id_version=1`. It includes `content_id_version`, `original_report_id`, target data, mode, timestamps, bundle and build IDs, status, observations, evidence, findings, coverage, and warnings. It excludes the later `provenance` field. The service can therefore read and verify a version 1 report without changing its content ID.
+
+Both projections sort report collections and reference sets by their documented stable keys. They preserve array order where order is part of a typed payload.
+
+Both projections convert typed timestamps to UTC before RFC 3339 encoding. They sort JSON object keys recursively, including keys in observation payloads and dataset-record fields. JSON zero is `0`. Each other JSON number uses an exact base-10 coefficient without leading or trailing zeroes and a base-10 exponent, such as `1e0`, `1.25e2`, or `1e-2`. These rules make equivalent JSON object ordering, decimal spelling, timestamp offsets, and PostgreSQL JSONB storage produce the same content ID. Assigning the computed value to `report_id` does not change the next computation.
+
+The `provenance.collection` object records the VCS revision, the dirty state, the destination-policy revision, and the embedded fingerprint-data digest that produced retained observations. The `provenance.classification` object records the VCS revision, the dirty state, and the rule-artifact digest that produced the current evidence and findings. Each revision or input identity has `status=known` with a value, or `status=unknown` without one. Dirty state is `clean`, `dirty`, or `unknown`.
+
+The Go build metadata is the source for the VCS revision and dirty state. If the build lacks VCS metadata, the report records unknown values. The service does not substitute a release name or a fixed runtime label. `build_id` remains a compatibility field. New reports derive it from the structured classification build or set it to `unknown`.
 
 Reports without `content_id_version` use the historical identity contract. Storage and result routes preserve their existing `report_id` values and do not rehash or rewrite them. A reclassification report links to the historical ID through `original_report_id` and uses the current content-ID version for its own identity.
 
@@ -529,7 +537,7 @@ A complete analysis with no findings is different from an incomplete analysis. "
 
 Reclassification reinterprets retained observations using a selected compatible bundle. It does not reconstruct historical ownership.
 
-Create a new report linked to the original report and immutable observations. Preserve collection times and collection coverage. Record the new classification time, selected bundle, and consulted dataset records.
+Create a new report linked to the original report and immutable observations. Preserve collection times, collection coverage, and `provenance.collection` without modification. Record the new classification time, selected bundle, consulted dataset records, and current `provenance.classification`. For a historical report without structured provenance, record each unavailable collection identity as unknown. Do not infer the original revision from `build_id`.
 
 Record source publication and effective times separately when supplied, and leave unknown times unknown. A new association must not imply that it was valid at the original collection time. A difference between reports may reflect changed source data or rules rather than a change in the target's infrastructure. Keep original detector outputs with their original detector identity when reusing them as replay inputs.
 
@@ -802,7 +810,7 @@ A valid policy and schema can support collection while enrichment is unavailable
 
 Canonical bundle identity includes content hashes, selected upstream revisions, adapter versions, provider selection, rule/taxonomy versions, and required detector identity. Fetch/build timestamps are receipts, not inputs that create a different identity for identical content.
 
-Record the `wappalyzergo` engine and embedded fingerprint digest in the detector-build identity. Reject a bundle requiring an incompatible engine. CT indexing has its own checkpoint; record the exact candidate-set identity used by a report.
+Record the `wappalyzergo` engine, embedded fingerprint digest, rule digest, and policy revision in the detector-build identity. Compute the fingerprint digest from the exact embedded fingerprint bytes and the rule digest from the exact embedded rule bytes. Reject a bundle that requires an incompatible detector build. CT indexing has its own checkpoint. Record the exact candidate-set identity used by a report.
 
 ### 13.2 Update transaction
 

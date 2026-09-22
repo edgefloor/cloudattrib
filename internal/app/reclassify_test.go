@@ -23,13 +23,29 @@ func TestReclassifyPreservesCaptureAndUsesNewClassificationProvenance(t *testing
 		ID: "original-report", Target: model.Target{Canonical: "example.com", Kind: model.TargetDomain}, Mode: model.ModeFull,
 		BundleID: "old-bundle", ClassifiedAt: observedAt, Observations: []model.Observation{{ID: "obs-1", Type: "dns_record", Subject: "example.com", ObservedAt: observedAt, Status: "answered", Payload: model.JSONValue(`{"rrtype":"TXT","owner":"example.com","value":"fixture"}`)}},
 		Coverage: []model.Coverage{{Capability: "dns", Status: model.CoverageComplete, Attempted: 1, Completed: 1}},
+		Provenance: &model.ReportProvenance{
+			Collection: model.CollectionProvenance{
+				Build:             model.BuildProvenance{Revision: model.KnownProvenance("old-collection"), Dirty: model.BuildClean},
+				PolicyRevision:    model.KnownProvenance("old-policy"),
+				FingerprintDigest: model.KnownProvenance("sha256:old-fingerprints"),
+			},
+			Classification: model.ClassificationProvenance{
+				Build:       model.BuildProvenance{Revision: model.KnownProvenance("old-classification"), Dirty: model.BuildClean},
+				RulesDigest: model.KnownProvenance("sha256:old-rules"),
+			},
+		},
 	}
 	classifiedAt := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
 	service := NewService(Dependencies{
 		Detectors: []Detector{fixtureReplayDetector{}},
 		Store:     fixtureResultStore{report: original},
 		View:      model.NewAttributionView("new-bundle", "policy-v1", []string{"fixture-v2"}, nil),
-		Now:       func() time.Time { return classifiedAt },
+		BuildProvenance: model.BuildProvenance{
+			Revision: model.KnownProvenance("new-classification"), Dirty: model.BuildDirty,
+		},
+		RulesDigest:       model.KnownProvenance("sha256:new-rules"),
+		FingerprintDigest: model.KnownProvenance("sha256:new-fingerprints"),
+		Now:               func() time.Time { return classifiedAt },
 	})
 
 	replayed, err := service.Reclassify(context.Background(), model.ReclassifyRequest{ReportID: original.ID, BundleID: "new-bundle"})
@@ -44,6 +60,37 @@ func TestReclassifyPreservesCaptureAndUsesNewClassificationProvenance(t *testing
 	}
 	if len(replayed.Evidence) != 1 || replayed.Evidence[0].ClassifiedAt != classifiedAt || replayed.Evidence[0].DatasetRecords[0].Revision != "new-revision" || replayed.Evidence[0].DatasetRecords[0].EffectiveAt != nil {
 		t.Fatalf("replayed evidence = %#v", replayed.Evidence)
+	}
+	if replayed.Provenance == nil || replayed.Provenance.Collection != original.Provenance.Collection {
+		t.Fatalf("replayed collection provenance = %#v, want %#v", replayed.Provenance, original.Provenance.Collection)
+	}
+	if replayed.Provenance.Classification.Build.Revision.Value != "new-classification" || replayed.Provenance.Classification.Build.Dirty != model.BuildDirty || replayed.Provenance.Classification.RulesDigest.Value != "sha256:new-rules" {
+		t.Fatalf("replayed classification provenance = %#v", replayed.Provenance.Classification)
+	}
+	if replayed.BuildID != "git:new-classification+dirty" {
+		t.Fatalf("replayed build ID = %q", replayed.BuildID)
+	}
+}
+
+func TestReclassifyMarksLegacyCollectionProvenanceUnknown(t *testing.T) {
+	t.Parallel()
+
+	original := model.Report{
+		ID: "legacy-report", BuildID: "cloudattrib-e1",
+		Observations: []model.Observation{{ID: "obs-1", Type: "dns_record", Subject: "example.com", Status: "answered", Payload: model.JSONValue(`{"rrtype":"TXT","owner":"example.com","value":"fixture"}`)}},
+	}
+	service := NewService(Dependencies{
+		Detectors: []Detector{fixtureReplayDetector{}}, Store: fixtureResultStore{report: original},
+		View:            model.NewAttributionView("new-bundle", "policy-v2", nil, nil),
+		BuildProvenance: model.BuildProvenance{Revision: model.KnownProvenance("new-build"), Dirty: model.BuildClean},
+		RulesDigest:     model.KnownProvenance("sha256:new-rules"),
+	})
+	replayed, err := service.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: original.ID, BundleID: "new-bundle"})
+	if err != nil {
+		t.Fatalf("Reclassify() error = %v", err)
+	}
+	if replayed.Provenance == nil || replayed.Provenance.Collection.Build.Revision.Status != model.ProvenanceUnknown || replayed.Provenance.Collection.Build.Dirty != model.BuildDirtyUnknown || replayed.Provenance.Collection.PolicyRevision.Status != model.ProvenanceUnknown || replayed.Provenance.Collection.FingerprintDigest.Status != model.ProvenanceUnknown {
+		t.Fatalf("legacy collection provenance = %#v", replayed.Provenance)
 	}
 }
 

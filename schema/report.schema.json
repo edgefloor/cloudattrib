@@ -7,7 +7,7 @@
   "required": ["schema_version", "report_id", "target", "mode", "started_at", "ended_at", "classified_at", "bundle_id", "build_id", "status", "observations", "evidence", "findings", "coverage", "warnings"],
   "properties": {
     "schema_version": {"const": "1"},
-    "content_id_version": {"const": "1"},
+    "content_id_version": {"enum": ["1", "2"]},
     "report_id": {"type": "string", "minLength": 1},
     "original_report_id": {"type": "string"},
     "target": {
@@ -26,6 +26,7 @@
     "classified_at": {"type": "string", "format": "date-time"},
     "bundle_id": {"type": "string"},
     "build_id": {"type": "string"},
+    "provenance": {"$ref": "#/$defs/provenance"},
     "status": {"enum": ["complete", "partial", "failed", "cancelled"]},
     "observations": {"type": "array", "items": {"$ref": "observation.schema.json"}},
     "evidence": {"type": "array", "items": {"$ref": "evidence.schema.json"}},
@@ -33,7 +34,61 @@
     "coverage": {"type": "array", "items": {"$ref": "#/$defs/coverage"}},
     "warnings": {"type": "array", "items": {"type": "string"}}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"content_id_version": {"const": "2"}}, "required": ["content_id_version"]},
+      "then": {"required": ["provenance"]}
+    }
+  ],
   "$defs": {
+    "provenanceValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {"enum": ["known", "unknown"]},
+        "value": {"type": "string", "minLength": 1}
+      },
+      "oneOf": [
+        {"properties": {"status": {"const": "known"}}, "required": ["value"]},
+        {"properties": {"status": {"const": "unknown"}}, "not": {"required": ["value"]}}
+      ]
+    },
+    "buildProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "dirty"],
+      "properties": {
+        "revision": {"$ref": "#/$defs/provenanceValue"},
+        "dirty": {"enum": ["clean", "dirty", "unknown"]}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["collection", "classification"],
+      "properties": {
+        "collection": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["build", "policy_revision", "fingerprint_digest"],
+          "properties": {
+            "build": {"$ref": "#/$defs/buildProvenance"},
+            "policy_revision": {"$ref": "#/$defs/provenanceValue"},
+            "fingerprint_digest": {"$ref": "#/$defs/provenanceValue"}
+          }
+        },
+        "classification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["build", "rules_digest"],
+          "properties": {
+            "build": {"$ref": "#/$defs/buildProvenance"},
+            "rules_digest": {"$ref": "#/$defs/provenanceValue"}
+          }
+        }
+      }
+    },
     "coverage": {
       "type": "object",
       "additionalProperties": false,

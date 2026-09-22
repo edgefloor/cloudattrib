@@ -23,42 +23,48 @@ import (
 
 // Dependencies contains the settled E1 application seams.
 type Dependencies struct {
-	DNS           *collectdns.Collector
-	HTTP          *collecthttp.Collector
-	Detectors     []Detector
-	WebDetector   WebDetector
-	Prefixes      PrefixReader
-	ASN           ASNReader
-	Store         ResultStore
-	CT            ctlog.Reader
-	CTEnabled     bool
-	CTMaximumSeed int
-	View          model.AttributionView
-	HTTPScheme    string
-	Now           func() time.Time
-	TargetTimeout time.Duration
-	Controller    *policy.Controller
-	Limits        policy.Limits
+	DNS               *collectdns.Collector
+	HTTP              *collecthttp.Collector
+	Detectors         []Detector
+	WebDetector       WebDetector
+	Prefixes          PrefixReader
+	ASN               ASNReader
+	Store             ResultStore
+	CT                ctlog.Reader
+	CTEnabled         bool
+	CTMaximumSeed     int
+	View              model.AttributionView
+	BuildProvenance   model.BuildProvenance
+	RulesDigest       model.ProvenanceValue
+	FingerprintDigest model.ProvenanceValue
+	HTTPScheme        string
+	Now               func() time.Time
+	TargetTimeout     time.Duration
+	Controller        *policy.Controller
+	Limits            policy.Limits
 }
 
 // Service coordinates one immutable view through collection and classification.
 type Service struct {
-	dns           *collectdns.Collector
-	http          *collecthttp.Collector
-	detectors     []Detector
-	webDetector   WebDetector
-	prefixes      PrefixReader
-	asn           ASNReader
-	store         ResultStore
-	ct            ctlog.Reader
-	ctEnabled     bool
-	ctMaximumSeed int
-	view          model.AttributionView
-	httpScheme    string
-	now           func() time.Time
-	targetTimeout time.Duration
-	controller    *policy.Controller
-	limits        policy.Limits
+	dns               *collectdns.Collector
+	http              *collecthttp.Collector
+	detectors         []Detector
+	webDetector       WebDetector
+	prefixes          PrefixReader
+	asn               ASNReader
+	store             ResultStore
+	ct                ctlog.Reader
+	ctEnabled         bool
+	ctMaximumSeed     int
+	view              model.AttributionView
+	buildProvenance   model.BuildProvenance
+	rulesDigest       model.ProvenanceValue
+	fingerprintDigest model.ProvenanceValue
+	httpScheme        string
+	now               func() time.Time
+	targetTimeout     time.Duration
+	controller        *policy.Controller
+	limits            policy.Limits
 }
 
 // NewService constructs the analyzer without starting background work.
@@ -72,22 +78,25 @@ func NewService(dependencies Dependencies) *Service {
 		scheme = "https"
 	}
 	return &Service{
-		dns:           dependencies.DNS,
-		http:          dependencies.HTTP,
-		detectors:     slices.Clone(dependencies.Detectors),
-		webDetector:   dependencies.WebDetector,
-		prefixes:      dependencies.Prefixes,
-		asn:           dependencies.ASN,
-		store:         dependencies.Store,
-		ct:            dependencies.CT,
-		ctEnabled:     dependencies.CTEnabled,
-		ctMaximumSeed: dependencies.CTMaximumSeed,
-		view:          dependencies.View,
-		httpScheme:    scheme,
-		now:           now,
-		targetTimeout: dependencies.TargetTimeout,
-		controller:    dependencies.Controller,
-		limits:        dependencies.Limits,
+		dns:               dependencies.DNS,
+		http:              dependencies.HTTP,
+		detectors:         slices.Clone(dependencies.Detectors),
+		webDetector:       dependencies.WebDetector,
+		prefixes:          dependencies.Prefixes,
+		asn:               dependencies.ASN,
+		store:             dependencies.Store,
+		ct:                dependencies.CT,
+		ctEnabled:         dependencies.CTEnabled,
+		ctMaximumSeed:     dependencies.CTMaximumSeed,
+		view:              dependencies.View,
+		buildProvenance:   dependencies.BuildProvenance.Explicit(),
+		rulesDigest:       dependencies.RulesDigest.Explicit(),
+		fingerprintDigest: dependencies.FingerprintDigest.Explicit(),
+		httpScheme:        scheme,
+		now:               now,
+		targetTimeout:     dependencies.TargetTimeout,
+		controller:        dependencies.Controller,
+		limits:            dependencies.Limits,
 	}
 }
 
@@ -311,7 +320,8 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		EndedAt:          s.now(),
 		ClassifiedAt:     classifiedAt,
 		BundleID:         s.view.BundleID(),
-		BuildID:          "cloudattrib-e1",
+		BuildID:          s.buildProvenance.CompatibilityID(),
+		Provenance:       s.liveProvenance(),
 		Status:           status,
 		Observations:     observations,
 		Evidence:         evidence,
@@ -582,8 +592,9 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 	}
 	report := model.Report{
 		SchemaVersion: model.SchemaVersion, ContentIDVersion: model.ReportContentIDVersion, OriginalReportID: original.ID, Target: original.Target, Mode: model.ModeReclassify,
-		StartedAt: classifiedAt, EndedAt: s.now(), ClassifiedAt: classifiedAt, BundleID: s.view.BundleID(), BuildID: "cloudattrib-reclassify-v1",
-		Status: status, Observations: observations, Evidence: evidence, Findings: aggregate.Build(evidence), Coverage: coverage, Warnings: make([]string, 0),
+		StartedAt: classifiedAt, EndedAt: s.now(), ClassifiedAt: classifiedAt, BundleID: s.view.BundleID(), BuildID: s.buildProvenance.CompatibilityID(),
+		Provenance: s.reclassificationProvenance(original),
+		Status:     status, Observations: observations, Evidence: evidence, Findings: aggregate.Build(evidence), Coverage: coverage, Warnings: make([]string, 0),
 	}
 	report.ID, err = report.ContentID()
 	if err != nil {
@@ -593,6 +604,30 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 		return model.Report{}, fmt.Errorf("validate reclassified report references: %w", err)
 	}
 	return report, nil
+}
+
+func (s *Service) liveProvenance() *model.ReportProvenance {
+	provenance := model.ExplicitReportProvenance(
+		s.buildProvenance,
+		model.KnownProvenance(s.view.PolicyVersion()),
+		s.fingerprintDigest,
+		s.rulesDigest,
+	)
+	return &provenance
+}
+
+func (s *Service) reclassificationProvenance(original model.Report) *model.ReportProvenance {
+	collection := model.UnknownCollectionProvenance()
+	if original.Provenance != nil {
+		collection = original.Provenance.Collection
+	}
+	return &model.ReportProvenance{
+		Collection: collection,
+		Classification: model.ClassificationProvenance{
+			Build:       s.buildProvenance.Explicit(),
+			RulesDigest: s.rulesDigest.Explicit(),
+		},
+	}
 }
 
 // ValidateReclassify checks bundle compatibility, retained inputs, and replay classifiers.

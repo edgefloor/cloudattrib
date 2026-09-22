@@ -3,6 +3,10 @@ package policy
 
 import "net/netip"
 
+// PublicDestinationPolicyRevision identifies the pinned IANA registry policy
+// and application interpretation used for production connection decisions.
+const PublicDestinationPolicyRevision = "iana-special-purpose-2025-10-09-v1"
+
 // Reason explains why a concrete destination was rejected.
 type Reason string
 

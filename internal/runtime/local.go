@@ -184,26 +184,31 @@ func newAnalyzerDetailsWithController(ctx context.Context, configuration config.
 	}
 	view := model.NewAttributionView(
 		bundleID,
-		"public-destination-v1",
+		policy.PublicDestinationPolicyRevision,
 		[]string{detectorBuildID, "rules-v1", "wappalyzergo-v0.3.2"}, capabilities,
 	)
+	provenance := currentRuntimeProvenance()
 	var ctReader ctlog.Reader
 	if configuration.CT.Enabled {
 		ctReader, _ = store.(ctlog.Reader)
 	}
 	return app.NewService(app.Dependencies{
-		DNS:           collectdns.New(dnsClient.Query, destinationPolicy),
-		HTTP:          collecthttp.New(dial, destinationPolicy, configuration.Limits.Target.HTTPDocumentBytes, collecthttp.WithRedirectResolver(resolver), collecthttp.WithLimits(configuration.Limits.Target)),
-		Detectors:     []app.Detector{dnsrules.NewDefault()},
-		WebDetector:   webDetector,
-		Prefixes:      prefixReader,
-		ASN:           asnReader,
-		View:          view,
-		Store:         store,
-		CT:            ctReader,
-		CTEnabled:     configuration.CT.Enabled,
-		CTMaximumSeed: configuration.CT.MaximumSeedNames,
-		Controller:    controller,
-		Limits:        configuration.Limits.Target,
+		DNS:               collectdns.New(dnsClient.Query, destinationPolicy),
+		HTTP:              collecthttp.New(dial, destinationPolicy, configuration.Limits.Target.HTTPDocumentBytes, collecthttp.WithRedirectResolver(resolver), collecthttp.WithLimits(configuration.Limits.Target)),
+		Detectors:         []app.Detector{dnsrules.NewDefault()},
+		WebDetector:       webDetector,
+		Prefixes:          prefixReader,
+		ASN:               asnReader,
+		View:              view,
+		BuildProvenance:   provenance.build,
+		RulesDigest:       provenance.rulesDigest,
+		FingerprintDigest: provenance.fingerprintDigest,
+		Store:             store,
+		CT:                ctReader,
+		CTEnabled:         configuration.CT.Enabled,
+		CTMaximumSeed:     configuration.CT.MaximumSeedNames,
+		TargetTimeout:     configuration.Limits.Target.TargetDeadline,
+		Controller:        controller,
+		Limits:            configuration.Limits.Target,
 	}), bundleID, manifest, lookupAvailability{prefix: prefixReader != nil, asn: asnReader != nil, data: slices.Clone(capabilities[4:])}, nil
 }
