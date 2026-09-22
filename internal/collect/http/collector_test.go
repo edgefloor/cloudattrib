@@ -9,6 +9,7 @@ import (
 	stdhttp "net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -63,6 +64,77 @@ func TestCollectTargetPreservesRequestURLAndRedactsObservedQuery(t *testing.T) {
 	}
 	if payload.URL != "http://example.com/status?redacted" {
 		t.Fatalf("observed URL = %q", payload.URL)
+	}
+}
+
+func TestCollectTargetDistinguishesRequestPaths(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := New((&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext, policy.PublicDestinationPolicy(), 2<<20)
+	occurrence := model.ObservationOccurrence{CollectionRunID: "run-1", Seed: "example.com", Attempt: 1}
+	first, err := collector.CollectTargetOccurrence(context.Background(), "http://example.com/first", address, occurrence)
+	if err != nil {
+		t.Fatalf("CollectTargetOccurrence() first error = %v", err)
+	}
+	second, err := collector.CollectTargetOccurrence(context.Background(), "http://example.com/second", address, occurrence)
+	if err != nil {
+		t.Fatalf("CollectTargetOccurrence() second error = %v", err)
+	}
+	if first.Observation.ID == second.Observation.ID {
+		t.Fatalf("observation ID %q reused for distinct request paths", first.Observation.ID)
+	}
+}
+
+func TestCollectTargetOccurrenceDistinguishesRequestAndAttemptWithoutUsingQueryValues(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := New((&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext, policy.PublicDestinationPolicy(), 2<<20)
+	base := model.ObservationOccurrence{CollectionRunID: "run-1", Seed: "example.com", RequestIndex: 4, Attempt: 1}
+	first, err := collector.CollectTargetOccurrence(context.Background(), "http://example.com/shared?token=first-secret", address, base)
+	if err != nil {
+		t.Fatalf("CollectTargetOccurrence() first error = %v", err)
+	}
+	queryChanged, err := collector.CollectTargetOccurrence(context.Background(), "http://example.com/shared?token=second-secret", address, base)
+	if err != nil {
+		t.Fatalf("CollectTargetOccurrence() changed query error = %v", err)
+	}
+	if first.Observation.ID != queryChanged.Observation.ID {
+		t.Fatalf("query values changed observation ID: %q != %q", first.Observation.ID, queryChanged.Observation.ID)
+	}
+	for _, secret := range []string{"first-secret", "second-secret"} {
+		if strings.Contains(first.Observation.ID, secret) {
+			t.Fatalf("observation ID %q contains query value", first.Observation.ID)
+		}
+	}
+
+	repeated := base
+	repeated.RequestIndex++
+	repeatedResult, err := collector.CollectTargetOccurrence(context.Background(), "http://example.com/shared?token=first-secret", address, repeated)
+	if err != nil {
+		t.Fatalf("CollectTargetOccurrence() repeated request error = %v", err)
+	}
+	if first.Observation.ID == repeatedResult.Observation.ID {
+		t.Fatalf("observation ID %q reused for repeated request", first.Observation.ID)
+	}
+
+	retried := base
+	retried.Attempt++
+	retriedResult, err := collector.CollectTargetOccurrence(context.Background(), "http://example.com/shared?token=first-secret", address, retried)
+	if err != nil {
+		t.Fatalf("CollectTargetOccurrence() retry error = %v", err)
+	}
+	if first.Observation.ID == retriedResult.Observation.ID {
+		t.Fatalf("observation ID %q reused for retry", first.Observation.ID)
 	}
 }
 

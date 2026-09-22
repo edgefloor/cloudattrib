@@ -102,6 +102,10 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	if s.dns == nil {
 		return model.Report{}, model.NewError(model.CodeCapabilityUnavailable, "DNS collector is unavailable", nil)
 	}
+	collectionRunID, err := model.NewCollectionRunID()
+	if err != nil {
+		return model.Report{}, fmt.Errorf("create collection run ID: %w", err)
+	}
 	ctObservations, ctCoverage := s.planCTDiscovery(ctx, &normalized)
 
 	hostname := normalized.SeedHostnames[0]
@@ -116,8 +120,9 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	}
 	dnsDone := make(chan dnsOutcome, 1)
 	candidates := make(chan collectdns.Candidate, 1)
+	firstOccurrence := model.ObservationOccurrence{CollectionRunID: collectionRunID, Seed: hostname, SeedIndex: 0, Attempt: 1}
 	go func() {
-		result := s.dns.Collect(ctx, hostname, port, func(candidate collectdns.Candidate) {
+		result := s.dns.CollectOccurrence(ctx, hostname, port, firstOccurrence, func(candidate collectdns.Candidate) {
 			select {
 			case candidates <- candidate:
 			default:
@@ -139,7 +144,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 			}
 			httpStarted = true
 			go func() {
-				result, collectErr := s.http.CollectTarget(ctx, seedURL(normalized, candidate.Hostname, s.httpScheme), candidate.Address)
+				result, collectErr := s.http.CollectTargetOccurrence(ctx, seedURL(normalized, candidate.Hostname, s.httpScheme), candidate.Address, firstOccurrence)
 				httpDone <- httpOutcome{result: result, err: collectErr}
 			}()
 		case outcome := <-dnsDone:
@@ -150,7 +155,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 				case candidate := <-candidates:
 					httpStarted = true
 					go func() {
-						result, collectErr := s.http.CollectTarget(ctx, seedURL(normalized, candidate.Hostname, s.httpScheme), candidate.Address)
+						result, collectErr := s.http.CollectTargetOccurrence(ctx, seedURL(normalized, candidate.Hostname, s.httpScheme), candidate.Address, firstOccurrence)
 						httpDone <- httpOutcome{result: result, err: collectErr}
 					}()
 				default:
@@ -180,17 +185,18 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	if httpStarted {
 		httpRuns = append(httpRuns, httpRun{hostname: hostname, result: httpResult, err: httpErr})
 	}
-	for _, seed := range normalized.SeedHostnames[1:] {
+	for seedOffset, seed := range normalized.SeedHostnames[1:] {
 		var selected collectdns.Candidate
 		portForSeed := seedPort(normalized, seed, s.httpScheme)
-		result := s.dns.Collect(ctx, seed, portForSeed, func(candidate collectdns.Candidate) {
+		occurrence := model.ObservationOccurrence{CollectionRunID: collectionRunID, Seed: seed, SeedIndex: seedOffset + 1, Attempt: 1}
+		result := s.dns.CollectOccurrence(ctx, seed, portForSeed, occurrence, func(candidate collectdns.Candidate) {
 			if !selected.Address.IsValid() {
 				selected = candidate
 			}
 		})
 		dnsRuns = append(dnsRuns, dnsRun{hostname: seed, result: result})
 		if collectHTTP && selected.Address.IsValid() {
-			result, collectErr := s.http.CollectTarget(ctx, seedURL(normalized, selected.Hostname, s.httpScheme), selected.Address)
+			result, collectErr := s.http.CollectTargetOccurrence(ctx, seedURL(normalized, selected.Hostname, s.httpScheme), selected.Address, occurrence)
 			httpRuns = append(httpRuns, httpRun{hostname: seed, result: result, err: collectErr})
 		}
 	}
@@ -267,20 +273,21 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 
 	status := reportStatus(ctx, observations, coverage)
 	report := model.Report{
-		SchemaVersion: model.SchemaVersion,
-		Target:        normalized.Target,
-		Mode:          normalized.Mode,
-		StartedAt:     startedAt,
-		EndedAt:       s.now(),
-		ClassifiedAt:  classifiedAt,
-		BundleID:      s.view.BundleID(),
-		BuildID:       "cloudattrib-e1",
-		Status:        status,
-		Observations:  observations,
-		Evidence:      evidence,
-		Findings:      aggregate.Build(evidence),
-		Coverage:      coverage,
-		Warnings:      make([]string, 0),
+		SchemaVersion:    model.SchemaVersion,
+		ContentIDVersion: model.ReportContentIDVersion,
+		Target:           normalized.Target,
+		Mode:             normalized.Mode,
+		StartedAt:        startedAt,
+		EndedAt:          s.now(),
+		ClassifiedAt:     classifiedAt,
+		BundleID:         s.view.BundleID(),
+		BuildID:          "cloudattrib-e1",
+		Status:           status,
+		Observations:     observations,
+		Evidence:         evidence,
+		Findings:         aggregate.Build(evidence),
+		Coverage:         coverage,
+		Warnings:         make([]string, 0),
 	}
 	id, err := report.ContentID()
 	if err != nil {
@@ -503,7 +510,7 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 		}
 	}
 	report := model.Report{
-		SchemaVersion: model.SchemaVersion, OriginalReportID: original.ID, Target: original.Target, Mode: model.ModeReclassify,
+		SchemaVersion: model.SchemaVersion, ContentIDVersion: model.ReportContentIDVersion, OriginalReportID: original.ID, Target: original.Target, Mode: model.ModeReclassify,
 		StartedAt: classifiedAt, EndedAt: s.now(), ClassifiedAt: classifiedAt, BundleID: s.view.BundleID(), BuildID: "cloudattrib-reclassify-v1",
 		Status: status, Observations: observations, Evidence: evidence, Findings: aggregate.Build(evidence), Coverage: coverage, Warnings: make([]string, 0),
 	}

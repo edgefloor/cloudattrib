@@ -7,6 +7,7 @@
   "required": ["schema_version", "report_id", "target", "mode", "started_at", "ended_at", "classified_at", "bundle_id", "build_id", "status", "observations", "evidence", "findings", "coverage", "warnings"],
   "properties": {
     "schema_version": {"const": "1"},
+    "content_id_version": {"const": "1"},
     "report_id": {"type": "string", "minLength": 1},
     "original_report_id": {"type": "string"},
     "target": {

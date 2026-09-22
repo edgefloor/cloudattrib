@@ -127,6 +127,35 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	if err := store.Complete(ctx, claim.TargetID, claim.AttemptToken, report, jobs.TargetCompleted, ""); err != nil {
 		t.Fatalf("repeated Complete() error = %v", err)
 	}
+	legacyLoaded, err := store.LoadReport(ctx, report.ID)
+	if err != nil {
+		t.Fatalf("LoadReport(legacy) error = %v", err)
+	}
+	if legacyLoaded.ID != report.ID || legacyLoaded.ContentIDVersion != "" {
+		t.Fatalf("LoadReport(legacy) identity = %#v", legacyLoaded)
+	}
+	identityReport := report.Clone()
+	identityReport.ID = ""
+	identityReport.ContentIDVersion = model.ReportContentIDVersion
+	identityReport.Observations[0].Payload = model.JSONValue(`{"nested":{"second":2.00,"first":{"value":1e3}}}`)
+	identityReport.ID, err = identityReport.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() before JSONB round trip error = %v", err)
+	}
+	if err := store.SaveReport(ctx, identityReport); err != nil {
+		t.Fatalf("SaveReport(identity) error = %v", err)
+	}
+	identityLoaded, err := store.LoadReport(ctx, identityReport.ID)
+	if err != nil {
+		t.Fatalf("LoadReport(identity) error = %v", err)
+	}
+	roundTripID, err := identityLoaded.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() after JSONB round trip error = %v", err)
+	}
+	if roundTripID != identityReport.ID {
+		t.Fatalf("ContentID() after JSONB round trip = %q, want %q", roundTripID, identityReport.ID)
+	}
 	loaded, err := store.Job(ctx, job.ID)
 	if err != nil || loaded.Status != jobs.JobCompleted || !loaded.Targets[0].ReportAvailable {
 		t.Fatalf("Job() = %#v, %v", loaded, err)

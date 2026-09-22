@@ -80,6 +80,24 @@ func (c *Collector) Collect(ctx context.Context, scheme, hostname string, addres
 
 // CollectTarget fetches one normalized HTTP URL through an approved address.
 func (c *Collector) CollectTarget(ctx context.Context, rawURL string, address netip.Addr) (Result, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return Result{}, fmt.Errorf("parse HTTP target: %w", err)
+	}
+	runID, err := model.NewCollectionRunID()
+	if err != nil {
+		return Result{}, fmt.Errorf("create HTTP collection run ID: %w", err)
+	}
+	return c.CollectTargetOccurrence(ctx, rawURL, address, model.ObservationOccurrence{
+		CollectionRunID: runID,
+		Seed:            parsed.Hostname(),
+		Attempt:         1,
+	})
+}
+
+// CollectTargetOccurrence fetches one normalized HTTP URL with caller-owned
+// collection occurrence context.
+func (c *Collector) CollectTargetOccurrence(ctx context.Context, rawURL string, address netip.Addr, occurrence model.ObservationOccurrence) (Result, error) {
 	currentURL, err := url.Parse(rawURL)
 	if err != nil {
 		return Result{}, fmt.Errorf("parse HTTP target: %w", err)
@@ -108,7 +126,9 @@ func (c *Collector) CollectTarget(ctx context.Context, rawURL string, address ne
 		if c.requestTimeout > 0 {
 			requestCtx, cancel = context.WithTimeout(ctx, c.requestTimeout)
 		}
-		hopResult, location, collectErr := c.collectHop(requestCtx, currentURL, currentAddress, hop, originalHostname)
+		hopOccurrence := occurrence
+		hopOccurrence.Hop = hop
+		hopResult, location, collectErr := c.collectHop(requestCtx, currentURL, currentAddress, originalHostname, hopOccurrence)
 		cancel()
 		if collectErr != nil {
 			coverage.Status = model.CoveragePartial
@@ -160,7 +180,7 @@ func (c *Collector) CollectTarget(ctx context.Context, rawURL string, address ne
 	return finish(final, observations, coverage), nil
 }
 
-func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address netip.Addr, hop int, originalHostname string) (Result, string, error) {
+func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address netip.Addr, originalHostname string, occurrence model.ObservationOccurrence) (Result, string, error) {
 	port := portForURL(targetURL)
 	if decision := c.policy.Check(address, port); !decision.Allowed {
 		return Result{}, "", model.NewError(model.CodePolicyBlocked, "HTTP destination is prohibited", nil)
@@ -211,7 +231,15 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 	if !strings.EqualFold(targetURL.Hostname(), originalHostname) {
 		scope = model.ScopeExternalRedirect
 	}
-	observation := model.Observation{ID: observationID(targetURL.Hostname(), address, hop), Type: "http_response", Subject: targetURL.Hostname(), Relation: model.RelationWebDelivery, Scope: scope, ObservedAt: c.now(), Status: "responded", Payload: encoded, ContentHash: payload.BodyHash}
+	path := targetURL.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	observation := model.Observation{
+		ID:   model.ObservationID("http-response", occurrence, stdhttp.MethodGet, targetURL.Scheme, targetURL.Host, path, address.String()),
+		Type: "http_response", Subject: targetURL.Hostname(), Relation: model.RelationWebDelivery, Scope: scope,
+		ObservedAt: c.now(), Status: "responded", Payload: encoded, ContentHash: payload.BodyHash,
+	}
 	return Result{Observation: observation, Coverage: coverage, PeerAddress: address, Headers: response.Header.Clone(), Body: slices.Clone(body)}, response.Header.Get("Location"), nil
 }
 
@@ -310,9 +338,4 @@ func redactQuery(value *url.URL) string {
 	}
 	copyURL.Fragment = ""
 	return copyURL.String()
-}
-
-func observationID(hostname string, address netip.Addr, hop int) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s\x00%d", hostname, address, hop)))
-	return "http-response-" + hex.EncodeToString(sum[:12])
 }

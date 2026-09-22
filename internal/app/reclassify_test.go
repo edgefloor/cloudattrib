@@ -38,7 +38,7 @@ func TestReclassifyPreservesCaptureAndUsesNewClassificationProvenance(t *testing
 	if replayed.OriginalReportID != original.ID || replayed.BundleID != "new-bundle" || replayed.ClassifiedAt != classifiedAt {
 		t.Fatalf("replayed provenance = %#v", replayed)
 	}
-	if len(replayed.Observations) != 1 || replayed.Observations[0].ObservedAt != observedAt || string(replayed.Observations[0].Payload) != string(original.Observations[0].Payload) {
+	if len(replayed.Observations) != 1 || replayed.Observations[0].ID != original.Observations[0].ID || replayed.Observations[0].ObservedAt != observedAt || string(replayed.Observations[0].Payload) != string(original.Observations[0].Payload) {
 		t.Fatalf("replayed observations changed: %#v", replayed.Observations)
 	}
 	if len(replayed.Evidence) != 1 || replayed.Evidence[0].ClassifiedAt != classifiedAt || replayed.Evidence[0].DatasetRecords[0].Revision != "new-revision" || replayed.Evidence[0].DatasetRecords[0].EffectiveAt != nil {

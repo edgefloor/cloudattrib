@@ -54,15 +54,17 @@ func (c *Client) Query(ctx context.Context, question model.DNSQuestion) (model.D
 	message := new(mdns.Msg)
 	message.SetQuestion(mdns.Fqdn(question.Name), question.Type)
 	var lastErr error
-	for range c.attempts {
+	for attempt := 1; attempt <= c.attempts; attempt++ {
 		response, transport, err := c.exchange(ctx, message)
 		if err != nil {
 			lastErr = err
 			continue
 		}
-		return c.convert(question, response, transport)
+		result, err := c.convert(question, response, transport)
+		result.Attempt = attempt
+		return result, err
 	}
-	return model.DNSResult{Question: question, Resolver: c.resolver}, fmt.Errorf("query DNS %s type %d: %w", question.Name, question.Type, lastErr)
+	return model.DNSResult{Question: question, Attempt: c.attempts, Resolver: c.resolver}, fmt.Errorf("query DNS %s type %d: %w", question.Name, question.Type, lastErr)
 }
 
 func (c *Client) exchange(ctx context.Context, message *mdns.Msg) (*mdns.Msg, string, error) {
@@ -94,7 +96,7 @@ func (c *Client) convert(question model.DNSQuestion, response *mdns.Msg, transpo
 		Transport:    transport,
 		Resolver:     c.resolver,
 	}
-	for index, record := range response.Answer {
+	for _, record := range response.Answer {
 		payload, address, ok := dnsPayload(record)
 		if !ok {
 			continue
@@ -104,7 +106,6 @@ func (c *Client) convert(question model.DNSQuestion, response *mdns.Msg, transpo
 			return model.DNSResult{}, fmt.Errorf("encode DNS record: %w", err)
 		}
 		result.Records = append(result.Records, model.Observation{
-			ID:         observationID("dns-record", question.Name, fmt.Sprint(question.Type), fmt.Sprint(index), record.String()),
 			Type:       "dns_record",
 			Subject:    strings.TrimSuffix(strings.ToLower(record.Header().Name), "."),
 			ObservedAt: c.now(),

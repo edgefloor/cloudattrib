@@ -7,8 +7,12 @@ import (
 	"time"
 )
 
-// SchemaVersion is the current report and interface schema version.
-const SchemaVersion = "1"
+const (
+	// SchemaVersion is the current report and interface schema version.
+	SchemaVersion = "1"
+	// ReportContentIDVersion identifies the current canonical report projection.
+	ReportContentIDVersion = "1"
+)
 
 // TargetKind identifies the caller's input syntax and requested scope.
 type TargetKind string
@@ -147,6 +151,7 @@ type DNSQuestion struct {
 // DNSResult contains raw record observations and addresses from one question.
 type DNSResult struct {
 	Question     DNSQuestion   `json:"question"`
+	Attempt      int           `json:"attempt,omitempty"`
 	ResponseCode int           `json:"response_code"`
 	Transport    string        `json:"transport"`
 	Resolver     string        `json:"resolver"`
@@ -267,6 +272,7 @@ type Coverage struct {
 // Report is the versioned attribution result envelope.
 type Report struct {
 	SchemaVersion    string        `json:"schema_version"`
+	ContentIDVersion string        `json:"content_id_version,omitempty"`
 	ID               string        `json:"report_id"`
 	OriginalReportID string        `json:"original_report_id,omitempty"`
 	Target           Target        `json:"target"`

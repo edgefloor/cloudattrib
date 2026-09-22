@@ -3,8 +3,6 @@ package dns
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,18 +57,36 @@ func New(query QueryFunc, destinationPolicy policy.DestinationPolicy) *Collector
 // Collect waits for every configured question. It calls onCandidate as soon as
 // an independently approved A or AAAA answer arrives.
 func (c *Collector) Collect(ctx context.Context, hostname string, port uint16, onCandidate func(Candidate)) Result {
+	runID, err := model.NewCollectionRunID()
+	if err != nil {
+		return Result{Coverage: model.Coverage{
+			Capability: "dns", Status: model.CoverageUnavailable, ErrorCodes: []model.ErrorCode{model.CodeCollectionFailed}, Reason: "create collection run ID",
+		}}
+	}
+	return c.CollectOccurrence(ctx, hostname, port, model.ObservationOccurrence{CollectionRunID: runID, Seed: hostname, Attempt: 1}, onCandidate)
+}
+
+// CollectOccurrence waits for every configured question using caller-owned
+// collection occurrence context.
+func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port uint16, occurrence model.ObservationOccurrence, onCandidate func(Candidate)) Result {
 	type queryResult struct {
-		result model.DNSResult
-		err    error
+		result     model.DNSResult
+		occurrence model.ObservationOccurrence
+		err        error
 	}
 	results := make(chan queryResult)
 	var wg sync.WaitGroup
-	for _, questionType := range questionTypes {
+	for requestIndex, questionType := range questionTypes {
 		question := model.DNSQuestion{Name: hostname, Type: questionType}
+		queryOccurrence := occurrence
+		queryOccurrence.RequestIndex = requestIndex
 		wg.Go(func() {
 			result, err := c.query(ctx, question)
+			if result.Attempt > 0 {
+				queryOccurrence.Attempt = result.Attempt
+			}
 			select {
-			case results <- queryResult{result: result, err: err}:
+			case results <- queryResult{result: result, occurrence: queryOccurrence, err: err}:
 			case <-ctx.Done():
 			}
 		})
@@ -86,17 +102,20 @@ func (c *Collector) Collect(ctx context.Context, hostname string, port uint16, o
 		if item.err != nil {
 			collected.Coverage.Status = model.CoveragePartial
 			collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, errorCode(item.err))
-			collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, "failed", item.result, item.err.Error()))
+			collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, "failed", item.result, item.err.Error(), item.occurrence))
 			continue
 		}
-		collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, "answered", item.result, ""))
-		for _, observation := range item.result.Records {
+		collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, "answered", item.result, "", item.occurrence))
+		for recordIndex, observation := range item.result.Records {
 			if observation.ObservedAt.IsZero() {
 				observation.ObservedAt = c.now()
 			}
+			recordOccurrence := item.occurrence
+			recordOccurrence.ItemIndex = recordIndex
+			observation.ID = model.ObservationID("dns-record", recordOccurrence)
 			collected.Observations = append(collected.Observations, observation)
 		}
-		for _, address := range item.result.Addresses {
+		for addressIndex, address := range item.result.Addresses {
 			address = address.Unmap()
 			collected.Addresses = append(collected.Addresses, address)
 			decision := c.policy.Check(address, port)
@@ -107,8 +126,10 @@ func (c *Collector) Collect(ctx context.Context, hostname string, port uint16, o
 				collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, model.CodePolicyBlocked)
 			}
 			payload := model.DNSPayload{RRType: typeName(item.result.Question.Type), Owner: hostname, Address: address, PolicyReason: string(decision.Reason)}
+			addressOccurrence := item.occurrence
+			addressOccurrence.ItemIndex = addressIndex
 			collected.Observations = append(collected.Observations, model.Observation{
-				ID:         observationID("dns-address", hostname, address.String()),
+				ID:         model.ObservationID("dns-address", addressOccurrence),
 				Type:       "dns_address",
 				Subject:    hostname,
 				Scope:      model.ScopeRoot,
@@ -128,7 +149,7 @@ func (c *Collector) Collect(ctx context.Context, hostname string, port uint16, o
 	return collected
 }
 
-func (c *Collector) queryObservation(hostname string, question model.DNSQuestion, status string, result model.DNSResult, reason string) model.Observation {
+func (c *Collector) queryObservation(hostname string, question model.DNSQuestion, status string, result model.DNSResult, reason string, occurrence model.ObservationOccurrence) model.Observation {
 	payload := model.DNSPayload{
 		RRType:       typeName(question.Type),
 		Owner:        hostname,
@@ -138,7 +159,7 @@ func (c *Collector) queryObservation(hostname string, question model.DNSQuestion
 		PolicyReason: reason,
 	}
 	return model.Observation{
-		ID:         observationID("dns-query", hostname, fmt.Sprint(question.Type)),
+		ID:         model.ObservationID("dns-query", occurrence, hostname, fmt.Sprint(question.Type)),
 		Type:       "dns_query",
 		Subject:    hostname,
 		Scope:      model.ScopeRoot,
@@ -146,15 +167,6 @@ func (c *Collector) queryObservation(hostname string, question model.DNSQuestion
 		Status:     status,
 		Payload:    marshalPayload(payload),
 	}
-}
-
-func observationID(parts ...string) string {
-	hash := sha256.New()
-	for _, part := range parts {
-		_, _ = hash.Write([]byte(part))
-		_, _ = hash.Write([]byte{0})
-	}
-	return parts[0] + "-" + hex.EncodeToString(hash.Sum(nil)[:12])
 }
 
 func marshalPayload(value any) model.JSONValue {

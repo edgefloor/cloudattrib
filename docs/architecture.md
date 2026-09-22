@@ -64,6 +64,8 @@ Reclassification creates a new report from retained observations and reusable de
 
 Evidence references both observations and consulted dataset records. Each dataset record retains its source, revision or digest, record reference, and known publication and effective times. Unknown times stay unknown. A new ownership association does not imply that it existed when the observations were collected.
 
+The `model` package owns observation occurrence IDs and report content IDs. Collectors supply run, seed, request or query, hop, attempt, and item context. Reclassification preserves the collected observation IDs. Report content IDs use the versioned canonical projection in [SPEC section 9.2](../SPEC.md#92-core-fields), while PostgreSQL keeps historical report IDs unchanged.
+
 If one replay path lacks inputs but another works, return a partial report. If none works, return `capability_unavailable`. See SPEC sections [9.1 through 9.5](../SPEC.md#91-collected-observations-source-records-and-conclusions) and [12.3](../SPEC.md#123-history-and-retention).
 
 ## CT verification

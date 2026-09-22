@@ -83,6 +83,58 @@ func TestReportValidatesReferences(t *testing.T) {
 	}
 }
 
+func TestReportRejectsDuplicateAndDanglingReferences(t *testing.T) {
+	t.Parallel()
+
+	validObservation := Observation{ID: "observation-1"}
+	validEvidence := Evidence{ID: "evidence-1", ObservationIDs: []string{"observation-1"}}
+	validFinding := Finding{ID: "finding-1", ProviderID: "provider-1", EvidenceIDs: []string{"evidence-1"}}
+	tests := []struct {
+		name   string
+		report Report
+	}{
+		{name: "duplicate observation", report: Report{Observations: []Observation{validObservation, validObservation}}},
+		{name: "duplicate evidence", report: Report{Observations: []Observation{validObservation}, Evidence: []Evidence{validEvidence, validEvidence}}},
+		{name: "duplicate finding", report: Report{Observations: []Observation{validObservation}, Evidence: []Evidence{validEvidence}, Findings: []Finding{validFinding, validFinding}}},
+		{
+			name:   "dangling observation",
+			report: Report{Evidence: []Evidence{{ID: "evidence-1", ObservationIDs: []string{"missing"}}}},
+		},
+		{
+			name:   "dangling evidence",
+			report: Report{Findings: []Finding{{ID: "finding-1", ProviderID: "provider-1", EvidenceIDs: []string{"missing"}}}},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if err := test.report.ValidateReferences(); err == nil {
+				t.Fatal("ValidateReferences() error = nil")
+			}
+		})
+	}
+}
+
+func TestLegacyReportJSONRetainsHistoricalID(t *testing.T) {
+	t.Parallel()
+
+	const legacy = `{"schema_version":"1","report_id":"sha256:legacy","target":{"original":"example.com","canonical":"example.com","kind":"domain"},"mode":"full","started_at":"2026-09-22T08:00:00Z","ended_at":"2026-09-22T08:00:01Z","classified_at":"2026-09-22T08:00:01Z","bundle_id":"bundle-1","build_id":"build-1","status":"complete","observations":[],"evidence":[],"findings":[],"coverage":[],"warnings":[]}`
+	var report Report
+	if err := json.Unmarshal([]byte(legacy), &report); err != nil {
+		t.Fatalf("decode legacy report: %v", err)
+	}
+	if report.ID != "sha256:legacy" || report.ContentIDVersion != "" {
+		t.Fatalf("legacy identity changed: %#v", report)
+	}
+	encoded, err := report.CanonicalJSON()
+	if err != nil {
+		t.Fatalf("CanonicalJSON() error = %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"report_id":"sha256:legacy"`)) || bytes.Contains(encoded, []byte(`"content_id_version"`)) {
+		t.Fatalf("legacy report identity was rewritten: %s", encoded)
+	}
+}
+
 func TestContentIDIgnoresInputOrder(t *testing.T) {
 	t.Parallel()
 
@@ -98,6 +150,93 @@ func TestContentIDIgnoresInputOrder(t *testing.T) {
 	}
 	if idA != idB {
 		t.Fatalf("ContentID() = %q and %q, want equal", idA, idB)
+	}
+}
+
+func TestContentIDIsStableAfterAssignment(t *testing.T) {
+	t.Parallel()
+
+	report := Report{
+		SchemaVersion: SchemaVersion,
+		Target:        Target{Original: "example.com", Canonical: "example.com", Kind: TargetDomain},
+		Mode:          ModeFull,
+		StartedAt:     time.Date(2026, 9, 22, 8, 0, 0, 0, time.UTC),
+		EndedAt:       time.Date(2026, 9, 22, 8, 0, 1, 0, time.UTC),
+		ClassifiedAt:  time.Date(2026, 9, 22, 8, 0, 1, 0, time.UTC),
+		Status:        StatusComplete,
+	}
+	first, err := report.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() before assignment error = %v", err)
+	}
+	report.ID = first
+	second, err := report.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() after assignment error = %v", err)
+	}
+	if first != second {
+		t.Fatalf("ContentID() changed after assignment: %q != %q", first, second)
+	}
+}
+
+func TestContentIDCanonicalizesNestedJSONNumbersAndObjectKeys(t *testing.T) {
+	t.Parallel()
+
+	a := Report{Observations: []Observation{{
+		ID: "observation-1", Payload: JSONValue(`{"outer":{"first":1.00,"nested":{"a":1e3,"b":0.0100}},"second":2}`),
+	}}}
+	b := Report{Observations: []Observation{{
+		ID: "observation-1", Payload: JSONValue(`{"second":2.0,"outer":{"nested":{"b":1e-2,"a":1000.0},"first":1}}`),
+	}}}
+	idA, err := a.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() first error = %v", err)
+	}
+	idB, err := b.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() second error = %v", err)
+	}
+	if idA != idB {
+		t.Fatalf("ContentID() = %q and %q, want recursively equivalent JSON to match", idA, idB)
+	}
+}
+
+func TestContentIDNormalizesEquivalentTimestamps(t *testing.T) {
+	t.Parallel()
+
+	utc := time.Date(2026, 9, 22, 8, 0, 0, 123456000, time.UTC)
+	offset := time.FixedZone("fixture", 2*60*60)
+	local := utc.In(offset)
+	a := Report{StartedAt: utc, Observations: []Observation{{ID: "observation-1", ObservedAt: utc}}}
+	b := Report{StartedAt: local, Observations: []Observation{{ID: "observation-1", ObservedAt: local}}}
+	idA, err := a.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() UTC error = %v", err)
+	}
+	idB, err := b.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() offset error = %v", err)
+	}
+	if idA != idB {
+		t.Fatalf("ContentID() = %q and %q, want equivalent timestamps to match", idA, idB)
+	}
+}
+
+func TestContentIDChangesWhenParticipatingFieldChanges(t *testing.T) {
+	t.Parallel()
+
+	a := Report{Target: Target{Canonical: "example.com"}}
+	b := Report{Target: Target{Canonical: "www.example.com"}}
+	idA, err := a.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() first error = %v", err)
+	}
+	idB, err := b.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() second error = %v", err)
+	}
+	if idA == idB {
+		t.Fatalf("ContentID() = %q for reports with different targets", idA)
 	}
 }
 

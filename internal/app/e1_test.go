@@ -182,6 +182,71 @@ func TestE1MissingPrefixSourcePreservesDNSAndHTTP(t *testing.T) {
 	}
 }
 
+func TestE1ConvergingSeedsRetainBothObservationHistories(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Host != "landing.example" {
+			writer.Header().Set("Location", "http://landing.example/shared")
+			writer.WriteHeader(http.StatusFound)
+			return
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+
+	address := netip.MustParseAddr("93.184.216.34")
+	dialer := &fixtureDialer{fixtureAddress: server.Listener.Addr().String(), started: make(chan struct{})}
+	collector := collecthttp.New(
+		dialer.DialContext,
+		policy.PublicDestinationPolicy(),
+		2<<20,
+		collecthttp.WithRedirectResolver(func(context.Context, string) ([]netip.Addr, error) {
+			return []netip.Addr{address}, nil
+		}),
+	)
+	service := app.NewService(app.Dependencies{
+		DNS:        collectdns.New(fixtureDNSClient{failedAAAA: true}.Query, policy.PublicDestinationPolicy()),
+		HTTP:       collector,
+		Detectors:  []app.Detector{dnsrules.NewDefault()},
+		View:       model.NewAttributionView("fixture-bundle", "public-v1", []string{"dnsrules-v1"}, nil),
+		HTTPScheme: "http",
+		Now:        func() time.Time { return time.Date(2026, 9, 22, 8, 0, 0, 0, time.UTC) },
+	})
+
+	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull})
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	if err := report.ValidateReferences(); err != nil {
+		t.Fatalf("ValidateReferences() error = %v", err)
+	}
+	if report.ContentIDVersion != model.ReportContentIDVersion {
+		t.Fatalf("content ID version = %q, want %q", report.ContentIDVersion, model.ReportContentIDVersion)
+	}
+	recomputedID, err := report.ContentID()
+	if err != nil {
+		t.Fatalf("ContentID() after assignment error = %v", err)
+	}
+	if recomputedID != report.ID {
+		t.Fatalf("ContentID() after assignment = %q, want %q", recomputedID, report.ID)
+	}
+	seen := make(map[string]struct{}, len(report.Observations))
+	landingResponses := 0
+	for _, observation := range report.Observations {
+		if _, duplicate := seen[observation.ID]; duplicate {
+			t.Fatalf("duplicate observation ID %q in converging seed report", observation.ID)
+		}
+		seen[observation.ID] = struct{}{}
+		if observation.Type == "http_response" && observation.Subject == "landing.example" {
+			landingResponses++
+		}
+	}
+	if landingResponses != 2 {
+		t.Fatalf("landing response observations = %d, want 2", landingResponses)
+	}
+}
+
 type fixtureDNSClient struct {
 	allowAAAA  <-chan struct{}
 	failedAAAA bool
