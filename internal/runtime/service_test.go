@@ -543,6 +543,94 @@ func TestBundleAnalyzerFactoryFailedLoadKeepsLastKnownGood(t *testing.T) {
 	}
 }
 
+func TestBundleAnalyzerFactoryUnchangedActivationSkipsCandidateValidation(t *testing.T) {
+	t.Parallel()
+
+	configuration := config.Default()
+	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
+	repository, err := datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := repository.Import(t.Context(), runtimeFixtureSources(t, "unchanged-reload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activation, err := repository.Activate(t.Context(), report.CandidateID, report.CandidateHash, "activate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := newBundleAnalyzerFactory(4, runtimeFixtureAnalyzer{bundleID: activation.BundleID}, activation.BundleID, lookupAvailability{}, activation, 0)
+	factory.configuration = configuration
+	factory.authority = &fixtureActivationAuthority{desired: &activation}
+	factory.repository = repository
+	manifestPath := filepath.Join(configuration.Data.BundleDirectory, "candidates", report.CandidateID, "manifest.json")
+	if err := os.WriteFile(manifestPath, []byte("corrupt after process load"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := factory.reloadDesired(t.Context()); err != nil {
+		t.Fatalf("reloadDesired() error = %v, unchanged activation must not revalidate artifacts", err)
+	}
+}
+
+func TestBundleAnalyzerFactoryRepairsMissingAndCorruptPointers(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, string)
+	}{
+		{
+			name: "missing",
+			mutate: func(t *testing.T, path string) {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "corrupt",
+			mutate: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte("not json"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			configuration := config.Default()
+			configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
+			repository, err := datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report, err := repository.Import(t.Context(), runtimeFixtureSources(t, "repair-"+test.name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			activation, err := repository.Activate(t.Context(), report.CandidateID, report.CandidateHash, "activate")
+			if err != nil {
+				t.Fatal(err)
+			}
+			factory := newBundleAnalyzerFactory(4, runtimeFixtureAnalyzer{bundleID: activation.BundleID}, activation.BundleID, lookupAvailability{}, activation, 0)
+			factory.configuration = configuration
+			factory.authority = &fixtureActivationAuthority{desired: &activation}
+			factory.repository = repository
+			test.mutate(t, filepath.Join(configuration.Data.BundleDirectory, "active.json"))
+
+			if err := factory.reloadDesired(t.Context()); err != nil {
+				t.Fatalf("reloadDesired() error = %v", err)
+			}
+			published, err := repository.Active()
+			if err != nil || !sameActivation(published, &activation) {
+				t.Fatalf("Active() = %#v, %v; want repaired activation %#v", published, err, activation)
+			}
+		})
+	}
+}
+
 func TestBundleAnalyzerFactoryActivationDoesNotChangeInflightAttempt(t *testing.T) {
 	t.Parallel()
 

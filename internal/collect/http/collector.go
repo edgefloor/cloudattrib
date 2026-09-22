@@ -292,7 +292,7 @@ func (c *Collector) collectHopCandidates(ctx context.Context, targetURL *url.URL
 			return result, location, nil
 		}
 		lastErr = collectErr
-		if !eligibleAddressFallback(collectErr) {
+		if !eligibleAddressFallback(ctx, collectErr) {
 			return Result{}, "", collectErr
 		}
 	}
@@ -397,12 +397,12 @@ func isRedirectStatus(status int) bool {
 	}
 }
 
-func eligibleAddressFallback(err error) bool {
+func eligibleAddressFallback(parent context.Context, err error) bool {
 	var preResponse *preResponseError
 	if !errors.As(err, &preResponse) {
 		return false
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if parent.Err() != nil || errors.Is(err, context.Canceled) {
 		return false
 	}
 	if strings.Contains(err.Error(), "response headers exceeded") {

@@ -686,12 +686,15 @@ func (f *bundleAnalyzerFactory) reloadDesired(ctx context.Context) error {
 		if activation.CandidateHash == "" {
 			return fmt.Errorf("committed bundle activation has no candidate hash")
 		}
-		if err := repository.ReconcileAuthoritative(ctx, *activation, authority.DesiredBundle); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		published, pointerErr := repository.Active()
+		if pointerErr != nil || !sameActivation(published, activation) {
+			if err := repository.ReconcileAuthoritative(ctx, *activation, authority.DesiredBundle); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				_ = repository.RecordLoad(*activation, "failed", err.Error())
+				return fmt.Errorf("reconcile committed bundle activation: %w", err)
 			}
-			_ = repository.RecordLoad(*activation, "failed", err.Error())
-			return fmt.Errorf("reconcile committed bundle activation: %w", err)
 		}
 	}
 	f.mu.Lock()
@@ -721,6 +724,15 @@ func (f *bundleAnalyzerFactory) reloadDesired(ctx context.Context) error {
 	f.mu.Unlock()
 	captured.Release()
 	return repository.RecordLoad(*activation, "loaded", "")
+}
+
+func sameActivation(left, right *datasets.Activation) bool {
+	return left != nil && right != nil &&
+		left.OperationID == right.OperationID &&
+		left.Generation == right.Generation &&
+		left.BundleID == right.BundleID &&
+		left.CandidateHash == right.CandidateHash &&
+		left.Action == right.Action
 }
 
 var _ app.Analyzer = (*bundleAnalyzerFactory)(nil)

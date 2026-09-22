@@ -112,33 +112,7 @@ func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.C
 		return nil, "", nil, lookupAvailability{}, fmt.Errorf("create DNS client: %w", err)
 	}
 	destinationPolicy := policy.PublicDestinationPolicy()
-	resolver := func(ctx context.Context, hostname string) ([]netip.Addr, error) {
-		var addresses []netip.Addr
-		var failures []error
-		for _, questionType := range []uint16{1, 28} {
-			result, queryErr := dnsClient.Query(ctx, model.DNSQuestion{Name: hostname, Type: questionType})
-			if queryErr != nil {
-				failures = append(failures, queryErr)
-				continue
-			}
-			for _, address := range result.Addresses {
-				if !policy.ReserveAddress(ctx) {
-					return nil, model.NewError(model.CodeBudgetExceeded, "resolved address budget exhausted", nil)
-				}
-				addresses = append(addresses, address)
-			}
-		}
-		if len(addresses) == 0 {
-			if len(failures) > 0 {
-				return nil, errors.Join(failures...)
-			}
-			return nil, model.NewError(model.CodeCollectionFailed, "redirect hostname did not resolve", nil)
-		}
-		if len(failures) > 0 {
-			return addresses, &collecthttp.PartialResolutionError{Omitted: len(failures), Err: errors.Join(failures...)}
-		}
-		return addresses, nil
-	}
+	resolver := newRedirectResolver(dnsClient.Query)
 	dial := func(ctx context.Context, network string, address netip.Addr, port uint16) (net.Conn, error) {
 		var dialer net.Dialer
 		return dialer.DialContext(ctx, network, net.JoinHostPort(address.String(), fmt.Sprint(port)))
@@ -232,6 +206,64 @@ func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.C
 		Controller:        controller,
 		Limits:            configuration.Limits.Target,
 	}), bundleID, manifest, lookupAvailability{prefix: prefixReader != nil, asn: asnReader != nil, data: slices.Clone(capabilities[4:])}, nil
+}
+
+func newRedirectResolver(query collectdns.QueryFunc) collecthttp.ResolveFunc {
+	return func(ctx context.Context, hostname string) ([]netip.Addr, error) {
+		var addresses []netip.Addr
+		var failures []error
+		omitted := 0
+		addressBudgetExhausted := false
+		for _, questionType := range []uint16{1, 28} {
+			result, queryErr := query(ctx, model.DNSQuestion{Name: hostname, Type: questionType})
+			if queryErr == nil {
+				queryErr = redirectDNSOutcomeError(result.Outcome)
+			}
+			if queryErr != nil {
+				failures = append(failures, queryErr)
+				omitted += max(result.Omitted, 1)
+				continue
+			}
+			for _, address := range result.Addresses {
+				if addressBudgetExhausted || !policy.ReserveAddress(ctx) {
+					if !addressBudgetExhausted {
+						addressBudgetExhausted = true
+						failures = append(failures, model.NewError(model.CodeBudgetExceeded, "resolved address budget exhausted", nil))
+					}
+					omitted++
+					continue
+				}
+				addresses = append(addresses, address)
+			}
+		}
+		if len(addresses) == 0 {
+			if len(failures) > 0 {
+				return nil, errors.Join(failures...)
+			}
+			return nil, model.NewError(model.CodeCollectionFailed, "redirect hostname did not resolve", nil)
+		}
+		if len(failures) > 0 {
+			return addresses, &collecthttp.PartialResolutionError{Omitted: omitted, Err: errors.Join(failures...)}
+		}
+		return addresses, nil
+	}
+}
+
+func redirectDNSOutcomeError(outcome model.DNSOutcome) error {
+	switch outcome {
+	case model.DNSOutcomeAnswered, model.DNSOutcomeNoData, model.DNSOutcomeNXDomain:
+		return nil
+	case model.DNSOutcomeTimeout:
+		return model.NewError(model.CodeTimeout, "redirect DNS query timed out", nil)
+	case model.DNSOutcomeCancelled:
+		return model.NewError(model.CodeCancelled, "redirect DNS query was cancelled", nil)
+	case model.DNSOutcomeBudgetExhausted:
+		return model.NewError(model.CodeBudgetExceeded, "redirect DNS query budget exhausted", nil)
+	case model.DNSOutcomeSERVFAIL, model.DNSOutcomeRefused, model.DNSOutcomeFailed, "":
+		return model.NewError(model.CodeCollectionFailed, "redirect DNS query failed", nil)
+	default:
+		return model.NewError(model.CodeCollectionFailed, "redirect DNS query returned an unknown outcome", nil)
+	}
 }
 
 func newAnalyzerDetailsForBundle(ctx context.Context, configuration config.Config, store app.ResultStore, bundleID string) (app.Analyzer, string, []byte, lookupAvailability, error) {

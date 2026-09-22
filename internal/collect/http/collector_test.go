@@ -235,6 +235,80 @@ func TestCollectFallsBackToSecondApprovedInitialAddress(t *testing.T) {
 	}
 }
 
+func TestCollectFallsBackAfterPerRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	first := netip.MustParseAddr("93.184.216.34")
+	second := netip.MustParseAddr("1.1.1.1")
+	var mu sync.Mutex
+	var attempts []netip.Addr
+	dial := func(ctx context.Context, network string, address netip.Addr, _ uint16) (net.Conn, error) {
+		mu.Lock()
+		attempts = append(attempts, address)
+		mu.Unlock()
+		if address == first {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		var dialer net.Dialer
+		return dialer.DialContext(ctx, network, server.Listener.Addr().String())
+	}
+	collector := New(dial, policy.PublicDestinationPolicy(), 2<<20, WithRequestTimeout(20*time.Millisecond))
+	candidates := make(chan netip.Addr, 2)
+	candidates <- first
+	candidates <- second
+	close(candidates)
+
+	result, err := collector.CollectTargetCandidatesOccurrence(t.Context(), "http://example.com/", candidates, model.ObservationOccurrence{CollectionRunID: "run-1", Seed: "example.com", Attempt: 1})
+	if err != nil {
+		t.Fatalf("CollectTargetCandidatesOccurrence() error = %v", err)
+	}
+	mu.Lock()
+	gotAttempts := append([]netip.Addr(nil), attempts...)
+	mu.Unlock()
+	if result.PeerAddress != second || !equalAddresses(gotAttempts, []netip.Addr{first, second}) {
+		t.Fatalf("CollectTargetCandidatesOccurrence() result = %#v, dials = %v", result, gotAttempts)
+	}
+}
+
+func TestCollectParentDeadlineStopsAddressFallback(t *testing.T) {
+	t.Parallel()
+
+	first := netip.MustParseAddr("93.184.216.34")
+	second := netip.MustParseAddr("1.1.1.1")
+	var mu sync.Mutex
+	var attempts []netip.Addr
+	dial := func(ctx context.Context, _ string, address netip.Addr, _ uint16) (net.Conn, error) {
+		mu.Lock()
+		attempts = append(attempts, address)
+		mu.Unlock()
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	collector := New(dial, policy.PublicDestinationPolicy(), 2<<20, WithRequestTimeout(time.Second))
+	candidates := make(chan netip.Addr, 2)
+	candidates <- first
+	candidates <- second
+	close(candidates)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := collector.CollectTargetCandidatesOccurrence(ctx, "http://example.com/", candidates, model.ObservationOccurrence{CollectionRunID: "run-1", Seed: "example.com", Attempt: 1})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CollectTargetCandidatesOccurrence() error = %v, want parent deadline", err)
+	}
+	mu.Lock()
+	gotAttempts := append([]netip.Addr(nil), attempts...)
+	mu.Unlock()
+	if !equalAddresses(gotAttempts, []netip.Addr{first}) {
+		t.Fatalf("dial addresses = %v, want only first address", gotAttempts)
+	}
+}
+
 func TestCollectRedirectFallsBackToSecondApprovedAddress(t *testing.T) {
 	t.Parallel()
 
