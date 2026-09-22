@@ -1,5 +1,7 @@
 # cloudattrib
 
+![Medieval-style illustration of an analyst tracing networks beneath a castle in the clouds.](docs/images/cloudattrib-banner.jpg)
+
 cloudattrib identifies cloud providers, SaaS services, and web technologies associated with a domain. It collects DNS records and website responses, then matches them against local rules and IP datasets. Each finding includes the relationship detected and references to the evidence that supports it.
 
 Use it to inspect a domain's public infrastructure, process lists of domains, or look up IP addresses in local provider and ASN data. The CLI writes JSON. The HTTP API stores reports and runs durable batch jobs in PostgreSQL.
