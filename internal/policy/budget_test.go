@@ -102,6 +102,89 @@ func TestControllerPacesSameDestinationAcrossExecutions(t *testing.T) {
 	}
 }
 
+func TestControllerPacesAfterProcessPermitAdmission(t *testing.T) {
+	limits := DefaultLimits()
+	limits.HTTPDestinationInterval = 50 * time.Millisecond
+	controller, err := NewController(limits, 3, 3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contexts := make([]context.Context, 3)
+	releaseTargets := make([]func(), 3)
+	for index := range contexts {
+		contexts[index], releaseTargets[index], err = controller.Begin(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer releaseTargets[index]()
+	}
+
+	blocker, err := AcquireHTTP(contexts[0], "1.1.1.1:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	starts := make(chan time.Time, 2)
+	for _, ctx := range contexts[1:] {
+		go func() {
+			release, acquireErr := AcquireHTTP(ctx, "93.184.216.34:443")
+			if acquireErr != nil {
+				return
+			}
+			starts <- time.Now()
+			release()
+		}()
+	}
+	time.Sleep(2 * limits.HTTPDestinationInterval)
+	blocker()
+	first := <-starts
+	second := <-starts
+	if spacing := second.Sub(first); spacing < 40*time.Millisecond {
+		t.Fatalf("same-destination starts were spaced by %v after permit contention", spacing)
+	}
+}
+
+func TestCancelledDestinationWaiterDoesNotDelayNextRequest(t *testing.T) {
+	limits := DefaultLimits()
+	limits.HTTPDestinationInterval = 80 * time.Millisecond
+	controller, err := NewController(limits, 3, 3, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contexts := make([]context.Context, 3)
+	releaseTargets := make([]func(), 3)
+	for index := range contexts {
+		contexts[index], releaseTargets[index], err = controller.Begin(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer releaseTargets[index]()
+	}
+	first, err := AcquireHTTP(contexts[0], "93.184.216.34:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first()
+
+	cancelledCtx, cancel := context.WithTimeout(contexts[1], 10*time.Millisecond)
+	defer cancel()
+	if release, acquireErr := AcquireHTTP(cancelledCtx, "93.184.216.34:443"); !errors.Is(acquireErr, context.DeadlineExceeded) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("cancelled destination acquisition error = %v", acquireErr)
+	}
+	time.Sleep(limits.HTTPDestinationInterval)
+	started := time.Now()
+	third, err := AcquireHTTP(contexts[2], "93.184.216.34:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	third()
+	if delay := time.Since(started); delay > 30*time.Millisecond {
+		t.Fatalf("cancelled waiter delayed next request by %v", delay)
+	}
+}
+
 func TestControllerTargetDeadlineStartsAfterAdmission(t *testing.T) {
 	limits := DefaultLimits()
 	limits.TargetDeadline = 80 * time.Millisecond

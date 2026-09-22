@@ -267,6 +267,33 @@ func TestCollectRedirectFallsBackToSecondApprovedAddress(t *testing.T) {
 	}
 }
 
+func TestCollectFollowsRedirectWithPartialAddressFamilyResolution(t *testing.T) {
+	t.Parallel()
+
+	landing := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	t.Cleanup(landing.Close)
+	start := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.Header().Set("Location", "http://redirect.example/")
+		writer.WriteHeader(stdhttp.StatusFound)
+	}))
+	t.Cleanup(start.Close)
+	first := netip.MustParseAddr("93.184.216.34")
+	second := netip.MustParseAddr("1.1.1.1")
+	dialer := &mappedDialer{destinations: map[netip.Addr]string{first: start.Listener.Addr().String(), second: landing.Listener.Addr().String()}}
+	collector := New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20, WithRedirectResolver(func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{second}, &PartialResolutionError{Omitted: 1, Err: context.DeadlineExceeded}
+	}))
+	result, err := collector.Collect(t.Context(), "http", "example.com", first)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if len(result.Observations) != 2 || result.Coverage.Status != model.CoveragePartial || result.Coverage.Omitted != 1 || !slices.Contains(result.Coverage.ErrorCodes, model.CodeTimeout) {
+		t.Fatalf("Collect() result = %#v, want followed redirect with partial timeout coverage", result)
+	}
+}
+
 func TestCollectFallbackConsumesSharedRequestBudget(t *testing.T) {
 	t.Parallel()
 

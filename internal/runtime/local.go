@@ -114,9 +114,11 @@ func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.C
 	destinationPolicy := policy.PublicDestinationPolicy()
 	resolver := func(ctx context.Context, hostname string) ([]netip.Addr, error) {
 		var addresses []netip.Addr
+		var failures []error
 		for _, questionType := range []uint16{1, 28} {
 			result, queryErr := dnsClient.Query(ctx, model.DNSQuestion{Name: hostname, Type: questionType})
 			if queryErr != nil {
+				failures = append(failures, queryErr)
 				continue
 			}
 			for _, address := range result.Addresses {
@@ -127,7 +129,13 @@ func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.C
 			}
 		}
 		if len(addresses) == 0 {
+			if len(failures) > 0 {
+				return nil, errors.Join(failures...)
+			}
 			return nil, model.NewError(model.CodeCollectionFailed, "redirect hostname did not resolve", nil)
+		}
+		if len(failures) > 0 {
+			return addresses, &collecthttp.PartialResolutionError{Omitted: len(failures), Err: errors.Join(failures...)}
 		}
 		return addresses, nil
 	}

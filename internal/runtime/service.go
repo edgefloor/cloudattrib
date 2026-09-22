@@ -313,6 +313,7 @@ type bundleLoad struct {
 	done    chan struct{}
 	err     error
 	waiters int
+	cancel  context.CancelFunc
 }
 
 type residentAnalyzer struct {
@@ -431,23 +432,19 @@ func (f *bundleAnalyzerFactory) capture(ctx context.Context, requestedBundleID s
 		}
 		if pending := f.loads[bundleID]; pending != nil {
 			done := pending.done
+			if pending.waiters == 0 {
+				f.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-done:
+					continue
+				}
+			}
 			pending.waiters++
 			f.mu.Unlock()
-			var waitErr error
-			select {
-			case <-ctx.Done():
-				waitErr = ctx.Err()
-			case <-done:
-			}
-			f.mu.Lock()
-			pending.waiters--
-			loadErr := pending.err
-			f.mu.Unlock()
-			if waitErr != nil {
+			if waitErr := f.waitForBundleLoad(ctx, pending); waitErr != nil {
 				return nil, waitErr
-			}
-			if loadErr != nil {
-				return nil, loadErr
 			}
 			continue
 		}
@@ -469,39 +466,63 @@ func (f *bundleAnalyzerFactory) capture(ctx context.Context, requestedBundleID s
 			}
 			continue
 		}
-		pending := &bundleLoad{done: make(chan struct{})}
+		loadCtx, cancelLoad := context.WithCancel(context.Background())
+		pending := &bundleLoad{done: make(chan struct{}), waiters: 1, cancel: cancelLoad}
 		f.loads[bundleID] = pending
 		f.mu.Unlock()
-
-		loader := f.load
-		if loader == nil {
-			loader = f.loadBundle
+		go f.runBundleLoad(loadCtx, bundleID, pending)
+		if waitErr := f.waitForBundleLoad(ctx, pending); waitErr != nil {
+			return nil, waitErr
 		}
-		analyzer, lookup, estimatedBytes, loadErr := loader(ctx, bundleID)
-		if loadErr == nil {
-			loadErr = ctx.Err()
-		}
-		if loadErr == nil && analyzer == nil {
-			loadErr = model.NewError(model.CodeBundleUnavailable, "bundle analyzer load returned no analyzer", nil)
-		}
-		f.mu.Lock()
-		delete(f.loads, bundleID)
-		pending.err = loadErr
-		if loadErr == nil {
-			resident := &residentAnalyzer{
-				analyzer: analyzer, lookup: lookup, references: 1,
-				lastUsed: f.nextSequenceLocked(), estimatedBytes: estimatedBytes,
-			}
-			f.residents[bundleID] = resident
-		}
-		close(pending.done)
-		f.notifyLocked()
-		f.mu.Unlock()
-		if loadErr != nil {
-			return nil, loadErr
-		}
-		return &bundleCapture{factory: f, bundleID: bundleID, analyzer: analyzer, lookup: lookup}, nil
 	}
+}
+
+func (f *bundleAnalyzerFactory) waitForBundleLoad(ctx context.Context, pending *bundleLoad) error {
+	var waitErr error
+	select {
+	case <-ctx.Done():
+		waitErr = ctx.Err()
+	case <-pending.done:
+	}
+	f.mu.Lock()
+	pending.waiters--
+	if waitErr != nil && pending.waiters == 0 {
+		pending.cancel()
+	}
+	loadErr := pending.err
+	f.mu.Unlock()
+	if waitErr != nil {
+		return waitErr
+	}
+	return loadErr
+}
+
+func (f *bundleAnalyzerFactory) runBundleLoad(ctx context.Context, bundleID string, pending *bundleLoad) {
+	loader := f.load
+	if loader == nil {
+		loader = f.loadBundle
+	}
+	analyzer, lookup, estimatedBytes, loadErr := loader(ctx, bundleID)
+	if loadErr == nil {
+		loadErr = ctx.Err()
+	}
+	if loadErr == nil && analyzer == nil {
+		loadErr = model.NewError(model.CodeBundleUnavailable, "bundle analyzer load returned no analyzer", nil)
+	}
+	f.mu.Lock()
+	if f.loads[bundleID] == pending {
+		delete(f.loads, bundleID)
+	}
+	pending.err = loadErr
+	if loadErr == nil {
+		f.residents[bundleID] = &residentAnalyzer{
+			analyzer: analyzer, lookup: lookup,
+			lastUsed: f.nextSequenceLocked(), estimatedBytes: estimatedBytes,
+		}
+	}
+	close(pending.done)
+	f.notifyLocked()
+	f.mu.Unlock()
 }
 
 func (f *bundleAnalyzerFactory) CaptureAnalyzer(ctx context.Context, bundleID string) (jobs.CapturedAnalyzer, error) {
@@ -541,7 +562,7 @@ func (f *bundleAnalyzerFactory) loadWaiterCount(bundleID string) int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if pending := f.loads[bundleID]; pending != nil {
-		return pending.waiters
+		return max(pending.waiters-1, 0)
 	}
 	return 0
 }

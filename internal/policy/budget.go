@@ -77,7 +77,13 @@ type Controller struct {
 	dns           chan struct{}
 	http          chan struct{}
 	destinationMu sync.Mutex
-	destinations  map[string]time.Time
+	destinations  map[string]*destinationGate
+}
+
+type destinationGate struct {
+	permit     chan struct{}
+	lastStart  time.Time
+	references int
 }
 
 // NewController constructs a process-level execution controller. The channel
@@ -94,7 +100,7 @@ func NewController(limits Limits, concurrentTargets, concurrentDNS, concurrentHT
 		targets:      make(chan struct{}, concurrentTargets),
 		dns:          make(chan struct{}, concurrentDNS),
 		http:         make(chan struct{}, concurrentHTTP),
-		destinations: make(map[string]time.Time),
+		destinations: make(map[string]*destinationGate),
 	}, nil
 }
 
@@ -165,42 +171,66 @@ func AcquireHTTP(ctx context.Context, destination string) (func(), error) {
 	if !state.reserveCount(&state.httpLeft) {
 		return nil, budgetError("HTTP request budget exhausted")
 	}
+	release, err := state.acquireNetwork(ctx, state.http, state.controller.http)
+	if err != nil {
+		return nil, err
+	}
 	if err := state.controller.acquireDestination(ctx, destination); err != nil {
+		release()
 		return nil, model.NewError(model.CodeCancelled, "wait for destination rate admission", err)
 	}
-	return state.acquireNetwork(ctx, state.http, state.controller.http)
+	return release, nil
 }
 
 func (c *Controller) acquireDestination(ctx context.Context, destination string) error {
 	if destination == "" {
 		return fmt.Errorf("HTTP destination key is required")
 	}
-	now := time.Now()
 	c.destinationMu.Lock()
-	for key, next := range c.destinations {
-		if !next.After(now) {
+	now := time.Now()
+	for key, gate := range c.destinations {
+		if gate.references == 0 && !gate.lastStart.Add(c.limits.HTTPDestinationInterval).After(now) {
 			delete(c.destinations, key)
 		}
 	}
-	start := now
-	if next := c.destinations[destination]; next.After(start) {
-		start = next
+	gate := c.destinations[destination]
+	if gate == nil {
+		gate = &destinationGate{permit: make(chan struct{}, 1)}
+		c.destinations[destination] = gate
 	}
-	c.destinations[destination] = start.Add(c.limits.HTTPDestinationInterval)
+	gate.references++
 	c.destinationMu.Unlock()
+	releaseReference := func() {
+		c.destinationMu.Lock()
+		gate.references--
+		c.destinationMu.Unlock()
+	}
+	if err := acquirePermit(ctx, gate.permit); err != nil {
+		releaseReference()
+		return err
+	}
+	defer releasePermit(gate.permit)
+	defer releaseReference()
 
-	wait := time.Until(start)
-	if wait <= 0 {
-		return ctx.Err()
+	c.destinationMu.Lock()
+	start := gate.lastStart.Add(c.limits.HTTPDestinationInterval)
+	c.destinationMu.Unlock()
+	if wait := time.Until(start); wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
-	timer := time.NewTimer(wait)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return ctx.Err()
-	case <-ctx.Done():
-		return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
+	c.destinationMu.Lock()
+	gate.lastStart = time.Now()
+	c.destinationMu.Unlock()
+	return nil
 }
 
 // ReserveAddress accounts for one resolved address retained for later work.

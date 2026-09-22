@@ -149,6 +149,61 @@ func TestBundleAnalyzerFactorySingleflightsSameGeneration(t *testing.T) {
 	}
 }
 
+func TestBundleAnalyzerFactorySharedLoadSurvivesInitiatorCancellation(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	releaseLoad := make(chan struct{})
+	loadCancelled := make(chan struct{}, 1)
+	factory := newFixtureBundleAnalyzerFactory(2, "active", 10, func(ctx context.Context, bundleID string) (app.Analyzer, lookupAvailability, int64, error) {
+		close(started)
+		select {
+		case <-ctx.Done():
+			loadCancelled <- struct{}{}
+			return nil, lookupAvailability{}, 0, ctx.Err()
+		case <-releaseLoad:
+			return runtimeFixtureAnalyzer{bundleID: bundleID}, lookupAvailability{}, 20, nil
+		}
+	})
+	initiatorCtx, cancelInitiator := context.WithCancel(t.Context())
+	initiatorDone := make(chan error, 1)
+	go func() {
+		_, err := factory.CaptureAnalyzer(initiatorCtx, "shared")
+		initiatorDone <- err
+	}()
+	<-started
+	waiterDone := make(chan struct {
+		captured jobs.CapturedAnalyzer
+		err      error
+	}, 1)
+	go func() {
+		captured, err := factory.CaptureAnalyzer(t.Context(), "shared")
+		waiterDone <- struct {
+			captured jobs.CapturedAnalyzer
+			err      error
+		}{captured: captured, err: err}
+	}()
+	deadline := time.Now().Add(time.Second)
+	for factory.loadWaiterCount("shared") != 1 && time.Now().Before(deadline) {
+		goruntime.Gosched()
+	}
+	cancelInitiator()
+	if err := <-initiatorDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("initiating acquisition error = %v", err)
+	}
+	select {
+	case <-loadCancelled:
+		t.Fatal("initiator cancellation canceled a shared load")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseLoad)
+	result := <-waiterDone
+	if result.err != nil {
+		t.Fatalf("remaining waiter error = %v", result.err)
+	}
+	result.captured.Release()
+}
+
 func TestBundleAnalyzerFactoryFailedLoadLeavesNoResidentGeneration(t *testing.T) {
 	t.Parallel()
 

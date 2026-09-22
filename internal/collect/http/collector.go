@@ -38,6 +38,27 @@ type preResponseError struct{ err error }
 func (e *preResponseError) Error() string { return e.err.Error() }
 func (e *preResponseError) Unwrap() error { return e.err }
 
+// PartialResolutionError reports failed address-family lookups while retaining
+// addresses from another family that are still safe to try.
+type PartialResolutionError struct {
+	Omitted int
+	Err     error
+}
+
+func (e *PartialResolutionError) Error() string {
+	if e == nil || e.Err == nil {
+		return "partial redirect resolution"
+	}
+	return e.Err.Error()
+}
+
+func (e *PartialResolutionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 // Option configures a Collector.
 type Option func(*Collector)
 
@@ -199,9 +220,15 @@ func (c *Collector) CollectTargetCandidatesOccurrence(ctx context.Context, rawUR
 		}
 		addresses, resolveErr := c.resolve(ctx, nextURL.Hostname())
 		if resolveErr != nil {
+			var partial *PartialResolutionError
+			if !errors.As(resolveErr, &partial) || len(addresses) == 0 {
+				coverage.Status = model.CoveragePartial
+				coverage.ErrorCodes = append(coverage.ErrorCodes, collectionErrorCode(resolveErr))
+				return finish(final, observations, coverage, tlsAttempted), nil
+			}
 			coverage.Status = model.CoveragePartial
-			coverage.ErrorCodes = append(coverage.ErrorCodes, collectionErrorCode(resolveErr))
-			return finish(final, observations, coverage, tlsAttempted), nil
+			coverage.Omitted += max(partial.Omitted, 1)
+			coverage.ErrorCodes = append(coverage.ErrorCodes, collectionErrorCode(partial.Err))
 		}
 		approved, blocked := c.approvedAddresses(addresses, portForURL(nextURL))
 		if blocked {
