@@ -125,9 +125,7 @@ func newAnalyzerDetailsWithController(ctx context.Context, configuration config.
 		var dialer net.Dialer
 		return dialer.DialContext(ctx, network, net.JoinHostPort(address.String(), fmt.Sprint(port)))
 	}
-	webDetector, err := webtech.New(map[string]webtech.Mapping{
-		"React": {ProductID: "webtech.react", Category: "web_technology", Relation: model.RelationWebIntegration},
-	})
+	webDetector, err := webtech.New()
 	if err != nil {
 		return nil, "", nil, lookupAvailability{}, fmt.Errorf("create passive web detector: %w", err)
 	}

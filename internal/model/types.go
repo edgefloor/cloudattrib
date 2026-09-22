@@ -12,6 +12,10 @@ const (
 	SchemaVersion = "1"
 	// ReportContentIDVersion identifies the current canonical report projection.
 	ReportContentIDVersion = "1"
+
+	// ExplanationGranularityDetectorResult means the detector identified a
+	// technology but did not expose a more specific matching primitive.
+	ExplanationGranularityDetectorResult = "detector_result"
 )
 
 // TargetKind identifies the caller's input syntax and requested scope.
@@ -187,8 +191,17 @@ type HTTPPayload struct {
 
 // TechnologyPayload retains a passive detector's raw technology label.
 type TechnologyPayload struct {
-	Name       string `json:"name"`
-	DetectorID string `json:"detector_id"`
+	Name                   string `json:"name"`
+	DetectorID             string `json:"detector_id"`
+	ExplanationGranularity string `json:"explanation_granularity,omitempty"`
+}
+
+// TechnologyDetection is one typed raw label emitted by a passive detector.
+// It is collection output, not a provider or product attribution.
+type TechnologyDetection struct {
+	Name                   string
+	DetectorID             string
+	ExplanationGranularity string
 }
 
 // HTTPHeader is one retained response header and its sanitized values.

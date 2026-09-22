@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/netip"
 	"testing"
 	"time"
@@ -76,7 +77,7 @@ func TestReclassifyReusesRetainedRawTechnologyLabel(t *testing.T) {
 	payload, _ := json.Marshal(model.TechnologyPayload{Name: "Vue.js", DetectorID: "wappalyzergo-v0.3.2"})
 	original := model.Report{
 		ID: "technology-report", Target: model.Target{Canonical: "example.com", Kind: model.TargetDomain},
-		Observations: []model.Observation{{ID: "tech-1", Type: "technology", Subject: "example.com", Scope: model.ScopeRoot, Status: "detected", Payload: payload}},
+		Observations: []model.Observation{{ID: "tech-1", Type: "technology", Subject: "redirect.example", Scope: model.ScopeExternalRedirect, Status: "detected", Payload: payload}},
 	}
 	service := NewService(Dependencies{
 		Detectors: []Detector{emptyReplayDetector{}}, Store: fixtureResultStore{report: original},
@@ -89,7 +90,7 @@ func TestReclassifyReusesRetainedRawTechnologyLabel(t *testing.T) {
 	if len(replayed.Evidence) != 1 || replayed.Evidence[0].ProductID != "webtech.vue-js" || replayed.Evidence[0].ObservationIDs[0] != "tech-1" {
 		t.Fatalf("replayed evidence = %#v", replayed.Evidence)
 	}
-	if len(replayed.Findings) != 1 || replayed.Findings[0].ProviderID != "" || replayed.Findings[0].ProductID != "webtech.vue-js" {
+	if len(replayed.Findings) != 1 || replayed.Findings[0].ProviderID != "" || replayed.Findings[0].ProductID != "webtech.vue-js" || replayed.Findings[0].Scope != model.ScopeExternalRedirect {
 		t.Fatalf("replayed findings = %#v", replayed.Findings)
 	}
 	encoded, err := replayed.CanonicalJSON()
@@ -99,6 +100,42 @@ func TestReclassifyReusesRetainedRawTechnologyLabel(t *testing.T) {
 	if bytes.Contains(encoded, []byte(`"provider_id":""`)) {
 		t.Fatalf("replayed report contains an empty provider ID: %s", encoded)
 	}
+}
+
+func TestReclassifyMarksMissingRawTechnologyCaptureUnavailable(t *testing.T) {
+	t.Parallel()
+
+	payload, _ := json.Marshal(model.HTTPPayload{URL: "https://example.com/", StatusCode: 200})
+	original := model.Report{
+		ID: "legacy-http-report", Target: model.Target{Canonical: "example.com", Kind: model.TargetDomain},
+		Observations: []model.Observation{{ID: "http-1", Type: "http_response", Subject: "example.com", Scope: model.ScopeRoot, Status: "responded", Payload: payload}},
+	}
+	service := NewService(Dependencies{
+		Detectors: []Detector{emptyReplayDetector{}}, WebDetector: unavailableReplayWebDetector{}, Store: fixtureResultStore{report: original},
+		View: model.NewAttributionView("bundle", "policy", nil, nil),
+	})
+	replayed, err := service.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: original.ID, BundleID: "bundle"})
+	if err != nil {
+		t.Fatalf("Reclassify() error = %v", err)
+	}
+	if replayed.Status != model.StatusPartial {
+		t.Fatalf("Reclassify() status = %q, want partial", replayed.Status)
+	}
+	found := false
+	for _, item := range replayed.Coverage {
+		if item.Capability == "replay_webtech" && item.Status == model.CoverageUnavailable {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("Reclassify() coverage = %#v, want unavailable replay_webtech", replayed.Coverage)
+	}
+}
+
+type unavailableReplayWebDetector struct{}
+
+func (unavailableReplayWebDetector) Detect(context.Context, http.Header, []byte) ([]model.TechnologyDetection, model.Coverage) {
+	panic("reclassification must not invoke live fingerprint detection")
 }
 
 func TestReclassifyEnrichesHTTPRedirectPeerWithNewPrefixAndASNData(t *testing.T) {

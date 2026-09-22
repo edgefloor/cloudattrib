@@ -257,6 +257,25 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	}
 	coverage = append(coverage, tlsCertificateCoverage(normalized, observations, s.httpScheme))
 
+	if s.webDetector != nil {
+		for _, run := range httpRuns {
+			if run.err != nil {
+				continue
+			}
+			source := run.result.Observation
+			if source.Scope != model.ScopeExternalRedirect {
+				source.Scope = scopeForSeed(run.hostname, normalized.ScopeRoots)
+			}
+			detected, detectorCoverage := s.webDetector.Detect(ctx, run.result.Headers, run.result.Body)
+			for _, detection := range detected {
+				if technology, ok := technologyObservation(detection, source); ok {
+					observations = append(observations, technology)
+				}
+			}
+			coverage = append(coverage, detectorCoverage)
+		}
+	}
+
 	classifiedAt := s.now()
 	var evidence []model.Evidence
 	for _, detector := range s.detectors {
@@ -269,27 +288,10 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		evidence = append(evidence, detected...)
 		coverage = append(coverage, detectorCoverage...)
 	}
-	if s.webDetector != nil {
-		for _, run := range httpRuns {
-			if run.err != nil {
-				continue
-			}
-			scope := run.result.Observation.Scope
-			if scope != model.ScopeExternalRedirect {
-				scope = scopeForSeed(run.hostname, normalized.ScopeRoots)
-			}
-			detected, detectorCoverage := s.webDetector.Detect(ctx, run.result.Observation.ID, run.result.Observation.Subject, scope, run.result.Headers, run.result.Body, s.view)
-			for i := range detected {
-				if detected[i].ClassifiedAt.IsZero() {
-					detected[i].ClassifiedAt = classifiedAt
-				}
-				if technology, ok := technologyObservation(detected[i], run.result.Observation); ok {
-					observations = append(observations, technology)
-				}
-			}
-			evidence = append(evidence, detected...)
-			coverage = append(coverage, detectorCoverage)
-		}
+	technologyEvidence, technologyCoverage := classifyUnmappedTechnology(observations, evidence, classifiedAt)
+	evidence = append(evidence, technologyEvidence...)
+	if technologyCoverage != nil {
+		coverage = append(coverage, *technologyCoverage)
 	}
 
 	enrichedEvidence, enrichedCoverage, err := s.enrichAddresses(ctx, observations, classifiedAt)
@@ -549,26 +551,10 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 		evidence = append(evidence, detected...)
 		coverage = append(coverage, detectorCoverage...)
 	}
-	replayedTechnology := 0
-	for _, observation := range observations {
-		if observation.Type != "technology" || evidenceReferences(observation.ID, evidence) {
-			continue
-		}
-		var payload model.TechnologyPayload
-		if json.Unmarshal(observation.Payload, &payload) != nil || payload.Name == "" {
-			continue
-		}
-		sum := sha256.Sum256([]byte("technology-replay-v1\x00" + observation.ID + "\x00" + payload.Name))
-		evidence = append(evidence, model.Evidence{
-			ID: "evidence-technology-" + hex.EncodeToString(sum[:12]), ObservationIDs: []string{observation.ID}, ClassifiedAt: classifiedAt,
-			DetectorID: payload.DetectorID, Subject: observation.Subject, ProductID: "webtech." + normalizeTechnologyID(payload.Name), Category: "web_technology",
-			Relation: model.RelationWebIntegration, Strength: model.StrengthModerate, Activity: model.ActivityResponding, Scope: observation.Scope,
-			Explanation: "replayed passive detector result: " + payload.Name,
-		})
-		replayedTechnology++
-	}
-	if replayedTechnology > 0 {
-		coverage = append(coverage, model.Coverage{Capability: "technology_replay", Status: model.CoverageComplete, Attempted: replayedTechnology, Completed: replayedTechnology})
+	technologyEvidence, technologyCoverage := classifyUnmappedTechnology(observations, evidence, classifiedAt)
+	evidence = append(evidence, technologyEvidence...)
+	if technologyCoverage != nil {
+		coverage = append(coverage, *technologyCoverage)
 	}
 	hasHTTP, hasTechnology := false, false
 	for _, observation := range observations {
@@ -652,21 +638,54 @@ func (s *Service) ValidateReclassify(ctx context.Context, request model.Reclassi
 	return nil
 }
 
-func technologyObservation(item model.Evidence, source model.Observation) (model.Observation, bool) {
-	const prefix = "passive detector result: "
-	name, ok := strings.CutPrefix(item.Explanation, prefix)
-	if !ok || name == "" {
+func technologyObservation(detection model.TechnologyDetection, source model.Observation) (model.Observation, bool) {
+	if detection.Name == "" || detection.DetectorID == "" {
 		return model.Observation{}, false
 	}
-	payload, err := json.Marshal(model.TechnologyPayload{Name: name, DetectorID: item.DetectorID})
+	granularity := detection.ExplanationGranularity
+	if granularity == "" {
+		granularity = model.ExplanationGranularityDetectorResult
+	}
+	payload, err := json.Marshal(model.TechnologyPayload{
+		Name: detection.Name, DetectorID: detection.DetectorID, ExplanationGranularity: granularity,
+	})
 	if err != nil {
 		return model.Observation{}, false
 	}
-	sum := sha256.Sum256([]byte(item.DetectorID + "\x00" + source.ID + "\x00" + name))
+	sum := sha256.Sum256([]byte(detection.DetectorID + "\x00" + source.ID + "\x00" + detection.Name))
 	return model.Observation{
-		ID: "technology-" + hex.EncodeToString(sum[:12]), Type: "technology", Subject: item.Subject, Relation: model.RelationWebIntegration,
-		Scope: item.Scope, ObservedAt: source.ObservedAt, CollectorVersion: item.DetectorID, Status: "detected", Payload: payload,
+		ID: "technology-" + hex.EncodeToString(sum[:12]), Type: "technology", Subject: source.Subject, Relation: model.RelationWebIntegration,
+		Scope: source.Scope, ObservedAt: source.ObservedAt, CollectorVersion: detection.DetectorID, Status: "detected", Payload: payload,
 	}, true
+}
+
+func classifyUnmappedTechnology(observations []model.Observation, existing []model.Evidence, classifiedAt time.Time) ([]model.Evidence, *model.Coverage) {
+	evidence := make([]model.Evidence, 0)
+	for _, observation := range observations {
+		if observation.Type != "technology" || evidenceReferences(observation.ID, existing) {
+			continue
+		}
+		var payload model.TechnologyPayload
+		if json.Unmarshal(observation.Payload, &payload) != nil || payload.Name == "" {
+			continue
+		}
+		detectorID := payload.DetectorID
+		if detectorID == "" {
+			detectorID = observation.CollectorVersion
+		}
+		sum := sha256.Sum256([]byte("technology-taxonomy-v1\x00" + observation.ID + "\x00" + payload.Name))
+		evidence = append(evidence, model.Evidence{
+			ID: "evidence-technology-" + hex.EncodeToString(sum[:12]), ObservationIDs: []string{observation.ID}, ClassifiedAt: classifiedAt,
+			DetectorID: detectorID, Subject: observation.Subject, ProductID: "webtech." + normalizeTechnologyID(payload.Name), Category: "web_technology",
+			Relation: model.RelationWebIntegration, Strength: model.StrengthModerate, Activity: model.ActivityResponding, Scope: observation.Scope,
+			Explanation: "passive detector result: " + payload.Name,
+		})
+	}
+	if len(evidence) == 0 {
+		return nil, nil
+	}
+	coverage := model.Coverage{Capability: "technology_taxonomy", Status: model.CoverageComplete, Attempted: len(evidence), Completed: len(evidence)}
+	return evidence, &coverage
 }
 
 func evidenceReferences(observationID string, evidence []model.Evidence) bool {

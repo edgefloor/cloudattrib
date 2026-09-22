@@ -70,6 +70,8 @@ Bundle activation invokes a filesystem publication callback and does not use the
 
 Reclassification creates a new report from retained observations and reusable detector outputs. It selects a compatible bundle and records a new classification time. Collection times and original collection coverage remain unchanged. Reclassification performs no collection.
 
+Passive web fingerprinting returns typed raw technology labels with detector identity and detector-result explanation granularity. The application retains those labels as technology observations before running product rules. Live analysis and replay therefore apply the same taxonomy to the same observation shape; human-readable evidence explanations are generated output and are never parsed as classifier input. A retained framework label can produce a providerless `web_technology` finding, but it cannot establish cloud-provider ownership.
+
 Evidence references both observations and consulted dataset records. Each dataset record retains its source, revision or digest, record reference, and known publication and effective times. Unknown times stay unknown. A new ownership association does not imply that it existed when the observations were collected.
 
 The `model` package owns observation occurrence IDs and report content IDs. Collectors supply run, seed, request or query, hop, attempt, and item context. Reclassification preserves the collected observation IDs. Report content IDs use the versioned canonical projection in [SPEC section 9.2](../SPEC.md#92-core-fields), while PostgreSQL keeps historical report IDs unchanged.

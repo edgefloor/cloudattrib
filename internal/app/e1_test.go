@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -257,6 +258,104 @@ func TestE1ConvergingSeedsRetainBothObservationHistories(t *testing.T) {
 	if landingResponses != 2 {
 		t.Fatalf("landing response observations = %d, want 2", landingResponses)
 	}
+}
+
+func TestTechnologyFingerprintUsesSameRetainedInputLiveAndReplay(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("X-Powered-By", "fixture")
+		_, _ = writer.Write([]byte("fixture response"))
+	}))
+	t.Cleanup(server.Close)
+
+	dialer := &fixtureDialer{fixtureAddress: server.Listener.Addr().String(), started: make(chan struct{})}
+	view := model.NewAttributionView("fixture-bundle", "public-v1", []string{"dnsrules-v1"}, nil)
+	classifiedAt := time.Date(2026, 9, 22, 10, 0, 0, 0, time.UTC)
+	live := app.NewService(app.Dependencies{
+		DNS:         collectdns.New(fixtureDNSClient{failedAAAA: true}.Query, policy.PublicDestinationPolicy()),
+		HTTP:        collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20),
+		Detectors:   []app.Detector{dnsrules.NewDefault()},
+		WebDetector: fixtureTechnologyDetector{},
+		View:        view,
+		HTTPScheme:  "http",
+		Now:         func() time.Time { return classifiedAt },
+	})
+	includeWWW := false
+	report, err := live.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull, IncludeWWW: &includeWWW})
+	if err != nil {
+		t.Fatalf("Analyze() error = %v", err)
+	}
+	technology := observationByType(report.Observations, "technology")
+	if technology.ID == "" || technology.CollectorVersion != "fixture-fingerprint-v1" {
+		t.Fatalf("live technology observation = %#v", technology)
+	}
+	var payload model.TechnologyPayload
+	if err := json.Unmarshal(technology.Payload, &payload); err != nil {
+		t.Fatalf("decode technology payload: %v", err)
+	}
+	if payload.Name != "React" || payload.DetectorID != "fixture-fingerprint-v1" || payload.ExplanationGranularity != model.ExplanationGranularityDetectorResult {
+		t.Fatalf("technology payload = %#v", payload)
+	}
+	liveEvidence := evidenceForProduct(report.Evidence, "webtech.react")
+	if liveEvidence.ID == "" || len(liveEvidence.ObservationIDs) != 1 || liveEvidence.ObservationIDs[0] != technology.ID {
+		t.Fatalf("live React evidence = %#v", liveEvidence)
+	}
+
+	replay := app.NewService(app.Dependencies{
+		Detectors:   []app.Detector{dnsrules.NewDefault()},
+		WebDetector: panicTechnologyDetector{},
+		Store:       replayReportStore{report: report},
+		View:        view,
+		Now:         func() time.Time { return classifiedAt.Add(time.Hour) },
+	})
+	reclassified, err := replay.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: report.ID, BundleID: view.BundleID()})
+	if err != nil {
+		t.Fatalf("Reclassify() error = %v", err)
+	}
+	replayedTechnology := observationByType(reclassified.Observations, "technology")
+	if replayedTechnology.ID != technology.ID || !replayedTechnology.ObservedAt.Equal(technology.ObservedAt) || string(replayedTechnology.Payload) != string(technology.Payload) {
+		t.Fatalf("replayed technology observation = %#v, want %#v", replayedTechnology, technology)
+	}
+	replayedEvidence := evidenceForProduct(reclassified.Evidence, "webtech.react")
+	if replayedEvidence.ProductID != liveEvidence.ProductID || replayedEvidence.ProviderID != liveEvidence.ProviderID || replayedEvidence.Relation != liveEvidence.Relation || replayedEvidence.Scope != liveEvidence.Scope || !slices.Equal(replayedEvidence.ObservationIDs, liveEvidence.ObservationIDs) {
+		t.Fatalf("replayed React evidence = %#v, live = %#v", replayedEvidence, liveEvidence)
+	}
+}
+
+type fixtureTechnologyDetector struct{}
+
+func (fixtureTechnologyDetector) Detect(context.Context, http.Header, []byte) ([]model.TechnologyDetection, model.Coverage) {
+	return []model.TechnologyDetection{{Name: "React", DetectorID: "fixture-fingerprint-v1", ExplanationGranularity: model.ExplanationGranularityDetectorResult}}, model.Coverage{Capability: "webtech", Status: model.CoverageComplete, Attempted: 1, Completed: 1}
+}
+
+type panicTechnologyDetector struct{}
+
+func (panicTechnologyDetector) Detect(context.Context, http.Header, []byte) ([]model.TechnologyDetection, model.Coverage) {
+	panic("reclassification must not run passive fingerprint collection")
+}
+
+type replayReportStore struct{ report model.Report }
+
+func (store replayReportStore) SaveReport(context.Context, model.Report) error { return nil }
+func (store replayReportStore) LoadReport(context.Context, string) (model.Report, error) {
+	return store.report, nil
+}
+
+func observationByType(observations []model.Observation, observationType string) model.Observation {
+	for _, observation := range observations {
+		if observation.Type == observationType {
+			return observation
+		}
+	}
+	return model.Observation{}
+}
+
+func evidenceForProduct(evidence []model.Evidence, productID string) model.Evidence {
+	for _, item := range evidence {
+		if item.ProductID == productID {
+			return item
+		}
+	}
+	return model.Evidence{}
 }
 
 type fixtureDNSClient struct {

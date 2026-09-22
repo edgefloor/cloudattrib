@@ -49,9 +49,9 @@ type Detector interface {
 	Detect(context.Context, []model.Observation, model.AttributionView) ([]model.Evidence, []model.Coverage)
 }
 
-// WebDetector classifies one already-collected response without fetching it.
+// WebDetector returns typed raw labels for one already-collected response.
 type WebDetector interface {
-	Detect(context.Context, string, string, model.Scope, http.Header, []byte, model.AttributionView) ([]model.Evidence, model.Coverage)
+	Detect(context.Context, http.Header, []byte) ([]model.TechnologyDetection, model.Coverage)
 }
 
 // PrefixReader returns caller-owned local prefix associations.
