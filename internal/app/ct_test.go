@@ -152,6 +152,33 @@ func TestCTDiscoveryReportsFullSeedBudget(t *testing.T) {
 	}
 }
 
+func TestCTDiscoveryReportsUnvisitedRootsAtExactSeedBudget(t *testing.T) {
+	t.Parallel()
+
+	limits := policy.DefaultLimits()
+	limits.SeedHostnames = 2
+	reader := &boundaryCTReader{}
+	service := app.NewService(app.Dependencies{
+		DNS: collectdns.New((&recordingDNSClient{}).Query, policy.PublicDestinationPolicy()), CT: reader, CTEnabled: true, CTMaximumSeed: 1,
+		View: model.NewAttributionView("fixture-bundle", "fixture-public", nil, nil), Limits: limits, Now: time.Now,
+	})
+	includeWWW := false
+	report, err := service.Analyze(context.Background(), model.AnalyzeRequest{
+		Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeDNS, IncludeWWW: &includeWWW, CTDiscovery: true,
+		ScopeRoots: []string{"example.com", "example.net"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverage, ok := findCoverage(report.Coverage, "ct_discovery")
+	if !ok || coverage.Status != model.CoveragePartial || coverage.Omitted == 0 || !slices.Contains(coverage.ErrorCodes, model.CodeBudgetExceeded) {
+		t.Fatalf("CT coverage = %#v, want partial budget exhaustion for an unvisited root", coverage)
+	}
+	if roots := reader.roots(); !slices.Equal(roots, []string{"example.com"}) {
+		t.Fatalf("CT queried roots = %v, want only the root visited before budget exhaustion", roots)
+	}
+}
+
 type recordingDNSClient struct {
 	mu           sync.Mutex
 	queriedNames []string
@@ -167,6 +194,30 @@ type panicCTReader struct{}
 
 func (panicCTReader) Discover(context.Context, string, int) (ctlog.QueryResult, error) {
 	panic("disabled CT reader was called")
+}
+
+type boundaryCTReader struct {
+	mu      sync.Mutex
+	queried []string
+}
+
+func (r *boundaryCTReader) Discover(_ context.Context, root string, _ int) (ctlog.QueryResult, error) {
+	r.mu.Lock()
+	r.queried = append(r.queried, root)
+	r.mu.Unlock()
+	if root != "example.com" {
+		return ctlog.QueryResult{}, nil
+	}
+	return ctlog.QueryResult{
+		Candidates: []ctlog.Candidate{{Hostname: "api.example.com", CertificateHash: "fixture", LoggedAt: time.Now(), SourceID: "fixture", Provenance: ctlog.ProvenanceVerifiedLog}},
+		Available:  1, IndexIdentity: "fixture-index",
+	}, nil
+}
+
+func (r *boundaryCTReader) roots() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.queried)
 }
 
 func (c *recordingDNSClient) Query(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {

@@ -54,8 +54,12 @@ func TestClientCountsActualAttemptsAgainstExecutionBudget(t *testing.T) {
 	if _, err := client.Query(ctx, question); err != nil {
 		t.Fatalf("first Query() error = %v", err)
 	}
-	if _, err := client.Query(ctx, question); model.ErrorCodeOf(err) != model.CodeBudgetExceeded {
+	second, err := client.Query(ctx, question)
+	if model.ErrorCodeOf(err) != model.CodeBudgetExceeded {
 		t.Fatalf("second Query() error = %v", err)
+	}
+	if second.Attempt != 0 {
+		t.Fatalf("second Query() attempts = %d, want 0 network attempts", second.Attempt)
 	}
 	if got := queries.Load(); got != 1 {
 		t.Fatalf("DNS queries = %d, want 1", got)
@@ -113,7 +117,7 @@ func TestClientDoesNotRetryCallerCancellation(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Query() error = %v", err)
 	}
-	if result.Attempt != 1 || result.Outcome != model.DNSOutcomeCancelled {
+	if result.Attempt != 0 || result.Outcome != model.DNSOutcomeCancelled {
 		t.Fatalf("Query() result = %#v", result)
 	}
 }
@@ -160,7 +164,7 @@ func TestClientUsesConfiguredResolverAndRetriesTruncatedUDPOverTCP(t *testing.T)
 	if err != nil {
 		t.Fatalf("Query() error = %v", err)
 	}
-	if result.Transport != "tcp" || len(result.Addresses) != 1 || result.Addresses[0].String() != "93.184.216.34" {
+	if result.Transport != "tcp" || result.Attempt != 2 || len(result.Addresses) != 1 || result.Addresses[0].String() != "93.184.216.34" {
 		t.Fatalf("Query() result = %#v", result)
 	}
 }

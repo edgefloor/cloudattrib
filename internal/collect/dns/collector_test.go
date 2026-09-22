@@ -3,13 +3,21 @@ package dns
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/netip"
 	"slices"
 	"testing"
+	"time"
 
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/policy"
 )
+
+type timeoutError struct{}
+
+func (timeoutError) Error() string   { return "fixture timeout" }
+func (timeoutError) Timeout() bool   { return true }
+func (timeoutError) Temporary() bool { return false }
 
 func TestCollectDistinguishesNegativeAnswersFromProtocolFailures(t *testing.T) {
 	t.Parallel()
@@ -107,5 +115,82 @@ func TestCollectBoundsResolvedAddressesAcrossQuestions(t *testing.T) {
 	}
 	if !slices.Contains(result.Coverage.ErrorCodes, model.CodeBudgetExceeded) {
 		t.Fatalf("coverage error codes = %v", result.Coverage.ErrorCodes)
+	}
+}
+
+func TestCollectCountsReportedNetworkAttempts(t *testing.T) {
+	t.Parallel()
+
+	collector := New(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		attempts := 1
+		if question.Type == typeA {
+			attempts = 2
+		}
+		return model.DNSResult{Question: question, Attempt: attempts}, nil
+	}, policy.PublicDestinationPolicy())
+
+	result := collector.Collect(t.Context(), "example.com", 443, nil)
+	if result.Coverage.Attempted != 7 {
+		t.Fatalf("coverage attempted = %d, want 7", result.Coverage.Attempted)
+	}
+}
+
+func TestCollectCountsBudgetDeniedQuestionsAsOmitted(t *testing.T) {
+	t.Parallel()
+
+	collector := New(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		if question.Type == typeA {
+			return model.DNSResult{Question: question, Attempt: 1}, nil
+		}
+		return model.DNSResult{Question: question, Outcome: model.DNSOutcomeBudgetExhausted}, model.NewError(model.CodeBudgetExceeded, "DNS question budget exhausted", nil)
+	}, policy.PublicDestinationPolicy())
+
+	result := collector.Collect(t.Context(), "example.com", 443, nil)
+	if result.Coverage.Attempted != 1 || result.Coverage.Omitted != len(questionTypes)-1 {
+		t.Fatalf("coverage = %#v, want one attempt and %d omitted", result.Coverage, len(questionTypes)-1)
+	}
+	if !slices.Contains(result.Coverage.ErrorCodes, model.CodeBudgetExceeded) {
+		t.Fatalf("coverage error codes = %v, want budget_exceeded", result.Coverage.ErrorCodes)
+	}
+}
+
+func TestCollectReportsTerminalDeadlineAsTimeout(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+	defer cancel()
+	collector := New(func(ctx context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		return model.DNSResult{Question: question}, ctx.Err()
+	}, policy.PublicDestinationPolicy())
+
+	result := collector.Collect(ctx, "example.com", 443, nil)
+	if !slices.Contains(result.Coverage.ErrorCodes, model.CodeTimeout) {
+		t.Fatalf("coverage error codes = %v, want timeout", result.Coverage.ErrorCodes)
+	}
+	if slices.Contains(result.Coverage.ErrorCodes, model.CodeCancelled) {
+		t.Fatalf("coverage error codes = %v, do not want cancelled", result.Coverage.ErrorCodes)
+	}
+}
+
+func TestErrorCodeDistinguishesTimeoutFromCollectionFailure(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want model.ErrorCode
+	}{
+		{name: "deadline", err: context.DeadlineExceeded, want: model.CodeTimeout},
+		{name: "network timeout", err: timeoutError{}, want: model.CodeTimeout},
+		{name: "cancellation", err: context.Canceled, want: model.CodeCancelled},
+		{name: "transport failure", err: errors.New("malformed DNS response"), want: model.CodeCollectionFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := errorCode(test.err); got != test.want {
+				t.Fatalf("errorCode() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

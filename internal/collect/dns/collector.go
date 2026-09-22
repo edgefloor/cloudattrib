@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"sync"
 	"time"
@@ -96,13 +97,24 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 		close(results)
 	}()
 
-	collected := Result{Coverage: model.Coverage{Capability: "dns", Status: model.CoverageComplete, Attempted: len(questionTypes)}}
+	collected := Result{Coverage: model.Coverage{Capability: "dns", Status: model.CoverageComplete}}
 	publishedAddresses := make(map[netip.Addr]struct{})
 	for item := range results {
+		if item.result.Attempt > 0 {
+			collected.Coverage.Attempted += item.result.Attempt
+		}
 		outcome := normalizeOutcome(item.result, item.err)
+		if item.result.Omitted > 0 {
+			collected.Coverage.Status = model.CoveragePartial
+			collected.Coverage.Omitted += item.result.Omitted
+			collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, model.CodeBudgetExceeded)
+		}
 		if item.err != nil {
 			collected.Coverage.Status = model.CoveragePartial
 			collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, errorCode(item.err))
+			if outcome == model.DNSOutcomeBudgetExhausted {
+				collected.Coverage.Omitted++
+			}
 			collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, outcome, item.result, item.err.Error(), item.occurrence))
 			continue
 		}
@@ -115,11 +127,6 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 		collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, outcome, item.result, "", item.occurrence))
 		if outcome != model.DNSOutcomeAnswered {
 			continue
-		}
-		if item.result.Omitted > 0 {
-			collected.Coverage.Status = model.CoveragePartial
-			collected.Coverage.Omitted += item.result.Omitted
-			collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, model.CodeBudgetExceeded)
 		}
 		for recordIndex, observation := range item.result.Records {
 			if observation.ObservedAt.IsZero() {
@@ -168,7 +175,7 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 	}
 	if ctx.Err() != nil {
 		collected.Coverage.Status = model.CoveragePartial
-		collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, model.CodeCancelled)
+		collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, errorCode(ctx.Err()))
 	}
 	return collected
 }
@@ -231,13 +238,20 @@ func marshalPayload(value any) model.JSONValue {
 }
 
 func errorCode(err error) model.ErrorCode {
-	if code := model.ErrorCodeOf(err); code != "" {
-		return code
+	if errors.Is(err, context.DeadlineExceeded) {
+		return model.CodeTimeout
 	}
 	if errors.Is(err, context.Canceled) {
 		return model.CodeCancelled
 	}
-	return model.CodeTimeout
+	if code := model.ErrorCodeOf(err); code != "" {
+		return code
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return model.CodeTimeout
+	}
+	return model.CodeCollectionFailed
 }
 
 func typeName(value uint16) string {

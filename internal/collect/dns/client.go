@@ -62,59 +62,65 @@ func (c *Client) Query(ctx context.Context, question model.DNSQuestion) (model.D
 	message := new(mdns.Msg)
 	message.SetQuestion(mdns.Fqdn(question.Name), question.Type)
 	var lastErr error
-	for attempt := 1; attempt <= c.attempts; attempt++ {
-		response, transport, err := c.exchange(ctx, message)
+	networkAttempts := 0
+	for retry := 1; retry <= c.attempts; retry++ {
+		response, transport, attempts, err := c.exchange(ctx, message)
+		networkAttempts += attempts
 		if err != nil {
 			if model.ErrorCodeOf(err) == model.CodeBudgetExceeded || model.ErrorCodeOf(err) == model.CodeCancelled {
-				return model.DNSResult{Question: question, Attempt: attempt, Resolver: c.resolver, Outcome: outcomeForError(err)}, err
+				return model.DNSResult{Question: question, Attempt: networkAttempts, Resolver: c.resolver, Outcome: outcomeForError(err)}, err
 			}
 			if ctx.Err() != nil {
-				return model.DNSResult{Question: question, Attempt: attempt, Resolver: c.resolver, Outcome: outcomeForError(ctx.Err())}, ctx.Err()
+				return model.DNSResult{Question: question, Attempt: networkAttempts, Resolver: c.resolver, Outcome: outcomeForError(ctx.Err())}, ctx.Err()
 			}
 			lastErr = err
 			continue
 		}
 		result, err := c.convert(question, response, transport)
-		result.Attempt = attempt
-		if result.Outcome == model.DNSOutcomeSERVFAIL && attempt < c.attempts {
+		result.Attempt = networkAttempts
+		if result.Outcome == model.DNSOutcomeSERVFAIL && retry < c.attempts {
 			continue
 		}
 		return result, err
 	}
-	result := model.DNSResult{Question: question, Attempt: c.attempts, Resolver: c.resolver, Outcome: outcomeForError(lastErr)}
+	result := model.DNSResult{Question: question, Attempt: networkAttempts, Resolver: c.resolver, Outcome: outcomeForError(lastErr)}
 	return result, fmt.Errorf("query DNS %s type %d: %w", question.Name, question.Type, lastErr)
 }
 
-func (c *Client) exchange(ctx context.Context, message *mdns.Msg) (*mdns.Msg, string, error) {
+func (c *Client) exchange(ctx context.Context, message *mdns.Msg) (*mdns.Msg, string, int, error) {
 	if c.network == "tcp" {
-		tcp := &mdns.Client{Net: "tcp", Timeout: c.timeout}
-		response, err := c.exchangeAttempt(ctx, tcp, message)
-		return response, "tcp", err
+		response, attempted, err := c.exchangeAttempt(ctx, &mdns.Client{Net: "tcp", Timeout: c.timeout}, message)
+		return response, "tcp", attempted, err
 	}
 	udp := &mdns.Client{Net: "udp", Timeout: c.timeout}
-	response, err := c.exchangeAttempt(ctx, udp, message)
+	response, attempted, err := c.exchangeAttempt(ctx, udp, message)
+	attempts := attempted
 	if err != nil {
-		return nil, "udp", err
+		return nil, "udp", attempts, err
 	}
 	if !response.Truncated {
-		return response, "udp", nil
+		return response, "udp", attempts, nil
 	}
 	tcp := &mdns.Client{Net: "tcp", Timeout: c.timeout}
-	response, err = c.exchangeAttempt(ctx, tcp, message)
+	response, attempted, err = c.exchangeAttempt(ctx, tcp, message)
+	attempts += attempted
 	if err != nil {
-		return nil, "tcp", err
+		return nil, "tcp", attempts, err
 	}
-	return response, "tcp", nil
+	return response, "tcp", attempts, nil
 }
 
-func (c *Client) exchangeAttempt(ctx context.Context, client *mdns.Client, message *mdns.Msg) (*mdns.Msg, error) {
+func (c *Client) exchangeAttempt(ctx context.Context, client *mdns.Client, message *mdns.Msg) (*mdns.Msg, int, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, 0, err
+	}
 	release, err := policy.AcquireDNS(ctx)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer release()
 	response, _, err := client.ExchangeContext(ctx, message, c.resolver)
-	return response, err
+	return response, 1, err
 }
 
 func (c *Client) convert(question model.DNSQuestion, response *mdns.Msg, transport string) (model.DNSResult, error) {
@@ -178,17 +184,17 @@ func outcomeForError(err error) model.DNSOutcome {
 	if err == nil {
 		return model.DNSOutcomeFailed
 	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return model.DNSOutcomeTimeout
+	}
+	if errors.Is(err, context.Canceled) {
+		return model.DNSOutcomeCancelled
+	}
 	switch model.ErrorCodeOf(err) {
 	case model.CodeBudgetExceeded:
 		return model.DNSOutcomeBudgetExhausted
 	case model.CodeCancelled:
 		return model.DNSOutcomeCancelled
-	}
-	if errors.Is(err, context.Canceled) {
-		return model.DNSOutcomeCancelled
-	}
-	if errors.Is(err, context.DeadlineExceeded) {
-		return model.DNSOutcomeTimeout
 	}
 	var networkError net.Error
 	if errors.As(err, &networkError) && networkError.Timeout() {

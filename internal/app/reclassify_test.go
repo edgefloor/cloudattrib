@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/netip"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +16,49 @@ import (
 	"cloudattrib/internal/ingest/iptoasn"
 	"cloudattrib/internal/model"
 )
+
+func TestValidateReclassifyRejectsHistoricalURLQueryWithoutEcho(t *testing.T) {
+	t.Parallel()
+
+	original := model.Report{
+		ID: "historical-query", Target: model.Target{Kind: model.TargetURL, Original: "https://example.com/path?token=HISTORICAL_QUERY_CANARY", Canonical: "https://example.com/path"},
+		Observations: []model.Observation{{ID: "obs-1", Type: "dns_record", Subject: "example.com", Status: "answered"}},
+	}
+	service := NewService(Dependencies{
+		Detectors: []Detector{emptyReplayDetector{}}, Store: fixtureResultStore{report: original},
+		View: model.NewAttributionView("bundle", "policy", nil, nil),
+	})
+	err := service.ValidateReclassify(t.Context(), model.ReclassifyRequest{ReportID: original.ID, BundleID: "bundle"})
+	if model.ErrorCodeOf(err) != model.CodeInvalidTarget {
+		t.Fatalf("ValidateReclassify() error = %v, want invalid_target", err)
+	}
+	if strings.Contains(err.Error(), "HISTORICAL_QUERY_CANARY") {
+		t.Fatalf("ValidateReclassify() exposed the historical query: %v", err)
+	}
+}
+
+func TestReclassifyRechecksHistoricalURLQueryAfterValidationLoad(t *testing.T) {
+	t.Parallel()
+
+	safe := model.Report{
+		ID: "changing-report", Target: model.Target{Kind: model.TargetURL, Original: "https://example.com/path", Canonical: "https://example.com/path"},
+		Observations: []model.Observation{{ID: "obs-1", Type: "dns_record", Subject: "example.com", Status: "answered"}},
+	}
+	unsafe := safe
+	unsafe.Target.Canonical = "https://example.com/path?token=SECOND_LOAD_CANARY"
+	store := &sequenceResultStore{reports: []model.Report{safe, unsafe}}
+	service := NewService(Dependencies{
+		Detectors: []Detector{emptyReplayDetector{}}, Store: store,
+		View: model.NewAttributionView("bundle", "policy", nil, nil),
+	})
+	_, err := service.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: safe.ID, BundleID: "bundle"})
+	if model.ErrorCodeOf(err) != model.CodeInvalidTarget {
+		t.Fatalf("Reclassify() error = %v, want invalid_target", err)
+	}
+	if strings.Contains(err.Error(), "SECOND_LOAD_CANARY") {
+		t.Fatalf("Reclassify() exposed the historical query: %v", err)
+	}
+}
 
 func TestReclassifyPreservesCaptureAndUsesNewClassificationProvenance(t *testing.T) {
 	t.Parallel()
@@ -238,6 +283,22 @@ type fixtureResultStore struct{ report model.Report }
 func (s fixtureResultStore) SaveReport(context.Context, model.Report) error { return nil }
 func (s fixtureResultStore) LoadReport(context.Context, string) (model.Report, error) {
 	return s.report, nil
+}
+
+type sequenceResultStore struct {
+	mu      sync.Mutex
+	reports []model.Report
+	loads   int
+}
+
+func (*sequenceResultStore) SaveReport(context.Context, model.Report) error { return nil }
+
+func (s *sequenceResultStore) LoadReport(context.Context, string) (model.Report, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	index := min(s.loads, len(s.reports)-1)
+	s.loads++
+	return s.reports[index], nil
 }
 
 type fixtureReplayDetector struct{}

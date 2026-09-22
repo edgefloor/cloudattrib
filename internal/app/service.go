@@ -341,8 +341,13 @@ func (s *Service) planCTDiscovery(ctx context.Context, request *model.Normalized
 	observations := make([]model.Observation, 0, limit)
 	identities := make([]string, 0, len(request.ScopeRoots))
 	partial := false
-	for _, root := range request.ScopeRoots {
+	for rootIndex, root := range request.ScopeRoots {
 		if limit <= 0 {
+			coverage.Omitted += len(request.ScopeRoots) - rootIndex
+			partial = true
+			if !slices.Contains(coverage.ErrorCodes, model.CodeBudgetExceeded) {
+				coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeBudgetExceeded)
+			}
 			break
 		}
 		result, err := s.ct.Discover(ctx, root, limit)
@@ -353,7 +358,10 @@ func (s *Service) planCTDiscovery(ctx context.Context, request *model.Normalized
 		}
 		coverage.Attempted += result.Available
 		coverage.Omitted += result.Omitted
-		partial = partial || result.Partial
+		partial = partial || result.Partial || result.Omitted > 0
+		if result.Omitted > 0 && !slices.Contains(coverage.ErrorCodes, model.CodeBudgetExceeded) {
+			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeBudgetExceeded)
+		}
 		identities = append(identities, result.IndexIdentity)
 		for candidateIndex, candidate := range result.Candidates {
 			if _, duplicate := seen[candidate.Hostname]; duplicate {
@@ -520,6 +528,9 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 		}
 		return model.Report{}, model.NewError(model.CodePersistenceFailed, "load replay input", err)
 	}
+	if err := validateHistoricalReportTarget(original); err != nil {
+		return model.Report{}, err
+	}
 	classifiedAt := s.now()
 	observations := slices.Clone(original.Observations)
 	evidence := make([]model.Evidence, 0)
@@ -623,6 +634,9 @@ func (s *Service) ValidateReclassify(ctx context.Context, request model.Reclassi
 		}
 		return model.NewError(model.CodePersistenceFailed, "load replay input", err)
 	}
+	if err := validateHistoricalReportTarget(original); err != nil {
+		return err
+	}
 	if len(original.Observations) == 0 && len(original.Evidence) == 0 {
 		return model.NewError(model.CodeCapabilityUnavailable, "report has no retained replay inputs", nil)
 	}
@@ -644,6 +658,15 @@ func (s *Service) ValidateReclassify(ctx context.Context, request model.Reclassi
 	hasDetectorPath := len(s.detectors) > 0 && len(original.Observations) > 0
 	if !hasDetectorPath && !hasTechnology && !hasAddressPath {
 		return model.NewError(model.CodeCapabilityUnavailable, "no replay classifier is usable for retained inputs", nil)
+	}
+	return nil
+}
+
+func validateHistoricalReportTarget(report model.Report) error {
+	for _, value := range []string{report.Target.Original, report.Target.Canonical} {
+		if err := target.ValidatePersistentInput(model.AnalyzeRequest{Target: value, Kind: report.Target.Kind}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
