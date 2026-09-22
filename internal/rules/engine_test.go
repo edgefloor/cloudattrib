@@ -135,6 +135,8 @@ func TestSPFIncludeRequiresReachablePositiveMechanism(t *testing.T) {
 		{name: "qualified modifier is invalid", value: "v=spf1 include:_spf.google.com +redirect=example.com"},
 		{name: "duplicate redirect invalidates record", value: "v=spf1 include:_spf.google.com redirect=one.example.com redirect=two.example.com -all"},
 		{name: "duplicate exp invalidates record", value: "v=spf1 include:_spf.google.com exp=one.example.com exp=two.example.com -all"},
+		{name: "duplicate redirect after all invalidates record", value: "v=spf1 include:_spf.google.com -all redirect=one.example.com redirect=two.example.com"},
+		{name: "duplicate exp after all invalidates record", value: "v=spf1 include:_spf.google.com -all exp=one.example.com exp=two.example.com"},
 		{name: "invalid IPv4 mechanism invalidates record", value: "v=spf1 ip4:not-an-address include:_spf.google.com -all"},
 		{name: "invalid IPv4 CIDR length invalidates record", value: "v=spf1 ip4:192.0.2.1/33 include:_spf.google.com -all"},
 		{name: "invalid IPv6 mechanism invalidates record", value: "v=spf1 ip6:not-an-address include:_spf.google.com -all"},

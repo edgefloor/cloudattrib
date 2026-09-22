@@ -374,18 +374,20 @@ func spfIncludes(value, expected string) bool {
 	if len(fields) == 0 || fields[0] != "v=spf1" {
 		return false
 	}
+	if !validSPFModifiers(fields[1:]) {
+		return false
+	}
 	expected = strings.ToLower(strings.TrimSuffix(expected, "."))
 	matched := false
-	seenRedirect := false
-	seenExplanation := false
 	for _, term := range fields[1:] {
 		if term == "" {
 			continue
 		}
+		if _, _, isModifier := splitSPFModifier(term); isModifier {
+			continue
+		}
 		qualifier := byte('+')
-		hasQualifier := false
 		if isSPFQualifier(term[0]) {
-			hasQualifier = true
 			qualifier = term[0]
 			term = term[1:]
 			if term == "" || isSPFQualifier(term[0]) {
@@ -393,26 +395,6 @@ func spfIncludes(value, expected string) bool {
 			}
 		}
 		separator := strings.IndexAny(term, ":/")
-		assignment := strings.IndexByte(term, '=')
-		if assignment >= 0 && (separator < 0 || assignment < separator) {
-			name, argument, _ := strings.Cut(term, "=")
-			if hasQualifier || !validSPFName(name) || argument == "" {
-				return false
-			}
-			switch name {
-			case "redirect":
-				if seenRedirect || !validSPFDomainSpec(argument) {
-					return false
-				}
-				seenRedirect = true
-			case "exp":
-				if seenExplanation || !validSPFDomainSpec(argument) {
-					return false
-				}
-				seenExplanation = true
-			}
-			continue
-		}
 		mechanism, suffix, hasSuffix := term, "", separator >= 0
 		if hasSuffix {
 			mechanism, suffix = term[:separator], term[separator:]
@@ -456,6 +438,42 @@ func spfIncludes(value, expected string) bool {
 		}
 	}
 	return matched
+}
+
+func validSPFModifiers(terms []string) bool {
+	seenRedirect := false
+	seenExplanation := false
+	for _, term := range terms {
+		name, argument, isModifier := splitSPFModifier(term)
+		if !isModifier {
+			continue
+		}
+		if !validSPFName(name) || argument == "" {
+			return false
+		}
+		switch name {
+		case "redirect":
+			if seenRedirect || !validSPFDomainSpec(argument) {
+				return false
+			}
+			seenRedirect = true
+		case "exp":
+			if seenExplanation || !validSPFDomainSpec(argument) {
+				return false
+			}
+			seenExplanation = true
+		}
+	}
+	return true
+}
+
+func splitSPFModifier(term string) (string, string, bool) {
+	separator := strings.IndexAny(term, ":/")
+	assignment := strings.IndexByte(term, '=')
+	if assignment < 0 || separator >= 0 && assignment > separator {
+		return "", "", false
+	}
+	return term[:assignment], term[assignment+1:], true
 }
 
 func validSPFDomainCIDR(suffix string, hasSuffix bool) bool {
