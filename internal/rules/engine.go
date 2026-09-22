@@ -8,9 +8,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -393,31 +395,48 @@ func spfIncludes(value, expected string) bool {
 			if hasQualifier || !validSPFName(name) || argument == "" {
 				return false
 			}
+			if (name == "redirect" || name == "exp") && !validSPFDomainSpec(argument) {
+				return false
+			}
 			continue
 		}
 		separator := strings.IndexAny(term, ":/")
-		mechanism := term
-		if separator >= 0 {
-			mechanism = term[:separator]
+		mechanism, suffix, hasSuffix := term, "", separator >= 0
+		if hasSuffix {
+			mechanism, suffix = term[:separator], term[separator:]
 		}
 		switch mechanism {
 		case "all":
-			if separator >= 0 {
+			if hasSuffix {
 				return false
 			}
 			return matched
 		case "include":
-			if separator < 0 || term[separator] != ':' || separator == len(term)-1 {
+			if !hasSuffix || !strings.HasPrefix(suffix, ":") || !validSPFDomainSpec(suffix[1:]) {
 				return false
 			}
-			domain := strings.TrimSuffix(term[separator+1:], ".")
+			domain := strings.TrimSuffix(suffix[1:], ".")
 			if qualifier == '+' && domain == expected {
 				matched = true
 			}
-		case "a", "mx", "ptr":
-			// These mechanisms do not affect passive include detection.
-		case "ip4", "ip6", "exists":
-			if separator < 0 || term[separator] != ':' || separator == len(term)-1 {
+		case "a", "mx":
+			if !validSPFDomainCIDR(suffix, hasSuffix) {
+				return false
+			}
+		case "ptr":
+			if !validSPFPtr(suffix, hasSuffix) {
+				return false
+			}
+		case "ip4":
+			if !hasSuffix || !strings.HasPrefix(suffix, ":") || !validSPFIP(suffix[1:], true) {
+				return false
+			}
+		case "ip6":
+			if !hasSuffix || !strings.HasPrefix(suffix, ":") || !validSPFIP(suffix[1:], false) {
+				return false
+			}
+		case "exists":
+			if !hasSuffix || !strings.HasPrefix(suffix, ":") || !validSPFDomainSpec(suffix[1:]) {
 				return false
 			}
 		default:
@@ -425,6 +444,149 @@ func spfIncludes(value, expected string) bool {
 		}
 	}
 	return matched
+}
+
+func validSPFDomainCIDR(suffix string, hasSuffix bool) bool {
+	if !hasSuffix {
+		return true
+	}
+	if strings.HasPrefix(suffix, ":") {
+		suffix = suffix[1:]
+		if suffix == "" {
+			return false
+		}
+		beforeCIDR, cidr, hasCIDR := strings.Cut(suffix, "/")
+		if !validSPFDomainSpec(beforeCIDR) {
+			return false
+		}
+		if !hasCIDR {
+			return true
+		}
+		return validSPFDualCIDR(cidr)
+	}
+	if !strings.HasPrefix(suffix, "/") {
+		return false
+	}
+	return validSPFDualCIDR(suffix[1:])
+}
+
+func validSPFPtr(suffix string, hasSuffix bool) bool {
+	return !hasSuffix || (strings.HasPrefix(suffix, ":") && validSPFDomainSpec(suffix[1:]))
+}
+
+func validSPFDualCIDR(value string) bool {
+	parts := strings.Split(value, "/")
+	if len(parts) < 1 || len(parts) > 2 || !validSPFCIDRLength(parts[0], 32) {
+		return false
+	}
+	return len(parts) == 1 || validSPFCIDRLength(parts[1], 128)
+}
+
+func validSPFIP(value string, ipv4 bool) bool {
+	address, cidr, hasCIDR := strings.Cut(value, "/")
+	if address == "" || strings.Contains(cidr, "/") {
+		return false
+	}
+	parsed, err := netip.ParseAddr(address)
+	if err != nil || parsed.Is4() != ipv4 {
+		return false
+	}
+	if !hasCIDR {
+		return true
+	}
+	maximum := 128
+	if ipv4 {
+		maximum = 32
+	}
+	return validSPFCIDRLength(cidr, maximum)
+}
+
+func validSPFCIDRLength(value string, maximum int) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	length, err := strconv.Atoi(value)
+	return err == nil && length <= maximum
+}
+
+func validSPFDomainSpec(value string) bool {
+	if value == "" || len(value) > 253 {
+		return false
+	}
+	for index := 0; index < len(value); {
+		character := value[index]
+		switch {
+		case isSPFDomainLiteral(character):
+			index++
+		case character == '%':
+			next, ok := validSPFMacro(value, index)
+			if !ok {
+				return false
+			}
+			index = next
+		default:
+			return false
+		}
+	}
+	return validSPFDomainLabels(value)
+}
+
+func isSPFDomainLiteral(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9' || strings.ContainsRune("-._", rune(value))
+}
+
+func validSPFMacro(value string, start int) (int, bool) {
+	if start+1 >= len(value) {
+		return 0, false
+	}
+	switch value[start+1] {
+	case '%', '_', '-':
+		return start + 2, true
+	case '{':
+		end := strings.IndexByte(value[start+2:], '}')
+		if end < 0 {
+			return 0, false
+		}
+		end += start + 2
+		body := value[start+2 : end]
+		if body == "" || !strings.ContainsRune("slodiphcrt", rune(body[0])) {
+			return 0, false
+		}
+		index := 1
+		for index < len(body) && body[index] >= '0' && body[index] <= '9' {
+			index++
+		}
+		if index < len(body) && body[index] == 'r' {
+			index++
+		}
+		for index < len(body) && strings.ContainsRune(".-+,/_=", rune(body[index])) {
+			index++
+		}
+		return end + 1, index == len(body)
+	default:
+		return 0, false
+	}
+}
+
+func validSPFDomainLabels(value string) bool {
+	labels := strings.Split(value, ".")
+	if labels[len(labels)-1] == "" {
+		labels = labels[:len(labels)-1]
+	}
+	if len(labels) == 0 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+	}
+	return true
 }
 
 func isSPFQualifier(value byte) bool {
