@@ -463,7 +463,15 @@ func (s *Service) LookupIP(ctx context.Context, request model.IPLookupRequest) (
 		result.Coverage = append(result.Coverage, coverage)
 		if err == nil {
 			if len(associations) > s.prefixAssociationLimit() {
-				return model.IPLookupResult{}, model.NewError(model.CodeBudgetExceeded, "prefix association limit exceeded", nil)
+				omitted := len(associations) - s.prefixAssociationLimit()
+				associations = associations[:s.prefixAssociationLimit()]
+				coverage := &result.Coverage[len(result.Coverage)-1]
+				coverage.Status = model.CoveragePartial
+				coverage.Omitted += omitted
+				if !slices.Contains(coverage.ErrorCodes, model.CodeBudgetExceeded) {
+					coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeBudgetExceeded)
+				}
+				coverage.Reason = "configured prefix association limit reached"
 			}
 			usable++
 			result.Associations = associations

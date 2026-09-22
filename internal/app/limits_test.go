@@ -43,21 +43,35 @@ func TestAnalyzeReportsConfiguredSeedLimit(t *testing.T) {
 	}
 }
 
-func TestLookupIPRejectsAssociationOverflow(t *testing.T) {
+func TestLookupIPRetainsAssociationAndASNResultsWhenAssociationsExceedLimit(t *testing.T) {
 	limits := policy.DefaultLimits()
 	limits.PrefixAssociations = 1
 	service := NewService(Dependencies{
 		Prefixes: overflowingPrefixReader{},
+		ASN:      overflowingASNReader{},
 		Limits:   limits,
 		View: model.NewAttributionView("bundle", "policy", nil, []model.CapabilityState{
 			{Name: "prefix", Status: model.CoverageComplete},
-			{Name: "asn", Status: model.CoverageUnavailable},
+			{Name: "asn", Status: model.CoverageComplete},
 		}),
 	})
 
-	_, err := service.LookupIP(t.Context(), model.IPLookupRequest{Address: netip.MustParseAddr("198.51.100.7")})
-	if model.ErrorCodeOf(err) != model.CodeBudgetExceeded {
+	result, err := service.LookupIP(t.Context(), model.IPLookupRequest{Address: netip.MustParseAddr("198.51.100.7")})
+	if err != nil {
 		t.Fatalf("LookupIP() error = %v", err)
+	}
+	if result.Status != model.StatusPartial {
+		t.Fatalf("LookupIP() status = %q, want partial", result.Status)
+	}
+	if len(result.Associations) != 1 || result.Associations[0].ID != "one" {
+		t.Fatalf("LookupIP() associations = %#v, want first retained association", result.Associations)
+	}
+	if len(result.ASN) != 1 || result.ASN[0].ASN != 64500 {
+		t.Fatalf("LookupIP() ASN = %#v, want available ASN result", result.ASN)
+	}
+	prefixCoverage, ok := coverageFor(result.Coverage, "prefix")
+	if !ok || prefixCoverage.Status != model.CoveragePartial || prefixCoverage.Omitted != 1 || !hasCoverageError(result.Coverage, "prefix", model.CodeBudgetExceeded) {
+		t.Fatalf("LookupIP() prefix coverage = %#v, want partial coverage with one omitted budget-exceeded association", prefixCoverage)
 	}
 }
 
@@ -124,6 +138,21 @@ type overflowingPrefixReader struct{}
 
 func (overflowingPrefixReader) LookupPrefixes(context.Context, model.IPLookupRequest, model.AttributionView) ([]model.Association, model.Coverage, error) {
 	return []model.Association{{ID: "one"}, {ID: "two"}}, model.Coverage{Capability: "prefix", Status: model.CoverageComplete, Attempted: 1, Completed: 1}, nil
+}
+
+type overflowingASNReader struct{}
+
+func (overflowingASNReader) LookupASN(context.Context, netip.Addr, model.AttributionView) ([]model.ASNRecord, model.Coverage, error) {
+	return []model.ASNRecord{{ASN: 64500}}, model.Coverage{Capability: "asn", Status: model.CoverageComplete, Attempted: 1, Completed: 1}, nil
+}
+
+func coverageFor(coverage []model.Coverage, capability string) (model.Coverage, bool) {
+	for _, item := range coverage {
+		if item.Capability == capability {
+			return item, true
+		}
+	}
+	return model.Coverage{}, false
 }
 
 func hasCoverageError(coverage []model.Coverage, capability string, code model.ErrorCode) bool {
