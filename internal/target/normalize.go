@@ -25,6 +25,15 @@ const (
 
 // Normalize validates input before collection and returns a bounded seed plan.
 func Normalize(req model.AnalyzeRequest) (model.NormalizedRequest, error) {
+	return NormalizeWithSeedLimit(req, 32)
+}
+
+// NormalizeWithSeedLimit validates input with the caller's configured maximum
+// seed count. Collection may apply a lower execution budget after planning.
+func NormalizeWithSeedLimit(req model.AnalyzeRequest, seedLimit int) (model.NormalizedRequest, error) {
+	if seedLimit <= 0 {
+		return model.NormalizedRequest{}, invalidOptions("seed hostname limit must be positive")
+	}
 	if !utf8.ValidString(req.Target) || containsControl(req.Target) {
 		return model.NormalizedRequest{}, invalidTarget("target contains invalid text")
 	}
@@ -108,8 +117,8 @@ func Normalize(req model.AnalyzeRequest) (model.NormalizedRequest, error) {
 	}
 	slices.Sort(result.SeedHostnames)
 	result.SeedHostnames = slices.Compact(result.SeedHostnames)
-	if len(result.SeedHostnames) > 32 {
-		return model.NormalizedRequest{}, invalidOptions("seed hostname limit exceeds 32")
+	if len(result.SeedHostnames) > seedLimit {
+		return model.NormalizedRequest{}, invalidOptions(fmt.Sprintf("seed hostname limit exceeds %d", seedLimit))
 	}
 	return result, nil
 }

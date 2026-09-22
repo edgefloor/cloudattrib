@@ -75,14 +75,28 @@ func (a lookupAvailability) complete() bool {
 }
 
 func newAnalyzerDetails(ctx context.Context, configuration config.Config, store app.ResultStore) (app.Analyzer, string, []byte, lookupAvailability, error) {
+	controller, err := policy.NewController(
+		configuration.Limits.Target,
+		configuration.Limits.ConcurrentTargets,
+		configuration.Limits.ConcurrentDNS,
+		configuration.Limits.ConcurrentHTTP,
+	)
+	if err != nil {
+		return nil, "", nil, lookupAvailability{}, fmt.Errorf("create execution controller: %w", err)
+	}
+	return newAnalyzerDetailsWithController(ctx, configuration, store, controller)
+}
+
+func newAnalyzerDetailsWithController(ctx context.Context, configuration config.Config, store app.ResultStore, controller *policy.Controller) (app.Analyzer, string, []byte, lookupAvailability, error) {
 	if err := configuration.Validate(); err != nil {
 		return nil, "", nil, lookupAvailability{}, fmt.Errorf("validate configuration: %w", err)
 	}
 	dnsClient, err := collectdns.NewClient(collectdns.ClientConfig{
-		Resolver: configuration.Resolver.Address,
-		Network:  configuration.Resolver.Network,
-		Timeout:  configuration.Limits.Target.DNSQueryTimeout,
-		Attempts: configuration.Limits.Target.DNSAttempts,
+		Resolver:        configuration.Resolver.Address,
+		Network:         configuration.Resolver.Network,
+		Timeout:         configuration.Limits.Target.DNSQueryTimeout,
+		Attempts:        configuration.Limits.Target.DNSAttempts,
+		CNAMEChainDepth: configuration.Limits.Target.CNAMEChainDepth,
 	})
 	if err != nil {
 		return nil, "", nil, lookupAvailability{}, fmt.Errorf("create DNS client: %w", err)
@@ -95,7 +109,12 @@ func newAnalyzerDetails(ctx context.Context, configuration config.Config, store 
 			if queryErr != nil {
 				continue
 			}
-			addresses = append(addresses, result.Addresses...)
+			for _, address := range result.Addresses {
+				if !policy.ReserveAddress(ctx) {
+					return nil, model.NewError(model.CodeBudgetExceeded, "resolved address budget exhausted", nil)
+				}
+				addresses = append(addresses, address)
+			}
 		}
 		if len(addresses) == 0 {
 			return nil, model.NewError(model.CodeCollectionFailed, "redirect hostname did not resolve", nil)
@@ -176,7 +195,7 @@ func newAnalyzerDetails(ctx context.Context, configuration config.Config, store 
 	}
 	return app.NewService(app.Dependencies{
 		DNS:           collectdns.New(dnsClient.Query, destinationPolicy),
-		HTTP:          collecthttp.New(dial, destinationPolicy, configuration.Limits.Target.HTTPDocumentBytes, collecthttp.WithRedirectResolver(resolver), collecthttp.WithRequestTimeout(configuration.Limits.Target.HTTPRequestTimeout)),
+		HTTP:          collecthttp.New(dial, destinationPolicy, configuration.Limits.Target.HTTPDocumentBytes, collecthttp.WithRedirectResolver(resolver), collecthttp.WithLimits(configuration.Limits.Target)),
 		Detectors:     []app.Detector{dnsrules.NewDefault()},
 		WebDetector:   webDetector,
 		Prefixes:      prefixReader,
@@ -186,6 +205,7 @@ func newAnalyzerDetails(ctx context.Context, configuration config.Config, store 
 		CT:            ctReader,
 		CTEnabled:     configuration.CT.Enabled,
 		CTMaximumSeed: configuration.CT.MaximumSeedNames,
-		TargetTimeout: configuration.Limits.Target.TargetDeadline,
+		Controller:    controller,
+		Limits:        configuration.Limits.Target,
 	}), bundleID, manifest, lookupAvailability{prefix: prefixReader != nil, asn: asnReader != nil, data: slices.Clone(capabilities[4:])}, nil
 }

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -42,6 +43,18 @@ func WithRequestTimeout(timeout time.Duration) Option {
 	return func(collector *Collector) { collector.requestTimeout = timeout }
 }
 
+// WithLimits applies the configured HTTP count, redirect, header, document,
+// and per-request limits. Cumulative request and body accounting comes from the
+// admitted execution context.
+func WithLimits(limits policy.Limits) Option {
+	return func(collector *Collector) {
+		collector.maxBody = limits.HTTPDocumentBytes
+		collector.maxHeaders = limits.HTTPResponseHeaders
+		collector.maxRedirects = limits.Redirects
+		collector.requestTimeout = limits.HTTPRequestTimeout
+	}
+}
+
 // Result contains response observations and the final passive detector input.
 type Result struct {
 	Observation  model.Observation
@@ -58,6 +71,7 @@ type Collector struct {
 	resolve        ResolveFunc
 	policy         policy.DestinationPolicy
 	maxBody        int64
+	maxHeaders     int64
 	maxRedirects   int
 	requestTimeout time.Duration
 	now            func() time.Time
@@ -65,7 +79,7 @@ type Collector struct {
 
 // New constructs a bounded collector without environment proxy behavior.
 func New(dial DialFunc, destinationPolicy policy.DestinationPolicy, maxBody int64, options ...Option) *Collector {
-	collector := &Collector{dial: dial, policy: destinationPolicy, maxBody: maxBody, maxRedirects: 5, requestTimeout: 10 * time.Second, now: time.Now}
+	collector := &Collector{dial: dial, policy: destinationPolicy, maxBody: maxBody, maxHeaders: 64 << 10, maxRedirects: 5, requestTimeout: 10 * time.Second, now: time.Now}
 	for _, option := range options {
 		option(collector)
 	}
@@ -114,11 +128,15 @@ func (c *Collector) CollectTargetOccurrence(ctx context.Context, rawURL string, 
 	var observations []model.Observation
 	var final Result
 	for hop := 0; ; hop++ {
-		if hop > c.maxRedirects {
+		release, acquireErr := policy.AcquireHTTP(ctx)
+		if acquireErr != nil {
 			coverage.Status = model.CoveragePartial
 			coverage.Omitted++
-			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeLimitExceeded)
-			return Result{Observations: observations, Coverage: coverage}, model.NewError(model.CodeLimitExceeded, "HTTP redirect limit exceeded", nil)
+			coverage.ErrorCodes = append(coverage.ErrorCodes, model.ErrorCodeOf(acquireErr))
+			if len(observations) > 0 {
+				return finish(final, observations, coverage), nil
+			}
+			return Result{Observations: observations, Coverage: coverage}, acquireErr
 		}
 		coverage.Attempted++
 		requestCtx := ctx
@@ -130,9 +148,10 @@ func (c *Collector) CollectTargetOccurrence(ctx context.Context, rawURL string, 
 		hopOccurrence.Hop = hop
 		hopResult, location, collectErr := c.collectHop(requestCtx, currentURL, currentAddress, originalHostname, hopOccurrence)
 		cancel()
+		release()
 		if collectErr != nil {
 			coverage.Status = model.CoveragePartial
-			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeCollectionFailed)
+			coverage.ErrorCodes = append(coverage.ErrorCodes, collectionErrorCode(collectErr))
 			return Result{Observations: observations, Coverage: coverage}, collectErr
 		}
 		coverage.Completed++
@@ -144,6 +163,12 @@ func (c *Collector) CollectTargetOccurrence(ctx context.Context, rawURL string, 
 		final = hopResult
 		if location == "" {
 			break
+		}
+		if hop >= c.maxRedirects {
+			coverage.Status = model.CoveragePartial
+			coverage.Omitted++
+			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeBudgetExceeded)
+			return finish(final, observations, coverage), nil
 		}
 		if c.resolve == nil {
 			coverage.Status = model.CoveragePartial
@@ -161,7 +186,11 @@ func (c *Collector) CollectTargetOccurrence(ctx context.Context, rawURL string, 
 		addresses, resolveErr := c.resolve(ctx, nextURL.Hostname())
 		if resolveErr != nil {
 			coverage.Status = model.CoveragePartial
-			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeTimeout)
+			code := model.ErrorCodeOf(resolveErr)
+			if code == "" {
+				code = model.CodeTimeout
+			}
+			coverage.ErrorCodes = append(coverage.ErrorCodes, code)
 			return finish(final, observations, coverage), nil
 		}
 		approved, blocked := c.firstApproved(addresses, portForURL(nextURL))
@@ -180,6 +209,22 @@ func (c *Collector) CollectTargetOccurrence(ctx context.Context, rawURL string, 
 	return finish(final, observations, coverage), nil
 }
 
+func collectionErrorCode(err error) model.ErrorCode {
+	if code := model.ErrorCodeOf(err); code != "" {
+		return code
+	}
+	if errors.Is(err, context.Canceled) {
+		return model.CodeCancelled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return model.CodeTimeout
+	}
+	if strings.Contains(err.Error(), "response headers exceeded") {
+		return model.CodeBudgetExceeded
+	}
+	return model.CodeCollectionFailed
+}
+
 func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address netip.Addr, originalHostname string, occurrence model.ObservationOccurrence) (Result, string, error) {
 	port := portForURL(targetURL)
 	if decision := c.policy.Check(address, port); !decision.Allowed {
@@ -189,7 +234,7 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 		Proxy:                  nil,
 		DisableKeepAlives:      true,
 		ForceAttemptHTTP2:      false,
-		MaxResponseHeaderBytes: 64 << 10,
+		MaxResponseHeaderBytes: c.maxHeaders,
 		DialContext: func(dialCtx context.Context, network, _ string) (net.Conn, error) {
 			return c.dial(dialCtx, network, address, port)
 		},
@@ -204,7 +249,10 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 	if err != nil {
 		return Result{}, "", fmt.Errorf("collect HTTP response: %w", err)
 	}
-	body, readErr := io.ReadAll(io.LimitReader(response.Body, c.maxBody+1))
+	allowance, commitBody := policy.ReserveHTTPBody(ctx, c.maxBody)
+	retained := int64(0)
+	defer func() { commitBody(retained) }()
+	body, readErr := io.ReadAll(io.LimitReader(response.Body, allowance+1))
 	closeErr := response.Body.Close()
 	if readErr != nil {
 		return Result{}, "", fmt.Errorf("read HTTP response: %w", readErr)
@@ -212,10 +260,11 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 	if closeErr != nil {
 		return Result{}, "", fmt.Errorf("close HTTP response: %w", closeErr)
 	}
-	truncated := int64(len(body)) > c.maxBody
+	truncated := int64(len(body)) > allowance
 	if truncated {
-		body = body[:c.maxBody]
+		body = body[:allowance]
 	}
+	retained = int64(len(body))
 	bodyDigest := sha256.Sum256(body)
 	payload := model.HTTPPayload{URL: redactQuery(targetURL), StatusCode: response.StatusCode, PeerAddress: address, Headers: selectedHeaders(response.Header), BodyHash: "sha256:" + hex.EncodeToString(bodyDigest[:]), BodyLength: int64(len(body)), BodyTruncated: truncated, ScriptURLs: scriptURLs(body, targetURL, 128)}
 	encoded, err := json.Marshal(payload)

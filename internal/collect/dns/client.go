@@ -12,23 +12,26 @@ import (
 	mdns "github.com/miekg/dns"
 
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/policy"
 )
 
 // ClientConfig configures one explicit recursive resolver.
 type ClientConfig struct {
-	Resolver string
-	Network  string
-	Timeout  time.Duration
-	Attempts int
+	Resolver        string
+	Network         string
+	Timeout         time.Duration
+	Attempts        int
+	CNAMEChainDepth int
 }
 
 // Client is a raw-record adapter around the pinned DNS library.
 type Client struct {
-	resolver string
-	network  string
-	timeout  time.Duration
-	attempts int
-	now      func() time.Time
+	resolver        string
+	network         string
+	timeout         time.Duration
+	attempts        int
+	cnameChainDepth int
+	now             func() time.Time
 }
 
 // NewClient validates an explicit resolver and bounded retry policy.
@@ -46,7 +49,11 @@ func NewClient(config ClientConfig) (*Client, error) {
 	if network != "udp" && network != "tcp" {
 		return nil, fmt.Errorf("DNS network must be udp or tcp")
 	}
-	return &Client{resolver: config.Resolver, network: network, timeout: config.Timeout, attempts: config.Attempts, now: time.Now}, nil
+	cnameChainDepth := config.CNAMEChainDepth
+	if cnameChainDepth <= 0 {
+		cnameChainDepth = 16
+	}
+	return &Client{resolver: config.Resolver, network: network, timeout: config.Timeout, attempts: config.Attempts, cnameChainDepth: cnameChainDepth, now: time.Now}, nil
 }
 
 // Query sends one raw question to the configured resolver only.
@@ -57,6 +64,9 @@ func (c *Client) Query(ctx context.Context, question model.DNSQuestion) (model.D
 	for attempt := 1; attempt <= c.attempts; attempt++ {
 		response, transport, err := c.exchange(ctx, message)
 		if err != nil {
+			if model.ErrorCodeOf(err) == model.CodeBudgetExceeded || model.ErrorCodeOf(err) == model.CodeCancelled {
+				return model.DNSResult{Question: question, Resolver: c.resolver}, err
+			}
 			lastErr = err
 			continue
 		}
@@ -70,11 +80,11 @@ func (c *Client) Query(ctx context.Context, question model.DNSQuestion) (model.D
 func (c *Client) exchange(ctx context.Context, message *mdns.Msg) (*mdns.Msg, string, error) {
 	if c.network == "tcp" {
 		tcp := &mdns.Client{Net: "tcp", Timeout: c.timeout}
-		response, _, err := tcp.ExchangeContext(ctx, message, c.resolver)
+		response, err := c.exchangeAttempt(ctx, tcp, message)
 		return response, "tcp", err
 	}
 	udp := &mdns.Client{Net: "udp", Timeout: c.timeout}
-	response, _, err := udp.ExchangeContext(ctx, message, c.resolver)
+	response, err := c.exchangeAttempt(ctx, udp, message)
 	if err != nil {
 		return nil, "udp", err
 	}
@@ -82,11 +92,21 @@ func (c *Client) exchange(ctx context.Context, message *mdns.Msg) (*mdns.Msg, st
 		return response, "udp", nil
 	}
 	tcp := &mdns.Client{Net: "tcp", Timeout: c.timeout}
-	response, _, err = tcp.ExchangeContext(ctx, message, c.resolver)
+	response, err = c.exchangeAttempt(ctx, tcp, message)
 	if err != nil {
 		return nil, "tcp", err
 	}
 	return response, "tcp", nil
+}
+
+func (c *Client) exchangeAttempt(ctx context.Context, client *mdns.Client, message *mdns.Msg) (*mdns.Msg, error) {
+	release, err := policy.AcquireDNS(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	response, _, err := client.ExchangeContext(ctx, message, c.resolver)
+	return response, err
 }
 
 func (c *Client) convert(question model.DNSQuestion, response *mdns.Msg, transport string) (model.DNSResult, error) {
@@ -96,7 +116,15 @@ func (c *Client) convert(question model.DNSQuestion, response *mdns.Msg, transpo
 		Transport:    transport,
 		Resolver:     c.resolver,
 	}
+	cnameCount := 0
 	for _, record := range response.Answer {
+		if record.Header().Rrtype == mdns.TypeCNAME {
+			if cnameCount >= c.cnameChainDepth {
+				result.Omitted++
+				continue
+			}
+			cnameCount++
+		}
 		payload, address, ok := dnsPayload(record)
 		if !ok {
 			continue

@@ -9,6 +9,7 @@ import (
 	stdhttp "net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -156,6 +157,155 @@ func TestCollectRequestTimeoutCancelsSlowHeaders(t *testing.T) {
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("Collect() elapsed = %s, want bounded request", elapsed)
+	}
+}
+
+func TestCollectUsesSharedRequestAndCumulativeBodyBudgets(t *testing.T) {
+	t.Parallel()
+
+	landing := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		_, _ = writer.Write([]byte("land"))
+	}))
+	t.Cleanup(landing.Close)
+	start := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.Header().Set("Location", "http://redirect.example/")
+		_, _ = writer.Write([]byte("root"))
+	}))
+	t.Cleanup(start.Close)
+
+	first := netip.MustParseAddr("93.184.216.34")
+	second := netip.MustParseAddr("1.1.1.1")
+	dialer := &mappedDialer{destinations: map[netip.Addr]string{
+		first: start.Listener.Addr().String(), second: landing.Listener.Addr().String(),
+	}}
+	limits := policy.DefaultLimits()
+	limits.HTTPRequests = 1
+	limits.HTTPDocumentBytes = 4
+	limits.HTTPTotalBodyBytes = 4
+	controller, err := policy.NewController(limits, 1, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, release, err := controller.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	collector := New(
+		dialer.DialContext,
+		policy.PublicDestinationPolicy(),
+		limits.HTTPDocumentBytes,
+		WithLimits(limits),
+		WithRedirectResolver(func(context.Context, string) ([]netip.Addr, error) {
+			return []netip.Addr{second}, nil
+		}),
+	)
+
+	result, err := collector.Collect(ctx, "http", "example.com", first)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if got := dialer.Addresses(); len(got) != 1 || got[0] != first {
+		t.Fatalf("dial addresses = %v, want only first request", got)
+	}
+	if len(result.Observations) != 1 || result.Coverage.Status != model.CoveragePartial || result.Coverage.Omitted != 1 {
+		t.Fatalf("Collect() result = %#v", result)
+	}
+	if !slices.Contains(result.Coverage.ErrorCodes, model.CodeBudgetExceeded) {
+		t.Fatalf("coverage error codes = %v", result.Coverage.ErrorCodes)
+	}
+}
+
+func TestCollectCumulativeBodyBudgetTruncatesLaterDocument(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		_, _ = writer.Write([]byte("four"))
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	limits := policy.DefaultLimits()
+	limits.HTTPDocumentBytes = 4
+	limits.HTTPTotalBodyBytes = 5
+	controller, err := policy.NewController(limits, 1, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, release, err := controller.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	collector := New(
+		(&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext,
+		policy.PublicDestinationPolicy(), limits.HTTPDocumentBytes, WithLimits(limits),
+	)
+	first, err := collector.Collect(ctx, "http", "one.example", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first.Body) != "four" {
+		t.Fatalf("first body = %q", first.Body)
+	}
+	second, err := collector.Collect(ctx, "http", "two.example", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(second.Body) != "f" || second.Coverage.Status != model.CoveragePartial || second.Coverage.Truncated != 1 {
+		t.Fatalf("second result = %#v", second)
+	}
+}
+
+func TestCollectRedirectLimitZeroDisablesTraversal(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.Header().Set("Location", "http://redirect.example/")
+		writer.WriteHeader(stdhttp.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	resolved := false
+	limits := policy.DefaultLimits()
+	limits.Redirects = 0
+	collector := New(
+		(&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext,
+		policy.PublicDestinationPolicy(), limits.HTTPDocumentBytes,
+		WithLimits(limits), WithRedirectResolver(func(context.Context, string) ([]netip.Addr, error) {
+			resolved = true
+			return nil, nil
+		}),
+	)
+	result, err := collector.Collect(t.Context(), "http", "example.com", address)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if resolved || len(result.Observations) != 1 || result.Coverage.Status != model.CoveragePartial || result.Coverage.Omitted != 1 {
+		t.Fatalf("Collect() result = %#v, resolved = %t", result, resolved)
+	}
+}
+
+func TestCollectEnforcesConfiguredResponseHeaderLimit(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.Header().Set("X-Fixture", strings.Repeat("x", 8<<10))
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	limits := policy.DefaultLimits()
+	limits.HTTPResponseHeaders = 128
+	collector := New(
+		(&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext,
+		policy.PublicDestinationPolicy(), limits.HTTPDocumentBytes, WithLimits(limits),
+	)
+	result, err := collector.Collect(t.Context(), "http", "example.com", address)
+	if err == nil {
+		t.Fatal("Collect() succeeded, want response header limit error")
+	}
+	if !slices.Contains(result.Coverage.ErrorCodes, model.CodeBudgetExceeded) {
+		t.Fatalf("coverage error codes = %v, error = %v", result.Coverage.ErrorCodes, err)
 	}
 }
 

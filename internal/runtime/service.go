@@ -22,6 +22,7 @@ import (
 	"cloudattrib/internal/datasets"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/policy"
 	"cloudattrib/internal/store/postgres"
 )
 
@@ -46,7 +47,16 @@ func Serve(ctx context.Context, configuration config.Config) error {
 		return err
 	}
 	defer store.Close()
-	analyzer, activeBundleID, manifest, lookup, err := newAnalyzerDetails(ctx, configuration, store)
+	controller, err := policy.NewController(
+		configuration.Limits.Target,
+		configuration.Limits.ConcurrentTargets,
+		configuration.Limits.ConcurrentDNS,
+		configuration.Limits.ConcurrentHTTP,
+	)
+	if err != nil {
+		return fmt.Errorf("create execution controller: %w", err)
+	}
+	analyzer, activeBundleID, manifest, lookup, err := newAnalyzerDetailsWithController(ctx, configuration, store, controller)
 	if err != nil {
 		return err
 	}
@@ -88,7 +98,8 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	}
 	analyzerFactory := &bundleAnalyzerFactory{
 		configuration: configuration, store: store, active: analyzer, activeBundleID: activeBundleID, activeLookup: lookup,
-		analyzers: map[string]app.Analyzer{activeBundleID: analyzer}, lookup: map[string]lookupAvailability{activeBundleID: lookup},
+		controller: controller,
+		analyzers:  map[string]app.Analyzer{activeBundleID: analyzer}, lookup: map[string]lookupAvailability{activeBundleID: lookup},
 	}
 	authentication, err := serviceAuthentication(configuration.API)
 	if err != nil {
@@ -133,9 +144,8 @@ func Serve(ctx context.Context, configuration config.Config) error {
 
 	server := &http.Server{
 		Handler: handler, ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:  configuration.Limits.Target.TargetDeadline + 5*time.Second,
-		WriteTimeout: configuration.Limits.Target.TargetDeadline + 5*time.Second,
-		IdleTimeout:  30 * time.Second,
+		ReadTimeout: configuration.Limits.Target.TargetDeadline + 5*time.Second,
+		IdleTimeout: 30 * time.Second,
 	}
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.Serve(listener) }()
@@ -191,6 +201,7 @@ type bundleAnalyzerFactory struct {
 	lookup         map[string]lookupAvailability
 	loads          map[string]*bundleLoad
 	load           func(context.Context, string) (app.Analyzer, lookupAvailability, error)
+	controller     *policy.Controller
 }
 
 type bundleLoad struct {
@@ -264,7 +275,15 @@ func (f *bundleAnalyzerFactory) loadBundle(ctx context.Context, bundleID string)
 		configuration.Data.SourceDirectory = filepath.Join(configuration.Data.BundleDirectory, "candidates", bundleID, "sources")
 		configuration.Data.BundleDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", bundleID)
 	}
-	analyzer, loadedBundleID, _, lookup, err := newAnalyzerDetails(ctx, configuration, f.store)
+	var analyzer app.Analyzer
+	var loadedBundleID string
+	var lookup lookupAvailability
+	var err error
+	if f.controller == nil {
+		analyzer, loadedBundleID, _, lookup, err = newAnalyzerDetails(ctx, configuration, f.store)
+	} else {
+		analyzer, loadedBundleID, _, lookup, err = newAnalyzerDetailsWithController(ctx, configuration, f.store, f.controller)
+	}
 	if err != nil || loadedBundleID != bundleID {
 		return nil, lookupAvailability{}, model.NewError(model.CodeBundleUnavailable, "bundle is unavailable to this detector build", err)
 	}

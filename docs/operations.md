@@ -196,7 +196,11 @@ If a process stops after desired-bundle publication but before reload, it loads 
 
 ## Resource tuning
 
-Start with the limits in [config/example.yaml](../config/example.yaml). `concurrent_targets` bounds workers. Per-target budgets bound DNS and HTTP work. `maximum_backlog_targets` bounds all nonterminal reservations, including retries.
+Start with the limits in [config/example.yaml](../config/example.yaml). The service applies one process-level permit pool to synchronous API requests and durable workers. Loaded bundle generations share the same pool.
+
+The `limits.target` settings apply to one admitted target execution. Duration values use Go duration syntax. HTTP body byte values count decoded bytes. `http_response_headers` caps the headers that the transport accepts. `target_deadline` starts after target admission, but a shorter caller deadline also applies during the wait. `redirects: 0` collects the first HTTP response and does not follow its redirect. The other target limits must be positive.
+
+The `concurrent_targets`, `concurrent_http`, and `concurrent_dns` settings apply to the service process. Per-target HTTP and DNS concurrency remains bounded at 4 and 8. `maximum_backlog_targets` is a separate database-wide bound for all nonterminal reservations, including retries.
 
 Monitor queue use, CT lag, database size, and free space in the bundle volume before increasing concurrency. Reports accumulate until deleted. The [measured full-source import](qualification.md#full-upstream-compatibility) used about 1.42 GB of memory; allow at least 2 GiB for that source mix and measure yours.
 

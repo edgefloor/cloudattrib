@@ -106,6 +106,11 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 			continue
 		}
 		collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, "answered", item.result, "", item.occurrence))
+		if item.result.Omitted > 0 {
+			collected.Coverage.Status = model.CoveragePartial
+			collected.Coverage.Omitted += item.result.Omitted
+			collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, model.CodeBudgetExceeded)
+		}
 		for recordIndex, observation := range item.result.Records {
 			if observation.ObservedAt.IsZero() {
 				observation.ObservedAt = c.now()
@@ -117,6 +122,12 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 		}
 		for addressIndex, address := range item.result.Addresses {
 			address = address.Unmap()
+			if !policy.ReserveAddress(ctx) {
+				collected.Coverage.Status = model.CoveragePartial
+				collected.Coverage.Omitted++
+				collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, model.CodeBudgetExceeded)
+				continue
+			}
 			collected.Addresses = append(collected.Addresses, address)
 			decision := c.policy.Check(address, port)
 			status := "answered"
@@ -178,6 +189,9 @@ func marshalPayload(value any) model.JSONValue {
 }
 
 func errorCode(err error) model.ErrorCode {
+	if code := model.ErrorCodeOf(err); code != "" {
+		return code
+	}
 	if errors.Is(err, context.Canceled) {
 		return model.CodeCancelled
 	}

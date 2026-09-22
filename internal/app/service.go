@@ -17,6 +17,7 @@ import (
 	collecthttp "cloudattrib/internal/collect/http"
 	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/policy"
 	"cloudattrib/internal/target"
 )
 
@@ -36,6 +37,8 @@ type Dependencies struct {
 	HTTPScheme    string
 	Now           func() time.Time
 	TargetTimeout time.Duration
+	Controller    *policy.Controller
+	Limits        policy.Limits
 }
 
 // Service coordinates one immutable view through collection and classification.
@@ -54,6 +57,8 @@ type Service struct {
 	httpScheme    string
 	now           func() time.Time
 	targetTimeout time.Duration
+	controller    *policy.Controller
+	limits        policy.Limits
 }
 
 // NewService constructs the analyzer without starting background work.
@@ -81,18 +86,14 @@ func NewService(dependencies Dependencies) *Service {
 		httpScheme:    scheme,
 		now:           now,
 		targetTimeout: dependencies.TargetTimeout,
+		controller:    dependencies.Controller,
+		limits:        dependencies.Limits,
 	}
 }
 
 // Analyze runs the early domain-to-report pipeline against one captured view.
 func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (model.Report, error) {
-	if s.targetTimeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, s.targetTimeout)
-		defer cancel()
-	}
-	startedAt := s.now()
-	normalized, err := target.Normalize(request)
+	normalized, err := target.NormalizeWithSeedLimit(request, max(policy.DefaultLimits().SeedHostnames, s.seedLimit()))
 	if err != nil {
 		return model.Report{}, fmt.Errorf("normalize target: %w", err)
 	}
@@ -101,6 +102,29 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	}
 	if s.dns == nil {
 		return model.Report{}, model.NewError(model.CodeCapabilityUnavailable, "DNS collector is unavailable", nil)
+	}
+	if s.controller != nil {
+		var release func()
+		ctx, release, err = s.controller.Begin(ctx)
+		if err != nil {
+			return model.Report{}, err
+		}
+		defer release()
+	} else if s.targetTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.targetTimeout)
+		defer cancel()
+	}
+	startedAt := s.now()
+	var seedCoverage *model.Coverage
+	if limit := s.seedLimit(); len(normalized.SeedHostnames) > limit {
+		omitted := len(normalized.SeedHostnames) - limit
+		normalized.SeedHostnames = boundedSeeds(normalized, limit)
+		seedCoverage = &model.Coverage{
+			Capability: "seed_hostnames", Status: model.CoveragePartial,
+			Attempted: len(normalized.SeedHostnames) + omitted, Completed: len(normalized.SeedHostnames), Omitted: omitted,
+			Reason: "configured seed hostname limit reached", ErrorCodes: []model.ErrorCode{model.CodeBudgetExceeded},
+		}
 	}
 	collectionRunID, err := model.NewCollectionRunID()
 	if err != nil {
@@ -202,7 +226,10 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	}
 
 	observations := slices.Clone(ctObservations)
-	coverage := make([]model.Coverage, 0, len(dnsRuns)+len(httpRuns)+1)
+	coverage := make([]model.Coverage, 0, len(dnsRuns)+len(httpRuns)+2)
+	if seedCoverage != nil {
+		coverage = append(coverage, *seedCoverage)
+	}
 	if ctCoverage != nil {
 		coverage = append(coverage, *ctCoverage)
 	}
@@ -320,7 +347,7 @@ func (s *Service) planCTDiscovery(ctx context.Context, request *model.Normalized
 	if limit <= 0 {
 		limit = 20
 	}
-	if remaining := 32 - len(request.SeedHostnames); limit > remaining {
+	if remaining := s.seedLimit() - len(request.SeedHostnames); limit > remaining {
 		limit = remaining
 	}
 	if limit <= 0 {
@@ -384,6 +411,35 @@ func (s *Service) planCTDiscovery(ctx context.Context, request *model.Normalized
 	return observations, coverage
 }
 
+func (s *Service) seedLimit() int {
+	if s.limits.SeedHostnames > 0 {
+		return s.limits.SeedHostnames
+	}
+	return policy.DefaultLimits().SeedHostnames
+}
+
+func boundedSeeds(request model.NormalizedRequest, limit int) []string {
+	primary := request.Target.Canonical
+	if request.Target.Kind == model.TargetURL {
+		if parsed, err := url.Parse(request.Target.Canonical); err == nil {
+			primary = parsed.Hostname()
+		}
+	}
+	result := make([]string, 0, limit)
+	if slices.Contains(request.SeedHostnames, primary) {
+		result = append(result, primary)
+	}
+	for _, seed := range request.SeedHostnames {
+		if len(result) >= limit {
+			break
+		}
+		if seed != primary {
+			result = append(result, seed)
+		}
+	}
+	return result
+}
+
 // LookupIP performs local prefix lookup without DNS, HTTP, or storage.
 func (s *Service) LookupIP(ctx context.Context, request model.IPLookupRequest) (model.IPLookupResult, error) {
 	if !request.Address.IsValid() {
@@ -391,6 +447,15 @@ func (s *Service) LookupIP(ctx context.Context, request model.IPLookupRequest) (
 	}
 	if s.prefixes == nil && s.asn == nil {
 		return model.IPLookupResult{}, model.NewError(model.CodeCapabilityUnavailable, "local IP lookup is unavailable", nil)
+	}
+	if s.controller != nil {
+		var release func()
+		var err error
+		ctx, release, err = s.controller.Begin(ctx)
+		if err != nil {
+			return model.IPLookupResult{}, err
+		}
+		defer release()
 	}
 	result := model.IPLookupResult{Address: request.Address.Unmap(), Status: model.StatusComplete}
 	result.Coverage = append(result.Coverage, s.sourceCoverage([]netip.Addr{result.Address})...)
@@ -402,6 +467,9 @@ func (s *Service) LookupIP(ctx context.Context, request model.IPLookupRequest) (
 		associations, coverage, err := s.prefixes.LookupPrefixes(ctx, request, s.view)
 		result.Coverage = append(result.Coverage, coverage)
 		if err == nil {
+			if len(associations) > s.prefixAssociationLimit() {
+				return model.IPLookupResult{}, model.NewError(model.CodeBudgetExceeded, "prefix association limit exceeded", nil)
+			}
 			usable++
 			result.Associations = associations
 		} else if model.ErrorCodeOf(err) != model.CodeCapabilityUnavailable && model.ErrorCodeOf(err) != model.CodeSourceUnavailable {
@@ -437,10 +505,26 @@ func (s *Service) LookupIP(ctx context.Context, request model.IPLookupRequest) (
 	return result, nil
 }
 
+func (s *Service) prefixAssociationLimit() int {
+	if s.limits.PrefixAssociations > 0 {
+		return s.limits.PrefixAssociations
+	}
+	return policy.DefaultLimits().PrefixAssociations
+}
+
 // Reclassify reinterprets immutable normalized observations without collecting.
 func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyRequest) (model.Report, error) {
 	if err := s.ValidateReclassify(ctx, request); err != nil {
 		return model.Report{}, err
+	}
+	if s.controller != nil {
+		var release func()
+		var err error
+		ctx, release, err = s.controller.Begin(ctx)
+		if err != nil {
+			return model.Report{}, err
+		}
+		defer release()
 	}
 	original, err := s.store.LoadReport(ctx, request.ReportID)
 	if err != nil {
@@ -675,6 +759,14 @@ func (s *Service) enrichAddresses(ctx context.Context, observations []model.Obse
 			if lookupErr != nil {
 				itemCoverage.Status = model.CoverageUnavailable
 				itemCoverage.ErrorCodes = append(itemCoverage.ErrorCodes, model.ErrorCodeOf(lookupErr))
+			}
+			if len(associations) > s.prefixAssociationLimit() {
+				omitted := len(associations) - s.prefixAssociationLimit()
+				associations = associations[:s.prefixAssociationLimit()]
+				itemCoverage.Status = model.CoveragePartial
+				itemCoverage.Omitted += omitted
+				itemCoverage.ErrorCodes = append(itemCoverage.ErrorCodes, model.CodeBudgetExceeded)
+				itemCoverage.Reason = "configured prefix association limit reached"
 			}
 			coverage = append(coverage, itemCoverage)
 			for _, association := range associations {

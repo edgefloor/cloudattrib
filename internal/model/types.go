@@ -157,6 +157,7 @@ type DNSResult struct {
 	Resolver     string        `json:"resolver"`
 	Records      []Observation `json:"records"`
 	Addresses    []netip.Addr  `json:"addresses"`
+	Omitted      int           `json:"omitted,omitempty"`
 }
 
 // DNSPayload is the application-owned DNS record and outcome payload.
