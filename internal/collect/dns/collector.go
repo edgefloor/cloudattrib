@@ -86,10 +86,7 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 			if result.Attempt > 0 {
 				queryOccurrence.Attempt = result.Attempt
 			}
-			select {
-			case results <- queryResult{result: result, occurrence: queryOccurrence, err: err}:
-			case <-ctx.Done():
-			}
+			results <- queryResult{result: result, occurrence: queryOccurrence, err: err}
 		})
 	}
 	go func() {

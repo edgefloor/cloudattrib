@@ -171,20 +171,18 @@ func AcquireHTTP(ctx context.Context, destination string) (func(), error) {
 	if !state.reserveCount(&state.httpLeft) {
 		return nil, budgetError("HTTP request budget exhausted")
 	}
-	release, err := state.acquireNetwork(ctx, state.http, state.controller.http)
+	release, err := state.controller.acquireDestination(ctx, destination, func() (func(), error) {
+		return state.acquireNetwork(ctx, state.http, state.controller.http)
+	})
 	if err != nil {
-		return nil, err
-	}
-	if err := state.controller.acquireDestination(ctx, destination); err != nil {
-		release()
 		return nil, model.NewError(model.CodeCancelled, "wait for destination rate admission", err)
 	}
 	return release, nil
 }
 
-func (c *Controller) acquireDestination(ctx context.Context, destination string) error {
+func (c *Controller) acquireDestination(ctx context.Context, destination string, acquireNetwork func() (func(), error)) (func(), error) {
 	if destination == "" {
-		return fmt.Errorf("HTTP destination key is required")
+		return nil, fmt.Errorf("HTTP destination key is required")
 	}
 	c.destinationMu.Lock()
 	now := time.Now()
@@ -207,7 +205,7 @@ func (c *Controller) acquireDestination(ctx context.Context, destination string)
 	}
 	if err := acquirePermit(ctx, gate.permit); err != nil {
 		releaseReference()
-		return err
+		return nil, err
 	}
 	defer releasePermit(gate.permit)
 	defer releaseReference()
@@ -221,16 +219,20 @@ func (c *Controller) acquireDestination(ctx context.Context, destination string)
 		select {
 		case <-timer.C:
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
+	}
+	release, err := acquireNetwork()
+	if err != nil {
+		return nil, err
 	}
 	c.destinationMu.Lock()
 	gate.lastStart = time.Now()
 	c.destinationMu.Unlock()
-	return nil
+	return release, nil
 }
 
 // ReserveAddress accounts for one resolved address retained for later work.

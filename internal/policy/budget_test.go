@@ -185,6 +185,50 @@ func TestCancelledDestinationWaiterDoesNotDelayNextRequest(t *testing.T) {
 	}
 }
 
+func TestDestinationPacingDoesNotHoldProcessPermit(t *testing.T) {
+	limits := DefaultLimits()
+	limits.HTTPDestinationInterval = 100 * time.Millisecond
+	controller, err := NewController(limits, 3, 3, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contexts := make([]context.Context, 3)
+	releaseTargets := make([]func(), 3)
+	for index := range contexts {
+		contexts[index], releaseTargets[index], err = controller.Begin(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer releaseTargets[index]()
+	}
+	first, err := AcquireHTTP(contexts[0], "93.184.216.34:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first()
+	secondDone := make(chan func(), 1)
+	go func() {
+		release, acquireErr := AcquireHTTP(contexts[1], "93.184.216.34:443")
+		if acquireErr == nil {
+			secondDone <- release
+		}
+	}()
+	time.Sleep(10 * time.Millisecond)
+	unrelatedCtx, cancel := context.WithTimeout(contexts[2], 30*time.Millisecond)
+	defer cancel()
+	unrelated, err := AcquireHTTP(unrelatedCtx, "1.1.1.1:443")
+	if err != nil {
+		t.Fatalf("unrelated destination admission error = %v", err)
+	}
+	unrelated()
+	select {
+	case release := <-secondDone:
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("paced request did not eventually acquire")
+	}
+}
+
 func TestControllerTargetDeadlineStartsAfterAdmission(t *testing.T) {
 	limits := DefaultLimits()
 	limits.TargetDeadline = 80 * time.Millisecond

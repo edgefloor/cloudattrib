@@ -160,10 +160,13 @@ func TestCollectReportsTerminalDeadlineAsTimeout(t *testing.T) {
 	ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
 	defer cancel()
 	collector := New(func(ctx context.Context, question model.DNSQuestion) (model.DNSResult, error) {
-		return model.DNSResult{Question: question}, ctx.Err()
+		return model.DNSResult{Question: question, Attempt: 1}, ctx.Err()
 	}, policy.PublicDestinationPolicy())
 
 	result := collector.Collect(ctx, "example.com", 443, nil)
+	if len(result.Observations) != len(questionTypes) || result.Coverage.Attempted != len(questionTypes) {
+		t.Fatalf("terminal DNS results = %d observations, %d attempts; want %d of each", len(result.Observations), result.Coverage.Attempted, len(questionTypes))
+	}
 	if !slices.Contains(result.Coverage.ErrorCodes, model.CodeTimeout) {
 		t.Fatalf("coverage error codes = %v, want timeout", result.Coverage.ErrorCodes)
 	}
