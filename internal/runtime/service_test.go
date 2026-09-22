@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
+	"runtime/debug"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +23,9 @@ import (
 	"cloudattrib/internal/app"
 	"cloudattrib/internal/config"
 	"cloudattrib/internal/datasets"
+	"cloudattrib/internal/enrich/asn"
+	"cloudattrib/internal/enrich/prefix"
+	"cloudattrib/internal/ingest/iptoasn"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/observability"
@@ -55,6 +61,88 @@ func TestBundleAnalyzerFactoryBoundsResidencyAndEvictsUnusedLRU(t *testing.T) {
 	if value.(*atomic.Int64).Load() != 2 {
 		t.Fatalf("bundle-a load count = %d, want 2", value.(*atomic.Int64).Load())
 	}
+}
+
+func TestBundleAnalyzerFactoryRepresentativeIndexesStabilizeAfterEviction(t *testing.T) {
+	const (
+		indexRecords        = 8192
+		warmupGenerations   = 4
+		measuredGenerations = 8
+		heapToleranceBytes  = 1 << 20
+	)
+
+	previousGCPercent := debug.SetGCPercent(50)
+	t.Cleanup(func() { debug.SetGCPercent(previousGCPercent) })
+
+	active, err := representativeRuntimeAnalyzer("active", indexRecords)
+	if err != nil {
+		t.Fatalf("build active representative analyzer: %v", err)
+	}
+	factory := newBundleAnalyzerFactory(2, active, "active", lookupAvailability{prefix: true, asn: true}, datasets.Activation{BundleID: "active"}, 0)
+	factory.load = func(_ context.Context, bundleID string) (app.Analyzer, lookupAvailability, int64, error) {
+		analyzer, err := representativeRuntimeAnalyzer(bundleID, indexRecords)
+		return analyzer, lookupAvailability{prefix: true, asn: true}, 0, err
+	}
+
+	measurements := make([]uint64, 0, measuredGenerations)
+	for generation := range warmupGenerations + measuredGenerations {
+		bundleID := fmt.Sprintf("generation-%02d", generation)
+		captured, err := factory.capture(t.Context(), bundleID)
+		if err != nil {
+			t.Fatalf("CaptureAnalyzer(%q) error = %v", bundleID, err)
+		}
+		factory.mu.Lock()
+		factory.active = captured.analyzer
+		factory.activeBundleID = bundleID
+		factory.activeLookup = captured.lookup
+		factory.loaded = datasets.Activation{BundleID: bundleID, Generation: int64(generation + 1), OperationID: fmt.Sprintf("operation-%02d", generation)}
+		factory.notifyLocked()
+		factory.mu.Unlock()
+		captured.Release()
+		debug.FreeOSMemory()
+		if generation >= warmupGenerations {
+			var memory goruntime.MemStats
+			goruntime.ReadMemStats(&memory)
+			measurements = append(measurements, memory.HeapAlloc)
+		}
+	}
+
+	resident, _ := factory.residencySnapshot()
+	if resident != 2 {
+		t.Fatalf("resident generations = %d, want 2", resident)
+	}
+	minimum := slices.Min(measurements)
+	maximum := slices.Max(measurements)
+	tolerance := minimum/10 + heapToleranceBytes
+	t.Logf("representative index records per generation=%d heap_alloc_min=%d heap_alloc_max=%d tolerance=%d", indexRecords, minimum, maximum, tolerance)
+	if maximum-minimum > tolerance {
+		t.Fatalf("heap did not stabilize after warm-up: min=%d max=%d allowed_growth=%d", minimum, maximum, tolerance)
+	}
+}
+
+func representativeRuntimeAnalyzer(bundleID string, records int) (app.Analyzer, error) {
+	associations := make([]model.Association, records)
+	intervals := make([]iptoasn.Interval, records)
+	for index := range records {
+		address := netip.AddrFrom4([4]byte{10, byte(index >> 8), byte(index), 0})
+		end := netip.AddrFrom4([4]byte{10, byte(index >> 8), byte(index), 255})
+		associations[index] = model.Association{
+			ID: fmt.Sprintf("%s-prefix-%05d", bundleID, index), Prefix: netip.PrefixFrom(address, 24),
+			ProviderID: "fixture", Lifecycle: "active", SourceID: "fixture",
+		}
+		intervals[index] = iptoasn.Interval{
+			Start: address, End: end, ASN: uint32(64512 + index),
+			Description: fmt.Sprintf("%s-asn-%05d", bundleID, index), SourceID: "fixture",
+		}
+	}
+	asnIndex, err := asn.New(intervals)
+	if err != nil {
+		return nil, fmt.Errorf("build representative ASN index: %w", err)
+	}
+	return app.NewService(app.Dependencies{
+		Prefixes: prefix.New(associations), ASN: asnIndex,
+		View: model.NewAttributionView(bundleID, "qualification", nil, nil),
+	}), nil
 }
 
 func TestBundleAnalyzerFactoryProtectsCapturedGenerationAndCancelsCapacityWait(t *testing.T) {

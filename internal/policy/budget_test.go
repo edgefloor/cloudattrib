@@ -3,6 +3,7 @@ package policy
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 
@@ -34,10 +35,12 @@ func TestControllerCancelledTargetWaiterNeverAcquires(t *testing.T) {
 		}
 		waitResult <- beginErr
 	}()
+	waitForTargetAdmission(t, controller, 1, 1)
 	cancelWait()
 	if err := <-waitResult; !errors.Is(err, context.Canceled) || model.ErrorCodeOf(err) != model.CodeCancelled {
 		t.Fatalf("cancelled Begin() error = %v", err)
 	}
+	waitForTargetAdmission(t, controller, 1, 0)
 
 	releaseFirst()
 	thirdCtx, releaseThird, err := controller.Begin(t.Context())
@@ -48,6 +51,21 @@ func TestControllerCancelledTargetWaiterNeverAcquires(t *testing.T) {
 		t.Fatalf("third execution context error = %v", err)
 	}
 	releaseThird()
+}
+
+func waitForTargetAdmission(t *testing.T, controller *Controller, active, waiting int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		snapshot := controller.TargetAdmission()
+		if snapshot.Active == active && snapshot.Waiting == waiting && snapshot.Capacity == 1 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("TargetAdmission() = %#v, want active=%d waiting=%d capacity=1", snapshot, active, waiting)
+		}
+		runtime.Gosched()
+	}
 }
 
 func TestAcquirePermitRejectsAlreadyCancelledContext(t *testing.T) {

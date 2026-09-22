@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cloudattrib/internal/model"
@@ -78,6 +79,14 @@ type Controller struct {
 	http          chan struct{}
 	destinationMu sync.Mutex
 	destinations  map[string]*destinationGate
+	targetWaiters atomic.Int64
+}
+
+// TargetAdmissionSnapshot reports current process-level target permit use.
+type TargetAdmissionSnapshot struct {
+	Active   int
+	Waiting  int
+	Capacity int
 }
 
 type destinationGate struct {
@@ -124,7 +133,10 @@ func (c *Controller) Begin(ctx context.Context) (context.Context, func(), error)
 	if c == nil {
 		return ctx, func() {}, nil
 	}
-	if err := acquirePermit(ctx, c.targets); err != nil {
+	c.targetWaiters.Add(1)
+	err := acquirePermit(ctx, c.targets)
+	c.targetWaiters.Add(-1)
+	if err != nil {
 		return nil, nil, model.NewError(model.CodeCancelled, "wait for target admission", err)
 	}
 	executionCtx, cancel := context.WithTimeout(ctx, c.limits.TargetDeadline)
@@ -146,6 +158,14 @@ func (c *Controller) Begin(ctx context.Context) (context.Context, func(), error)
 		})
 	}
 	return executionCtx, release, nil
+}
+
+// TargetAdmission returns a race-safe snapshot for operational diagnostics.
+func (c *Controller) TargetAdmission() TargetAdmissionSnapshot {
+	if c == nil {
+		return TargetAdmissionSnapshot{}
+	}
+	return TargetAdmissionSnapshot{Active: len(c.targets), Waiting: int(c.targetWaiters.Load()), Capacity: cap(c.targets)}
 }
 
 // AcquireDNS accounts for one actual DNS network attempt and waits for both

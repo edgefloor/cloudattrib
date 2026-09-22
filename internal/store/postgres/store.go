@@ -52,6 +52,10 @@ func Open(ctx context.Context, connectionString string, maximumTargets int) (*St
 	if err != nil {
 		return nil, model.NewError(model.CodePersistenceUnavailable, "parse PostgreSQL configuration", err)
 	}
+	return openWithConfig(ctx, configuration, maximumTargets)
+}
+
+func openWithConfig(ctx context.Context, configuration *pgxpool.Config, maximumTargets int) (*Store, error) {
 	pool, err := pgxpool.NewWithConfig(ctx, configuration)
 	if err != nil {
 		return nil, model.NewError(model.CodePersistenceUnavailable, "open PostgreSQL pool", err)

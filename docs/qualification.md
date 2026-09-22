@@ -125,6 +125,14 @@ Commit `2e52440` addressed the acceptance findings. Commit `8c17d98` added the r
 | 6. Bundle acquisition cancellation | `TestRunnerRenewsLeaseAndCancelsDuringBundleAcquisition` covers lease renewal before acquisition. `TestBundleAnalyzerFactoryLoadsDifferentBundlesConcurrently` covers per-bundle load isolation. `TestBundleAnalyzerFactoryReloadLoopCancelsBlockedLoad` covers cancellation through the production reload loop. |
 | 7. Shutdown ownership | `TestSupervisorJoinsWorkerTerminalCommitOnShutdown` proves that the supervisor waits for a bounded terminal commit. `TestBundleAnalyzerFactoryReloadLoopCancelsBlockedLoad` proves that the reloader stops on cancellation. The service waits for both goroutines before `Store.Close`. |
 
+The 2026-09-22 follow-up closed three missing acceptance combinations:
+
+| Issue | Maintained evidence |
+| --- | --- |
+| Shared target admission | `TestPostgresAPIAndWorkerShareTargetAdmissionAcrossBundles` holds the only target permit in a real API analysis, then proves that a second API request and PostgreSQL-backed durable worker cannot start collection. It runs in both active and pinned bundle directions. |
+| Bundle residency | `TestBundleAnalyzerFactoryRepresentativeIndexesStabilizeAfterEviction` publishes active generation changes backed by 8,192-prefix and 8,192-ASN indexes through four warm-up and eight measured eviction cycles. After forced collection, the permitted live-heap spread is 10% of the measured minimum plus 1 MiB. The local run ranged from 11,631,808 to 11,635,392 bytes, far below its 2,211,756-byte tolerance. This is a live-heap test, not an RSS limit. |
+| Job polling | `TestPostgresAPIJobPollingIsConstantAndSkipsReportDocuments` polls a completed 1,000-target job through the API against PostgreSQL. Query tracing records exactly two projection queries and no report-document query. A 256 KiB stored report changed the local polling measurement from 4,529,794 bytes and 20,096 allocations per operation to 4,539,516 bytes and 20,097 allocations per operation. The result endpoint still retrieves the stored document separately. |
+
 These combinations were not tested together through the full production path:
 
 - No single test restarts the complete service with a queued `builtin-rules-v1` PostgreSQL job and then runs that job through the production worker. The factory, runner, and durable pin behavior are tested separately.

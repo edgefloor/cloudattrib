@@ -7,78 +7,459 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	goruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
+	"cloudattrib/internal/api"
 	"cloudattrib/internal/app"
+	collectdns "cloudattrib/internal/collect/dns"
 	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/datasets"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/policy"
 )
 
-func TestPostgresJobProjectionKeepsReportDocumentsOutOfPolling(t *testing.T) {
+func TestPostgresAPIJobPollingIsConstantAndSkipsReportDocuments(t *testing.T) {
 	dsn := os.Getenv("CLOUDATTRIB_POSTGRES_TEST_DSN")
 	if dsn == "" {
 		t.Skip("CLOUDATTRIB_POSTGRES_TEST_DSN is not set")
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
-	store, err := Open(ctx, dsn, 1000)
+	configuration, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+		t.Fatalf("parse PostgreSQL configuration: %v", err)
+	}
+	tracer := &queryRecorder{}
+	configuration.ConnConfig.Tracer = tracer
+	store, err := openWithConfig(ctx, configuration, 2000)
+	if err != nil {
+		t.Fatalf("openWithConfig() error = %v", err)
 	}
 	t.Cleanup(store.Close)
-	if _, err := store.pool.Exec(ctx, `TRUNCATE ct_records,ct_checkpoints,finding_evidence,findings,evidence,observations,job_targets,reports,bundle_pins,jobs,dataset_bundles RESTART IDENTITY CASCADE; UPDATE queue_capacity SET reserved_targets=0,maximum_targets=1000 WHERE singleton=true`); err != nil {
+	if _, err := store.pool.Exec(ctx, `TRUNCATE ct_records,ct_checkpoints,finding_evidence,findings,evidence,observations,job_targets,reports,bundle_pins,jobs,dataset_bundles RESTART IDENTITY CASCADE; UPDATE queue_capacity SET reserved_targets=0,maximum_targets=2000 WHERE singleton=true`); err != nil {
 		t.Fatalf("reset database: %v", err)
 	}
-	report := model.Report{
+	smallReport := model.Report{
 		SchemaVersion: model.SchemaVersion,
-		ID:            "projection-report",
+		ID:            "projection-small",
 		Target:        model.Target{Original: "example.com", Canonical: "example.com", Kind: model.TargetDomain},
 		Status:        model.StatusComplete,
 		ClassifiedAt:  time.Unix(1, 0).UTC(),
 	}
-	if err := store.SaveReport(ctx, report); err != nil {
-		t.Fatalf("SaveReport() error = %v", err)
-	}
-	if _, err := store.pool.Exec(ctx, `INSERT INTO jobs(id,operator_id,idempotency_key,payload_hash,status,created_at,updated_at) VALUES('projection-job','operator','projection-key','hash','completed',clock_timestamp(),clock_timestamp())`); err != nil {
-		t.Fatalf("insert job: %v", err)
-	}
-	batch := &pgx.Batch{}
-	for index := range 1000 {
-		request, marshalErr := json.Marshal(workRequest{Analyze: &model.AnalyzeRequest{Target: fmt.Sprintf("target-%04d.example.com", index), Kind: model.TargetDomain}})
-		if marshalErr != nil {
-			t.Fatalf("encode request: %v", marshalErr)
+	largeReport := smallReport
+	largeReport.ID = "projection-large"
+	largeReport.Observations = []model.Observation{{
+		ID: "large-observation", Type: "fixture", Subject: "example.com", Status: "answered",
+		Payload: model.JSONValue(`{"blob":"` + strings.Repeat("x", 256<<10) + `"}`),
+	}}
+	for _, report := range []model.Report{smallReport, largeReport} {
+		if err := store.SaveReport(ctx, report); err != nil {
+			t.Fatalf("SaveReport(%q) error = %v", report.ID, err)
 		}
-		batch.Queue(`INSERT INTO job_targets(id,job_id,input_index,request,status,attempts,report_id) VALUES($1,'projection-job',$2,$3,'completed',1,'projection-report')`, fmt.Sprintf("projection-target-%04d", index), index, request)
 	}
-	results := store.pool.SendBatch(ctx, batch)
-	if err := results.Close(); err != nil {
-		t.Fatalf("insert targets: %v", err)
-	}
-	loaded, err := store.Job(ctx, "projection-job")
+	insertCompletedProjectionJob(t, ctx, store, "projection-small", smallReport.ID)
+	insertCompletedProjectionJob(t, ctx, store, "projection-large", largeReport.ID)
+
+	handler, err := api.NewHandler(api.Config{Jobs: store, Results: store})
 	if err != nil {
-		t.Fatalf("Job() error = %v", err)
+		t.Fatalf("NewHandler() error = %v", err)
 	}
-	if len(loaded.Targets) != 1000 {
-		t.Fatalf("target count = %d", len(loaded.Targets))
+	tracer.Start()
+	body, err := pollJob(ctx, handler, "projection-large")
+	statements := tracer.Stop()
+	if err != nil {
+		t.Fatalf("poll completed job: %v", err)
 	}
-	for index, target := range loaded.Targets {
-		if target.Index != index || target.ReportID != report.ID || target.Report.ID != "" || !target.ReportAvailable || target.Attempts != 1 {
+	if len(statements) != 2 {
+		t.Fatalf("poll query count = %d, want 2: %#v", len(statements), statements)
+	}
+	for _, statement := range statements {
+		lower := strings.ToLower(statement)
+		if strings.Contains(lower, " from reports") || strings.Contains(lower, " join reports") || strings.Contains(lower, " document") {
+			t.Fatalf("poll loaded a report document: %s", statement)
+		}
+	}
+	if !strings.Contains(strings.ToLower(statements[0]), " from jobs") || !strings.Contains(strings.ToLower(statements[1]), " from job_targets") {
+		t.Fatalf("poll statements = %#v, want one job and one target projection query", statements)
+	}
+	var response struct {
+		Status  jobs.JobStatus            `json:"status"`
+		Counts  map[jobs.TargetStatus]int `json:"counts"`
+		Targets []struct {
+			InputIndex int               `json:"input_index"`
+			Status     jobs.TargetStatus `json:"status"`
+			Attempts   int               `json:"attempts"`
+			ResultURL  string            `json:"result_url"`
+		} `json:"targets"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil {
+		t.Fatalf("decode poll response: %v", err)
+	}
+	if response.Status != jobs.JobCompleted || response.Counts[jobs.TargetCompleted] != 1000 || len(response.Targets) != 1000 {
+		t.Fatalf("poll response status=%q counts=%#v targets=%d", response.Status, response.Counts, len(response.Targets))
+	}
+	for index, target := range response.Targets {
+		if target.InputIndex != index || target.Status != jobs.TargetCompleted || target.Attempts != 1 || target.ResultURL != "/v1/results/"+largeReport.ID {
 			t.Fatalf("target[%d] = %#v", index, target)
 		}
 	}
-	loadedReport, err := store.LoadReport(ctx, report.ID)
-	if err != nil || loadedReport.ID != report.ID {
-		t.Fatalf("LoadReport() = %#v, %v", loadedReport, err)
+
+	if _, err := pollJob(ctx, handler, "projection-small"); err != nil {
+		t.Fatalf("warm small projection: %v", err)
 	}
+	if _, err := pollJob(ctx, handler, "projection-large"); err != nil {
+		t.Fatalf("warm large projection: %v", err)
+	}
+	benchmarkCtx, cancelBenchmark := context.WithTimeout(ctx, 20*time.Second)
+	defer cancelBenchmark()
+	smallAllocations, err := benchmarkJobPoll(benchmarkCtx, handler, "projection-small")
+	if err != nil {
+		t.Fatalf("benchmark small projection: %v", err)
+	}
+	largeAllocations, err := benchmarkJobPoll(benchmarkCtx, handler, "projection-large")
+	if err != nil {
+		t.Fatalf("benchmark large projection: %v", err)
+	}
+	t.Logf("job poll small=%d B/op %d allocs/op large=%d B/op %d allocs/op", smallAllocations.AllocedBytesPerOp(), smallAllocations.AllocsPerOp(), largeAllocations.AllocedBytesPerOp(), largeAllocations.AllocsPerOp())
+	if largeAllocations.AllocedBytesPerOp() > smallAllocations.AllocedBytesPerOp()+(64<<10) || largeAllocations.AllocsPerOp() > smallAllocations.AllocsPerOp()+100 {
+		t.Fatalf("poll allocations grew with report document size: small=%d B/op %d allocs/op large=%d B/op %d allocs/op", smallAllocations.AllocedBytesPerOp(), smallAllocations.AllocsPerOp(), largeAllocations.AllocedBytesPerOp(), largeAllocations.AllocsPerOp())
+	}
+
+	result := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/results/"+largeReport.ID, nil)
+	request.RemoteAddr = "127.0.0.1:1000"
+	handler.ServeHTTP(result, request)
+	if result.Code != http.StatusOK || !strings.Contains(result.Body.String(), "large-observation") {
+		t.Fatalf("separate result retrieval = %d, body length %d", result.Code, result.Body.Len())
+	}
+}
+
+func TestPostgresAPIAndWorkerShareTargetAdmissionAcrossBundles(t *testing.T) {
+	for _, scenario := range []struct {
+		name, activeBundle, workerBundle string
+	}{
+		{name: "active a worker b", activeBundle: "bundle-a", workerBundle: "bundle-b"},
+		{name: "active b worker a", activeBundle: "bundle-b", workerBundle: "bundle-a"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			store, ctx := openPostgresTest(t, 4)
+			for _, bundleID := range []string{"bundle-a", "bundle-b"} {
+				if err := store.RegisterBundle(ctx, bundleID, []byte(`{"schema_version":1}`), true); err != nil {
+					t.Fatalf("RegisterBundle(%q) error = %v", bundleID, err)
+				}
+			}
+			limits := policy.DefaultLimits()
+			controller, err := policy.NewController(limits, 1, 8, 4)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			firstStarted := make(chan struct{})
+			releaseFirst := make(chan struct{})
+			var releaseFirstOnce sync.Once
+			release := func() { releaseFirstOnce.Do(func() { close(releaseFirst) }) }
+			var activeQueries atomic.Int64
+			activeCollector := collectdns.New(func(ctx context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+				if activeQueries.Add(1) == 6 {
+					close(firstStarted)
+				}
+				select {
+				case <-ctx.Done():
+					return model.DNSResult{Question: question}, ctx.Err()
+				case <-releaseFirst:
+					return model.DNSResult{Question: question}, nil
+				}
+			}, policy.PublicDestinationPolicy())
+			var workerQueries atomic.Int64
+			workerCollector := collectdns.New(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+				workerQueries.Add(1)
+				return model.DNSResult{Question: question}, nil
+			}, policy.PublicDestinationPolicy())
+			activeAnalyzer := app.NewService(app.Dependencies{
+				DNS: activeCollector, Controller: controller, Limits: limits,
+				View: model.NewAttributionView(scenario.activeBundle, "acceptance", nil, nil),
+			})
+			workerAnalyzer := app.NewService(app.Dependencies{
+				DNS: workerCollector, Controller: controller, Limits: limits,
+				View: model.NewAttributionView(scenario.workerBundle, "acceptance", nil, nil),
+			})
+			factory := &admissionAcceptanceFactory{
+				activeBundle: scenario.activeBundle,
+				bundles: map[string]app.Analyzer{
+					scenario.activeBundle: activeAnalyzer,
+					scenario.workerBundle: workerAnalyzer,
+				},
+				apiEntered:    make(chan string, 2),
+				workerEntered: make(chan string, 1),
+			}
+			handler, err := api.NewHandler(api.Config{Analyzer: factory, Jobs: store, Results: store})
+			if err != nil {
+				t.Fatalf("NewHandler() error = %v", err)
+			}
+			server := httptest.NewServer(handler)
+			t.Cleanup(func() {
+				release()
+				server.Close()
+			})
+
+			firstDone := make(chan apiResponse, 1)
+			go func() {
+				firstDone <- postAPIJSON(ctx, server.Client(), server.URL+"/v1/analyze", `{"target":"first.example.com","kind":"domain","mode":"dns","include_www":false}`)
+			}()
+			if captured := awaitValue(t, factory.apiEntered, "first API analysis entry"); captured != scenario.activeBundle {
+				t.Fatalf("first API captured bundle %q, want %q", captured, scenario.activeBundle)
+			}
+			awaitValue(t, firstStarted, "first API DNS collection")
+
+			jobResponse := postAPIJSON(ctx, server.Client(), server.URL+"/v1/jobs", fmt.Sprintf(`{"idempotency_key":"%s-job","bundle_id":"%s","targets":[{"target":"worker.example.com","kind":"domain","mode":"dns","include_www":false}]}`, scenario.activeBundle, scenario.workerBundle))
+			if jobResponse.err != nil || jobResponse.status != http.StatusAccepted {
+				t.Fatalf("submit job = %d %s, %v", jobResponse.status, jobResponse.body, jobResponse.err)
+			}
+			var submitted struct {
+				ID string `json:"id"`
+			}
+			if err := json.Unmarshal(jobResponse.body, &submitted); err != nil || submitted.ID == "" {
+				t.Fatalf("decode submitted job: %v, body=%s", err, jobResponse.body)
+			}
+
+			runnerDone := make(chan error, 1)
+			runner := jobs.Runner{Store: store, Factory: factory, WorkerID: "acceptance-worker", Lease: time.Second}
+			go func() { runnerDone <- runner.RunOnce(ctx) }()
+			if captured := awaitValue(t, factory.workerEntered, "durable worker analysis entry"); captured != scenario.workerBundle {
+				t.Fatalf("worker captured bundle %q, want %q", captured, scenario.workerBundle)
+			}
+
+			secondDone := make(chan apiResponse, 1)
+			go func() {
+				secondDone <- postAPIJSON(ctx, server.Client(), server.URL+"/v1/analyze", `{"target":"second.example.com","kind":"domain","mode":"dns","include_www":false}`)
+			}()
+			if captured := awaitValue(t, factory.apiEntered, "second API analysis entry"); captured != scenario.activeBundle {
+				t.Fatalf("second API captured bundle %q, want %q", captured, scenario.activeBundle)
+			}
+			awaitTargetAdmission(t, controller, 1, 2)
+			if got := activeQueries.Load(); got != 6 {
+				t.Fatalf("active analyzer DNS queries before release = %d, want 6", got)
+			}
+			if got := workerQueries.Load(); got != 0 {
+				t.Fatalf("worker analyzer DNS queries before release = %d, want 0", got)
+			}
+
+			release()
+			for index, result := range []apiResponse{awaitValue(t, firstDone, "first API response"), awaitValue(t, secondDone, "second API response")} {
+				if result.err != nil || result.status != http.StatusOK {
+					t.Fatalf("API response %d = %d %s, %v", index, result.status, result.body, result.err)
+				}
+			}
+			if err := awaitValue(t, runnerDone, "durable worker completion"); err != nil {
+				t.Fatalf("RunOnce() error = %v", err)
+			}
+			if got := activeQueries.Load(); got != 12 {
+				t.Fatalf("active analyzer DNS queries after release = %d, want 12", got)
+			}
+			if got := workerQueries.Load(); got != 6 {
+				t.Fatalf("worker analyzer DNS queries after release = %d, want 6", got)
+			}
+			job, err := store.Job(ctx, submitted.ID)
+			if err != nil || job.Status != jobs.JobCompleted || len(job.Targets) != 1 || job.Targets[0].Status != jobs.TargetCompleted {
+				t.Fatalf("completed durable job = %#v, %v", job, err)
+			}
+		})
+	}
+}
+
+type admissionAcceptanceFactory struct {
+	activeBundle  string
+	bundles       map[string]app.Analyzer
+	apiEntered    chan string
+	workerEntered chan string
+}
+
+func (f *admissionAcceptanceFactory) Analyze(ctx context.Context, request model.AnalyzeRequest) (model.Report, error) {
+	captured, err := f.capture(f.activeBundle, f.apiEntered)
+	if err != nil {
+		return model.Report{}, err
+	}
+	defer captured.Release()
+	return captured.Analyzer().Analyze(ctx, request)
+}
+
+func (f *admissionAcceptanceFactory) LookupIP(ctx context.Context, request model.IPLookupRequest) (model.IPLookupResult, error) {
+	return f.bundles[f.activeBundle].LookupIP(ctx, request)
+}
+
+func (f *admissionAcceptanceFactory) Reclassify(ctx context.Context, request model.ReclassifyRequest) (model.Report, error) {
+	return f.bundles[f.activeBundle].Reclassify(ctx, request)
+}
+
+func (f *admissionAcceptanceFactory) CaptureAnalyzer(_ context.Context, bundleID string) (jobs.CapturedAnalyzer, error) {
+	return f.capture(bundleID, f.workerEntered)
+}
+
+func (f *admissionAcceptanceFactory) capture(bundleID string, entered chan<- string) (jobs.CapturedAnalyzer, error) {
+	analyzer := f.bundles[bundleID]
+	if analyzer == nil {
+		return nil, fmt.Errorf("bundle %q is unavailable", bundleID)
+	}
+	return admissionCapturedAnalyzer{
+		analyzer: admissionEnteredAnalyzer{Analyzer: analyzer, bundleID: bundleID, entered: entered},
+	}, nil
+}
+
+type admissionEnteredAnalyzer struct {
+	app.Analyzer
+	bundleID string
+	entered  chan<- string
+}
+
+func (a admissionEnteredAnalyzer) Analyze(ctx context.Context, request model.AnalyzeRequest) (model.Report, error) {
+	a.entered <- a.bundleID
+	return a.Analyzer.Analyze(ctx, request)
+}
+
+type admissionCapturedAnalyzer struct {
+	analyzer app.Analyzer
+}
+
+func (a admissionCapturedAnalyzer) Analyzer() app.Analyzer { return a.analyzer }
+func (admissionCapturedAnalyzer) Release()                 {}
+
+type apiResponse struct {
+	status int
+	body   []byte
+	err    error
+}
+
+func postAPIJSON(ctx context.Context, client *http.Client, url, body string) apiResponse {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(body))
+	if err != nil {
+		return apiResponse{err: err}
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := client.Do(request)
+	if err != nil {
+		return apiResponse{err: err}
+	}
+	encoded, readErr := io.ReadAll(response.Body)
+	if closeErr := response.Body.Close(); readErr == nil {
+		readErr = closeErr
+	}
+	return apiResponse{status: response.StatusCode, body: encoded, err: readErr}
+}
+
+func awaitTargetAdmission(t *testing.T, controller *policy.Controller, active, waiting int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		snapshot := controller.TargetAdmission()
+		if snapshot.Active == active && snapshot.Waiting == waiting {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("target admission = %#v, want active=%d waiting=%d", snapshot, active, waiting)
+		}
+		goruntime.Gosched()
+	}
+}
+
+func awaitValue[T any](t *testing.T, channel <-chan T, description string) T {
+	t.Helper()
+	select {
+	case value := <-channel:
+		return value
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+		var zero T
+		return zero
+	}
+}
+
+type queryRecorder struct {
+	mu         sync.Mutex
+	recording  bool
+	statements []string
+}
+
+func (r *queryRecorder) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	r.mu.Lock()
+	if r.recording {
+		r.statements = append(r.statements, data.SQL)
+	}
+	r.mu.Unlock()
+	return ctx
+}
+
+func (*queryRecorder) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func (r *queryRecorder) Start() {
+	r.mu.Lock()
+	r.recording = true
+	r.statements = nil
+	r.mu.Unlock()
+}
+
+func (r *queryRecorder) Stop() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.recording = false
+	return append([]string(nil), r.statements...)
+}
+
+func insertCompletedProjectionJob(t *testing.T, ctx context.Context, store *Store, jobID, reportID string) {
+	t.Helper()
+	if _, err := store.pool.Exec(ctx, `INSERT INTO jobs(id,operator_id,idempotency_key,payload_hash,status,created_at,updated_at) VALUES($1,'operator',$1,'hash','completed',clock_timestamp(),clock_timestamp())`, jobID); err != nil {
+		t.Fatalf("insert job %q: %v", jobID, err)
+	}
+	batch := &pgx.Batch{}
+	for index := range 1000 {
+		request, err := json.Marshal(workRequest{Analyze: &model.AnalyzeRequest{Target: fmt.Sprintf("target-%04d.example.com", index), Kind: model.TargetDomain}})
+		if err != nil {
+			t.Fatalf("encode request: %v", err)
+		}
+		batch.Queue(`INSERT INTO job_targets(id,job_id,input_index,request,status,attempts,report_id) VALUES($1,$2,$3,$4,'completed',1,$5)`, fmt.Sprintf("%s-target-%04d", jobID, index), jobID, index, request, reportID)
+	}
+	results := store.pool.SendBatch(ctx, batch)
+	if err := results.Close(); err != nil {
+		t.Fatalf("insert targets for %q: %v", jobID, err)
+	}
+}
+
+func pollJob(ctx context.Context, handler http.Handler, jobID string) ([]byte, error) {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequestWithContext(ctx, http.MethodGet, "/v1/jobs/"+jobID, nil)
+	request.RemoteAddr = "127.0.0.1:1000"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		return nil, fmt.Errorf("status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	return recorder.Body.Bytes(), nil
+}
+
+func benchmarkJobPoll(ctx context.Context, handler http.Handler, jobID string) (testing.BenchmarkResult, error) {
+	var pollErr error
+	result := testing.Benchmark(func(benchmark *testing.B) {
+		for benchmark.Loop() {
+			if _, err := pollJob(ctx, handler, jobID); err != nil {
+				pollErr = err
+				benchmark.StopTimer()
+				return
+			}
+		}
+	})
+	return result, pollErr
 }
 
 func TestPostgresConcurrentIdempotentAdmission(t *testing.T) {
