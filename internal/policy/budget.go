@@ -18,45 +18,47 @@ const (
 
 // Limits contains the shared per-target collection limits.
 type Limits struct {
-	TargetDeadline      time.Duration `json:"target_deadline" yaml:"target_deadline"`
-	DNSQueryTimeout     time.Duration `json:"dns_query_timeout" yaml:"dns_query_timeout"`
-	DNSAttempts         int           `json:"dns_attempts" yaml:"dns_attempts"`
-	DNSQuestions        int           `json:"dns_questions" yaml:"dns_questions"`
-	CNAMEChainDepth     int           `json:"cname_chain_depth" yaml:"cname_chain_depth"`
-	HTTPRequestTimeout  time.Duration `json:"http_request_timeout" yaml:"http_request_timeout"`
-	HTTPRequests        int           `json:"http_requests" yaml:"http_requests"`
-	HTTPResponseHeaders int64         `json:"http_response_headers" yaml:"http_response_headers"`
-	HTTPDocumentBytes   int64         `json:"http_document_bytes" yaml:"http_document_bytes"`
-	HTTPTotalBodyBytes  int64         `json:"http_total_body_bytes" yaml:"http_total_body_bytes"`
-	Redirects           int           `json:"redirects" yaml:"redirects"`
-	SeedHostnames       int           `json:"seed_hostnames" yaml:"seed_hostnames"`
-	ResolvedAddresses   int           `json:"resolved_addresses" yaml:"resolved_addresses"`
-	PrefixAssociations  int           `json:"prefix_associations" yaml:"prefix_associations"`
+	TargetDeadline          time.Duration `json:"target_deadline" yaml:"target_deadline"`
+	DNSQueryTimeout         time.Duration `json:"dns_query_timeout" yaml:"dns_query_timeout"`
+	DNSAttempts             int           `json:"dns_attempts" yaml:"dns_attempts"`
+	DNSQuestions            int           `json:"dns_questions" yaml:"dns_questions"`
+	CNAMEChainDepth         int           `json:"cname_chain_depth" yaml:"cname_chain_depth"`
+	HTTPRequestTimeout      time.Duration `json:"http_request_timeout" yaml:"http_request_timeout"`
+	HTTPDestinationInterval time.Duration `json:"http_destination_interval" yaml:"http_destination_interval"`
+	HTTPRequests            int           `json:"http_requests" yaml:"http_requests"`
+	HTTPResponseHeaders     int64         `json:"http_response_headers" yaml:"http_response_headers"`
+	HTTPDocumentBytes       int64         `json:"http_document_bytes" yaml:"http_document_bytes"`
+	HTTPTotalBodyBytes      int64         `json:"http_total_body_bytes" yaml:"http_total_body_bytes"`
+	Redirects               int           `json:"redirects" yaml:"redirects"`
+	SeedHostnames           int           `json:"seed_hostnames" yaml:"seed_hostnames"`
+	ResolvedAddresses       int           `json:"resolved_addresses" yaml:"resolved_addresses"`
+	PrefixAssociations      int           `json:"prefix_associations" yaml:"prefix_associations"`
 }
 
 // DefaultLimits returns SPEC section 14.1's initial bounds.
 func DefaultLimits() Limits {
 	return Limits{
-		TargetDeadline:      60 * time.Second,
-		DNSQueryTimeout:     3 * time.Second,
-		DNSAttempts:         2,
-		DNSQuestions:        512,
-		CNAMEChainDepth:     16,
-		HTTPRequestTimeout:  10 * time.Second,
-		HTTPRequests:        64,
-		HTTPResponseHeaders: 64 << 10,
-		HTTPDocumentBytes:   2 << 20,
-		HTTPTotalBodyBytes:  16 << 20,
-		Redirects:           5,
-		SeedHostnames:       32,
-		ResolvedAddresses:   128,
-		PrefixAssociations:  1024,
+		TargetDeadline:          60 * time.Second,
+		DNSQueryTimeout:         3 * time.Second,
+		DNSAttempts:             2,
+		DNSQuestions:            512,
+		CNAMEChainDepth:         16,
+		HTTPRequestTimeout:      10 * time.Second,
+		HTTPDestinationInterval: 100 * time.Millisecond,
+		HTTPRequests:            64,
+		HTTPResponseHeaders:     64 << 10,
+		HTTPDocumentBytes:       2 << 20,
+		HTTPTotalBodyBytes:      16 << 20,
+		Redirects:               5,
+		SeedHostnames:           32,
+		ResolvedAddresses:       128,
+		PrefixAssociations:      1024,
 	}
 }
 
 // Validate rejects disabled or unbounded collection limits.
 func (l Limits) Validate() error {
-	if l.TargetDeadline <= 0 || l.DNSQueryTimeout <= 0 || l.HTTPRequestTimeout <= 0 {
+	if l.TargetDeadline <= 0 || l.DNSQueryTimeout <= 0 || l.HTTPRequestTimeout <= 0 || l.HTTPDestinationInterval <= 0 {
 		return fmt.Errorf("timeouts must be positive")
 	}
 	if l.DNSAttempts <= 0 || l.DNSQuestions <= 0 || l.CNAMEChainDepth <= 0 || l.HTTPRequests <= 0 ||
@@ -70,10 +72,12 @@ func (l Limits) Validate() error {
 // Controller owns process-wide target and network permits. One controller must
 // be shared by every analyzer bundle loaded in a process.
 type Controller struct {
-	limits  Limits
-	targets chan struct{}
-	dns     chan struct{}
-	http    chan struct{}
+	limits        Limits
+	targets       chan struct{}
+	dns           chan struct{}
+	http          chan struct{}
+	destinationMu sync.Mutex
+	destinations  map[string]time.Time
 }
 
 // NewController constructs a process-level execution controller. The channel
@@ -86,10 +90,11 @@ func NewController(limits Limits, concurrentTargets, concurrentDNS, concurrentHT
 		return nil, fmt.Errorf("concurrent permit counts must be positive")
 	}
 	return &Controller{
-		limits:  limits,
-		targets: make(chan struct{}, concurrentTargets),
-		dns:     make(chan struct{}, concurrentDNS),
-		http:    make(chan struct{}, concurrentHTTP),
+		limits:       limits,
+		targets:      make(chan struct{}, concurrentTargets),
+		dns:          make(chan struct{}, concurrentDNS),
+		http:         make(chan struct{}, concurrentHTTP),
+		destinations: make(map[string]time.Time),
 	}, nil
 }
 
@@ -152,7 +157,7 @@ func AcquireDNS(ctx context.Context) (func(), error) {
 
 // AcquireHTTP accounts for one HTTP request and waits for both per-target and
 // process-level HTTP permits.
-func AcquireHTTP(ctx context.Context) (func(), error) {
+func AcquireHTTP(ctx context.Context, destination string) (func(), error) {
 	state, ok := executionFromContext(ctx)
 	if !ok {
 		return func() {}, nil
@@ -160,7 +165,42 @@ func AcquireHTTP(ctx context.Context) (func(), error) {
 	if !state.reserveCount(&state.httpLeft) {
 		return nil, budgetError("HTTP request budget exhausted")
 	}
+	if err := state.controller.acquireDestination(ctx, destination); err != nil {
+		return nil, model.NewError(model.CodeCancelled, "wait for destination rate admission", err)
+	}
 	return state.acquireNetwork(ctx, state.http, state.controller.http)
+}
+
+func (c *Controller) acquireDestination(ctx context.Context, destination string) error {
+	if destination == "" {
+		return fmt.Errorf("HTTP destination key is required")
+	}
+	now := time.Now()
+	c.destinationMu.Lock()
+	for key, next := range c.destinations {
+		if !next.After(now) {
+			delete(c.destinations, key)
+		}
+	}
+	start := now
+	if next := c.destinations[destination]; next.After(start) {
+		start = next
+	}
+	c.destinations[destination] = start.Add(c.limits.HTTPDestinationInterval)
+	c.destinationMu.Unlock()
+
+	wait := time.Until(start)
+	if wait <= 0 {
+		return ctx.Err()
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // ReserveAddress accounts for one resolved address retained for later work.
@@ -236,8 +276,15 @@ func (e *execution) acquireNetwork(ctx context.Context, target, process chan str
 }
 
 func acquirePermit(ctx context.Context, permits chan struct{}) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	select {
 	case permits <- struct{}{}:
+		if err := ctx.Err(); err != nil {
+			releasePermit(permits)
+			return err
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

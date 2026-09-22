@@ -184,6 +184,33 @@ func TestCollectPreservesCompletedHopWhenRedirectIsMalformed(t *testing.T) {
 	}
 }
 
+func TestCollectReportsTLSAttemptWhenHTTPSRedirectFails(t *testing.T) {
+	t.Parallel()
+
+	start := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.Header().Set("Location", "https://redirect.example/")
+		writer.WriteHeader(stdhttp.StatusFound)
+	}))
+	t.Cleanup(start.Close)
+	plainLanding := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	t.Cleanup(plainLanding.Close)
+	first := netip.MustParseAddr("93.184.216.34")
+	second := netip.MustParseAddr("1.1.1.1")
+	dialer := &mappedDialer{destinations: map[netip.Addr]string{first: start.Listener.Addr().String(), second: plainLanding.Listener.Addr().String()}}
+	collector := New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20, WithRedirectResolver(func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{second}, nil
+	}))
+	result, err := collector.Collect(t.Context(), "http", "example.com", first)
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if len(result.Observations) != 1 || !result.TLSAttempted || result.Coverage.Status != model.CoveragePartial {
+		t.Fatalf("Collect() result = %#v, want retained HTTP hop with attempted TLS", result)
+	}
+}
+
 func TestCollectFallsBackToSecondApprovedInitialAddress(t *testing.T) {
 	t.Parallel()
 

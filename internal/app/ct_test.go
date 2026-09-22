@@ -95,6 +95,63 @@ func TestCTIndexOutageDoesNotDisableOrdinaryAnalysis(t *testing.T) {
 	}
 }
 
+func TestCTObservationIdentityIsPerCollectionOccurrence(t *testing.T) {
+	t.Parallel()
+
+	index := ctlog.NewMemoryStore()
+	passed := model.CTVerificationCheck{Status: model.CTCheckPassed, Procedure: "rfc6962-sha256", ProcedureVersion: "1"}
+	if err := index.Import(context.Background(), []ctlog.Record{{
+		Name: "api.example.com", CertificateHash: "fixture", LoggedAt: time.Date(2026, 9, 19, 10, 0, 0, 0, time.UTC), SourceID: "fixture", Provenance: ctlog.ProvenanceVerifiedLog,
+		Verification: model.CTVerification{CheckpointSignature: passed, Continuity: passed, EntryInclusion: passed},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	service := app.NewService(app.Dependencies{
+		DNS: collectdns.New((&recordingDNSClient{}).Query, policy.PublicDestinationPolicy()), CT: index, CTEnabled: true, CTMaximumSeed: 20,
+		View: model.NewAttributionView("fixture-bundle", "fixture-public", nil, nil), Now: time.Now,
+	})
+	includeWWW := false
+	request := model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeDNS, IncludeWWW: &includeWWW, CTDiscovery: true}
+	first, err := service.Analyze(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := service.Analyze(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCT := ctObservationByType(first.Observations, "ct_name")
+	secondCT := ctObservationByType(second.Observations, "ct_name")
+	if firstCT.ID == secondCT.ID {
+		t.Fatalf("CT occurrence IDs are equal: %q", firstCT.ID)
+	}
+	if firstCT.ContentHash == "" || firstCT.ContentHash != secondCT.ContentHash {
+		t.Fatalf("CT content hashes = %q and %q, want equal non-empty values", firstCT.ContentHash, secondCT.ContentHash)
+	}
+}
+
+func TestCTDiscoveryReportsFullSeedBudget(t *testing.T) {
+	t.Parallel()
+
+	limits := policy.DefaultLimits()
+	limits.SeedHostnames = 1
+	service := app.NewService(app.Dependencies{
+		DNS: collectdns.New((&recordingDNSClient{}).Query, policy.PublicDestinationPolicy()), CT: ctlog.NewMemoryStore(), CTEnabled: true, CTMaximumSeed: 1,
+		View: model.NewAttributionView("fixture-bundle", "fixture-public", nil, nil), Limits: limits, Now: time.Now,
+	})
+	includeWWW := false
+	report, err := service.Analyze(context.Background(), model.AnalyzeRequest{
+		Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeDNS, IncludeWWW: &includeWWW, CTDiscovery: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverage, ok := findCoverage(report.Coverage, "ct_discovery")
+	if !ok || coverage.Status != model.CoveragePartial || coverage.Omitted == 0 || !slices.Contains(coverage.ErrorCodes, model.CodeBudgetExceeded) {
+		t.Fatalf("CT coverage = %#v, want partial budget exhaustion with omitted work", coverage)
+	}
+}
+
 type recordingDNSClient struct {
 	mu           sync.Mutex
 	queriedNames []string
@@ -140,6 +197,15 @@ func hasObservation(observations []model.Observation, observationType, subject s
 		}
 	}
 	return false
+}
+
+func ctObservationByType(observations []model.Observation, observationType string) model.Observation {
+	for _, observation := range observations {
+		if observation.Type == observationType {
+			return observation
+		}
+	}
+	return model.Observation{}
 }
 
 func findCoverage(items []model.Coverage, capability string) (model.Coverage, bool) {

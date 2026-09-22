@@ -15,6 +15,7 @@ limits:
     dns_questions: 512
     cname_chain_depth: 16
     http_request_timeout: 10s
+    http_destination_interval: 100ms
     http_requests: 64
     http_response_headers: 65536
     http_document_bytes: 2097152

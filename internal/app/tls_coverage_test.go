@@ -18,6 +18,7 @@ func TestTLSCertificateCoverageDisclosesUnsupportedAndInapplicablePaths(t *testi
 		name         string
 		request      model.NormalizedRequest
 		observations []model.Observation
+		tlsAttempted bool
 		fallback     string
 		status       model.CoverageStatus
 	}{
@@ -37,11 +38,15 @@ func TestTLSCertificateCoverageDisclosesUnsupportedAndInapplicablePaths(t *testi
 			name: "redirect from HTTP to HTTPS", request: model.NormalizedRequest{Mode: model.ModeFull, Target: model.Target{Kind: model.TargetURL, Canonical: "http://example.com/"}, SeedHostnames: []string{"example.com"}},
 			observations: []model.Observation{{Type: "http_response", Payload: httpsPayload}}, fallback: "https", status: model.CoverageUnavailable,
 		},
+		{
+			name: "failed redirect from HTTP to HTTPS", request: model.NormalizedRequest{Mode: model.ModeFull, Target: model.Target{Kind: model.TargetURL, Canonical: "http://example.com/"}, SeedHostnames: []string{"example.com"}},
+			tlsAttempted: true, fallback: "https", status: model.CoverageUnavailable,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			coverage := tlsCertificateCoverage(tt.request, tt.observations, tt.fallback)
+			coverage := tlsCertificateCoverage(tt.request, tt.observations, tt.fallback, tt.tlsAttempted)
 			if coverage.Status != tt.status || coverage.Reason == "" {
 				t.Fatalf("coverage = %#v, want %q with reason", coverage, tt.status)
 			}

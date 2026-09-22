@@ -140,7 +140,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	if err != nil {
 		return model.Report{}, fmt.Errorf("create collection run ID: %w", err)
 	}
-	ctObservations, ctCoverage := s.planCTDiscovery(ctx, &normalized)
+	ctObservations, ctCoverage := s.planCTDiscovery(ctx, &normalized, collectionRunID)
 
 	collectHTTP := normalized.Mode == model.ModeFull && s.http != nil
 	type dnsRun struct {
@@ -225,7 +225,11 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 			observations = append(observations, observation)
 		}
 	}
-	coverage = append(coverage, tlsCertificateCoverage(normalized, observations, s.httpScheme))
+	tlsAttempted := false
+	for _, run := range httpRuns {
+		tlsAttempted = tlsAttempted || run.result.TLSAttempted
+	}
+	coverage = append(coverage, tlsCertificateCoverage(normalized, observations, s.httpScheme, tlsAttempted))
 
 	if s.webDetector != nil {
 		for _, run := range httpRuns {
@@ -301,7 +305,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	return report, nil
 }
 
-func (s *Service) planCTDiscovery(ctx context.Context, request *model.NormalizedRequest) ([]model.Observation, *model.Coverage) {
+func (s *Service) planCTDiscovery(ctx context.Context, request *model.NormalizedRequest, collectionRunID string) ([]model.Observation, *model.Coverage) {
 	if !request.CTDiscovery {
 		return nil, nil
 	}
@@ -326,6 +330,8 @@ func (s *Service) planCTDiscovery(ctx context.Context, request *model.Normalized
 	if limit <= 0 {
 		coverage.Status = model.CoveragePartial
 		coverage.Reason = "seed hostname limit reached"
+		coverage.Omitted = 1
+		coverage.ErrorCodes = []model.ErrorCode{model.CodeBudgetExceeded}
 		return nil, coverage
 	}
 	seen := make(map[string]struct{}, len(request.SeedHostnames))
@@ -349,7 +355,7 @@ func (s *Service) planCTDiscovery(ctx context.Context, request *model.Normalized
 		coverage.Omitted += result.Omitted
 		partial = partial || result.Partial
 		identities = append(identities, result.IndexIdentity)
-		for _, candidate := range result.Candidates {
+		for candidateIndex, candidate := range result.Candidates {
 			if _, duplicate := seen[candidate.Hostname]; duplicate {
 				continue
 			}
@@ -360,8 +366,9 @@ func (s *Service) planCTDiscovery(ctx context.Context, request *model.Normalized
 				continue
 			}
 			digest := sha256.Sum256(append([]byte("ct-name-v1\x00"), payload...))
+			occurrence := model.ObservationOccurrence{CollectionRunID: collectionRunID, Seed: root, ItemIndex: candidateIndex}
 			observations = append(observations, model.Observation{
-				ID: "ct-name-" + hex.EncodeToString(digest[:12]), Type: "ct_name", Subject: candidate.Hostname, Scope: model.ScopeSubdomain,
+				ID: model.ObservationID("ct-name", occurrence, candidate.Hostname), Type: "ct_name", Subject: candidate.Hostname, Scope: model.ScopeSubdomain,
 				ObservedAt: candidate.LoggedAt, CollectorVersion: "ct-index-v1", Status: "historical_discovery", Payload: payload,
 				ContentHash: "sha256:" + hex.EncodeToString(digest[:]),
 			})
@@ -975,14 +982,14 @@ func seedURL(request model.NormalizedRequest, hostname, fallbackScheme string) s
 	return fallbackScheme + "://" + hostname + "/"
 }
 
-func tlsCertificateCoverage(request model.NormalizedRequest, observations []model.Observation, fallbackScheme string) model.Coverage {
+func tlsCertificateCoverage(request model.NormalizedRequest, observations []model.Observation, fallbackScheme string, tlsAttempted bool) model.Coverage {
 	coverage := model.Coverage{Capability: "tls_certificate"}
 	if request.Mode == model.ModeDNS {
 		coverage.Status = model.CoverageSkipped
 		coverage.Reason = "DNS-only mode"
 		return coverage
 	}
-	applicable := false
+	applicable := tlsAttempted
 	for _, hostname := range request.SeedHostnames {
 		parsed, err := url.Parse(seedURL(request, hostname, fallbackScheme))
 		applicable = applicable || err == nil && strings.EqualFold(parsed.Scheme, "https")

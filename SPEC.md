@@ -857,6 +857,7 @@ These values are design defaults to validate, not measured throughput claims.
 | CNAME chain depth | 16 links |
 | DNS questions per target job | 512, including retries and dependency resolution |
 | HTTP request timeout | 10 seconds within the target deadline |
+| HTTP request starts per concrete destination | At most one per 100 milliseconds across the service process |
 | Redirect count | 5 per seed |
 | HTTP response headers | 64 KiB |
 | Decoded response body | 2 MiB per document; read at most one extra byte to detect truncation |

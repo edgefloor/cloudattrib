@@ -71,6 +71,7 @@ type Result struct {
 	PeerAddress  netip.Addr
 	Headers      stdhttp.Header
 	Body         []byte
+	TLSAttempted bool
 }
 
 // Collector owns the application HTTP transport settings.
@@ -144,8 +145,10 @@ func (c *Collector) CollectTargetCandidatesOccurrence(ctx context.Context, rawUR
 	coverage := model.Coverage{Capability: "http", Status: model.CoverageComplete}
 	var observations []model.Observation
 	var final Result
+	tlsAttempted := false
 	currentCandidates := channelAddressSource(candidates)
 	for hop := 0; ; hop++ {
+		tlsAttempted = tlsAttempted || strings.EqualFold(currentURL.Scheme, "https")
 		hopOccurrence := occurrence
 		hopOccurrence.Hop = hop
 		hopResult, location, collectErr := c.collectHopCandidates(ctx, currentURL, currentCandidates, originalHostname, hopOccurrence, &coverage)
@@ -156,9 +159,9 @@ func (c *Collector) CollectTargetCandidatesOccurrence(ctx context.Context, rawUR
 				coverage.Omitted++
 			}
 			if len(observations) > 0 {
-				return finish(final, observations, coverage), nil
+				return finish(final, observations, coverage, tlsAttempted), nil
 			}
-			return Result{Observations: observations, Coverage: coverage}, collectErr
+			return Result{Observations: observations, Coverage: coverage, TLSAttempted: tlsAttempted}, collectErr
 		}
 		observations = append(observations, hopResult.Observation)
 		if hopResult.Coverage.Status == model.CoveragePartial {
@@ -173,32 +176,32 @@ func (c *Collector) CollectTargetCandidatesOccurrence(ctx context.Context, rawUR
 			coverage.Status = model.CoveragePartial
 			coverage.Omitted++
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeBudgetExceeded)
-			return finish(final, observations, coverage), nil
+			return finish(final, observations, coverage, tlsAttempted), nil
 		}
 		if c.resolve == nil {
 			coverage.Status = model.CoveragePartial
 			coverage.Omitted++
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeCapabilityUnavailable)
-			return finish(final, observations, coverage), nil
+			return finish(final, observations, coverage, tlsAttempted), nil
 		}
 		nextURL, resolveErr := currentURL.Parse(location)
 		if resolveErr != nil || nextURL.Hostname() == "" || nextURL.User != nil || (nextURL.Scheme != "http" && nextURL.Scheme != "https") {
 			coverage.Status = model.CoveragePartial
 			coverage.Omitted++
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeInvalidTarget)
-			return finish(final, observations, coverage), nil
+			return finish(final, observations, coverage, tlsAttempted), nil
 		}
 		if nextURL.Port() != "" && nextURL.Port() != "80" && nextURL.Port() != "443" {
 			coverage.Status = model.CoveragePartial
 			coverage.Omitted++
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodePolicyBlocked)
-			return finish(final, observations, coverage), nil
+			return finish(final, observations, coverage, tlsAttempted), nil
 		}
 		addresses, resolveErr := c.resolve(ctx, nextURL.Hostname())
 		if resolveErr != nil {
 			coverage.Status = model.CoveragePartial
 			coverage.ErrorCodes = append(coverage.ErrorCodes, collectionErrorCode(resolveErr))
-			return finish(final, observations, coverage), nil
+			return finish(final, observations, coverage, tlsAttempted), nil
 		}
 		approved, blocked := c.approvedAddresses(addresses, portForURL(nextURL))
 		if blocked {
@@ -211,12 +214,12 @@ func (c *Collector) CollectTargetCandidatesOccurrence(ctx context.Context, rawUR
 			if !blocked {
 				coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeCollectionFailed)
 			}
-			return finish(final, observations, coverage), nil
+			return finish(final, observations, coverage, tlsAttempted), nil
 		}
 		currentURL = nextURL
 		currentCandidates = sliceAddressSource(approved)
 	}
-	return finish(final, observations, coverage), nil
+	return finish(final, observations, coverage, tlsAttempted), nil
 }
 
 func (c *Collector) collectHopCandidates(ctx context.Context, targetURL *url.URL, next addressSource, originalHostname string, occurrence model.ObservationOccurrence, coverage *model.Coverage) (Result, string, error) {
@@ -240,7 +243,8 @@ func (c *Collector) collectHopCandidates(ctx context.Context, targetURL *url.URL
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodePolicyBlocked)
 			continue
 		}
-		release, acquireErr := policy.AcquireHTTP(ctx)
+		destination := net.JoinHostPort(address.String(), fmt.Sprint(portForURL(targetURL)))
+		release, acquireErr := policy.AcquireHTTP(ctx, destination)
 		if acquireErr != nil {
 			return Result{}, "", acquireErr
 		}
@@ -463,9 +467,10 @@ func sliceAddressSource(addresses []netip.Addr) addressSource {
 	}
 }
 
-func finish(final Result, observations []model.Observation, coverage model.Coverage) Result {
+func finish(final Result, observations []model.Observation, coverage model.Coverage, tlsAttempted bool) Result {
 	final.Observations = observations
 	final.Coverage = coverage
+	final.TLSAttempted = tlsAttempted
 	return final
 }
 

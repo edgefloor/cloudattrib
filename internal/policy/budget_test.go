@@ -50,6 +50,58 @@ func TestControllerCancelledTargetWaiterNeverAcquires(t *testing.T) {
 	releaseThird()
 }
 
+func TestAcquirePermitRejectsAlreadyCancelledContext(t *testing.T) {
+	t.Parallel()
+
+	for range 1000 {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		permits := make(chan struct{}, 1)
+		if err := acquirePermit(ctx, permits); !errors.Is(err, context.Canceled) {
+			t.Fatalf("acquirePermit() error = %v, want context.Canceled", err)
+		}
+		if len(permits) != 0 {
+			t.Fatal("cancelled acquisition retained a permit")
+		}
+	}
+}
+
+func TestControllerPacesSameDestinationAcrossExecutions(t *testing.T) {
+	t.Parallel()
+
+	limits := DefaultLimits()
+	limits.HTTPDestinationInterval = 40 * time.Millisecond
+	controller, err := NewController(limits, 2, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstCtx, releaseFirst, err := controller.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseFirst()
+	secondCtx, releaseSecond, err := controller.Begin(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer releaseSecond()
+
+	firstRelease, err := AcquireHTTP(firstCtx, "93.184.216.34:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRelease()
+	started := time.Now()
+	secondRelease, err := AcquireHTTP(secondCtx, "93.184.216.34:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRelease()
+	if elapsed := time.Since(started); elapsed < 30*time.Millisecond {
+		t.Fatalf("same-destination admission waited %v, want pacing interval", elapsed)
+	}
+}
+
 func TestControllerTargetDeadlineStartsAfterAdmission(t *testing.T) {
 	limits := DefaultLimits()
 	limits.TargetDeadline = 80 * time.Millisecond
@@ -149,12 +201,12 @@ func TestControllerSharesNetworkPermitsAndBudgets(t *testing.T) {
 		}
 		t.Fatalf("second DNS acquisition error = %v", err)
 	}
-	releaseHTTP, err := AcquireHTTP(firstCtx)
+	releaseHTTP, err := AcquireHTTP(firstCtx, "93.184.216.34:443")
 	if err != nil {
 		t.Fatal(err)
 	}
 	releaseHTTP()
-	if release, err := AcquireHTTP(firstCtx); model.ErrorCodeOf(err) != model.CodeBudgetExceeded {
+	if release, err := AcquireHTTP(firstCtx, "93.184.216.34:443"); model.ErrorCodeOf(err) != model.CodeBudgetExceeded {
 		if release != nil {
 			release()
 		}
