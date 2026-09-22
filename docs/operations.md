@@ -127,7 +127,7 @@ docker compose exec app /usr/local/bin/cloudattrib datasets status \
   --config /etc/cloudattrib/config.yaml
 ```
 
-Check both the desired bundle and each process's load status. A process builds the replacement away from request handling, then swaps its analyzer. A failed load leaves the last-known-good analyzer active and records the failure.
+Check `desired`, `active`, and `process_loads` in the status output. `desired` is the committed PostgreSQL generation. `active` is the reconciled filesystem pointer. Each process load record contains the generation that the process loaded. A process builds the replacement away from request handling, then swaps its analyzer. A failed load leaves the last-known-good analyzer active and records the failure or the older generation used at startup.
 
 Pinned jobs retain their selected bundle across restarts, including the built-in bundle. Activation and pruning acquire filesystem and database locks in the same order. This prevents pruning between validation and durable publication.
 
@@ -179,7 +179,7 @@ docker run --rm \
 1. Stop the application and updater.
 2. Restore the bundle archive into the bundle volume.
 3. Restore PostgreSQL with `pg_restore`.
-4. Confirm that the active pointer has its matching immutable candidate directory.
+4. Confirm that the committed desired generation has its matching immutable candidate directory.
 5. Start the application.
 6. Check `/readyz`, `datasets status`, and `cloudattrib_bundle_info` before admitting work.
 
@@ -188,13 +188,13 @@ Reports and retained observations currently have no automatic age-based deletion
 ## Failure and recovery behavior
 
 - A disk-full or truncated-source failure stops candidate staging before atomic publication. The active bundle remains unchanged.
-- A corrupt or incompatible candidate fails validation or process loading. The last-known-good analyzer remains active.
+- A corrupt or incompatible desired candidate fails validation or process loading. A running process keeps its last-known-good analyzer. On restart, the service tries the protected prior generations.
 - Writer contention rejects the second updater instead of allowing concurrent publication.
 - PostgreSQL admission and report commits fail explicitly. The service does not return an unstored success.
 - On `SIGTERM`, the service stops admission and cancels workers. HTTP shutdown has a 10-second allowance. The service keeps PostgreSQL open until owned workers and the reloader stop. Terminal worker commits have a five-second bound; unfinished leases remain recoverable on restart.
 - Expired work leases are recovered at startup. Reservations and bundle pins remain durable through restart and retry.
 
-If a process stops after desired-bundle publication but before reload, it loads that desired candidate on restart. If loading fails, inspect `datasets status`, correct or roll back the desired pointer, and restart or wait for the reload loop.
+If a process stops after the database commit but before filesystem publication, startup reconciles the pointer from the committed generation. If loading fails, inspect `datasets status`. Correct the candidate or commit a rollback generation, then restart or wait for the reload loop.
 
 ## Resource tuning
 

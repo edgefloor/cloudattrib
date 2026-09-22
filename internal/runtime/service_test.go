@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/netip"
@@ -187,7 +189,8 @@ func TestBundleAnalyzerFactoryReloadsDesiredAndRetainsPinnedBundle(t *testing.T)
 	if err != nil {
 		t.Fatalf("Import(first) error = %v", err)
 	}
-	if _, err := repository.Activate(context.Background(), first.CandidateID, first.CandidateHash, "activate"); err != nil {
+	firstActivation, err := repository.Activate(context.Background(), first.CandidateID, first.CandidateHash, "activate")
+	if err != nil {
 		t.Fatalf("Activate(first) error = %v", err)
 	}
 	store := standaloneReportStore{}
@@ -203,16 +206,37 @@ func TestBundleAnalyzerFactoryReloadsDesiredAndRetainsPinnedBundle(t *testing.T)
 		activeLookup:   lookup,
 		analyzers:      map[string]app.Analyzer{bundleID: analyzer},
 		lookup:         map[string]lookupAvailability{bundleID: lookup},
+		authority:      &fixtureActivationAuthority{desired: &firstActivation},
+		repository:     repository,
+		loaded:         firstActivation,
 	}
 	second, err := repository.Import(context.Background(), runtimeFixtureSources(t, "runtime-second"))
 	if err != nil {
 		t.Fatalf("Import(second) error = %v", err)
 	}
-	if _, err := repository.Activate(context.Background(), second.CandidateID, second.CandidateHash, "activate"); err != nil {
+	secondActivation, err := repository.Activate(context.Background(), second.CandidateID, second.CandidateHash, "activate")
+	if err != nil {
 		t.Fatalf("Activate(second) error = %v", err)
+	}
+	uncommittedPointer := secondActivation
+	uncommittedPointer.OperationID = ""
+	uncommittedPointer.Generation = 0
+	encodedPointer, err := json.Marshal(uncommittedPointer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configuration.Data.BundleDirectory, "active.json"), encodedPointer, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	if err := factory.reloadDesired(t.Context()); err != nil {
 		t.Fatalf("reloadDesired() error = %v", err)
+	}
+	if factory.activeBundleID != first.CandidateID {
+		t.Fatalf("uncommitted filesystem pointer changed active bundle to %q", factory.activeBundleID)
+	}
+	factory.authority.(*fixtureActivationAuthority).desired = &secondActivation
+	if err := factory.reloadDesired(t.Context()); err != nil {
+		t.Fatalf("reloadDesired(committed) error = %v", err)
 	}
 	if factory.activeBundleID != second.CandidateID {
 		t.Fatalf("active bundle = %q, want %q", factory.activeBundleID, second.CandidateID)
@@ -223,6 +247,86 @@ func TestBundleAnalyzerFactoryReloadsDesiredAndRetainsPinnedBundle(t *testing.T)
 	if _, err := factory.AnalyzerForBundle(context.Background(), first.CandidateID); err != nil {
 		t.Fatalf("AnalyzerForBundle(first) error = %v", err)
 	}
+}
+
+func TestBundleAnalyzerFactoryFailedLoadKeepsLastKnownGood(t *testing.T) {
+	t.Parallel()
+
+	configuration := config.Default()
+	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
+	repository, err := datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := repository.Import(t.Context(), runtimeFixtureSources(t, "failed-load"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired, err := repository.Activate(t.Context(), report.CandidateID, report.CandidateHash, "activate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := datasets.Activation{OperationID: "activation-previous", Generation: desired.Generation - 1, BundleID: "previous-bundle"}
+	factory := &bundleAnalyzerFactory{
+		configuration: configuration, authority: &fixtureActivationAuthority{desired: &desired}, repository: repository,
+		active: runtimeFixtureAnalyzer{bundleID: previous.BundleID}, activeBundleID: previous.BundleID, loaded: previous,
+		analyzers: map[string]app.Analyzer{previous.BundleID: runtimeFixtureAnalyzer{bundleID: previous.BundleID}},
+		lookup:    make(map[string]lookupAvailability),
+		load: func(context.Context, string) (app.Analyzer, lookupAvailability, error) {
+			return nil, lookupAvailability{}, errors.New("corrupt candidate")
+		},
+	}
+	if err := factory.reloadDesired(t.Context()); err == nil {
+		t.Fatal("reloadDesired() error = nil, want corrupt candidate failure")
+	}
+	if factory.activeBundleID != previous.BundleID || factory.loaded.OperationID != previous.OperationID {
+		t.Fatalf("last-known-good changed to bundle=%q activation=%#v", factory.activeBundleID, factory.loaded)
+	}
+	status, err := repository.Status()
+	if err != nil || len(status.Loads) != 1 || status.Loads[0].Status != "failed" || status.Loads[0].Generation != desired.Generation {
+		t.Fatalf("Status() = %#v, %v", status, err)
+	}
+}
+
+func TestBundleAnalyzerFactoryActivationDoesNotChangeInflightAttempt(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	previous := blockingRuntimeAnalyzer{bundleID: "previous-bundle", started: started, release: release}
+	next := runtimeFixtureAnalyzer{bundleID: "next-bundle"}
+	factory := &bundleAnalyzerFactory{
+		active: previous, activeBundleID: previous.bundleID,
+		analyzers: map[string]app.Analyzer{previous.bundleID: previous, next.bundleID: next},
+		lookup:    make(map[string]lookupAvailability),
+	}
+	reportDone := make(chan model.Report, 1)
+	go func() {
+		report, _ := factory.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com"})
+		reportDone <- report
+	}()
+	<-started
+	factory.mu.Lock()
+	factory.active = next
+	factory.activeBundleID = next.bundleID
+	factory.mu.Unlock()
+	close(release)
+	if report := <-reportDone; report.BundleID != previous.bundleID {
+		t.Fatalf("in-flight report bundle = %q, want %q", report.BundleID, previous.bundleID)
+	}
+}
+
+type fixtureActivationAuthority struct {
+	desired *datasets.Activation
+	err     error
+}
+
+func (f *fixtureActivationAuthority) DesiredBundle(context.Context) (*datasets.Activation, error) {
+	if f.desired == nil {
+		return nil, f.err
+	}
+	copy := *f.desired
+	return &copy, f.err
 }
 
 func TestBundleAnalyzerFactoryReconstructsBuiltinAfterDatasetActivation(t *testing.T) {
@@ -314,13 +418,16 @@ func TestBundleAnalyzerFactoryReloadLoopCancelsBlockedLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := repository.Activate(t.Context(), desired.CandidateID, desired.CandidateHash, "activate"); err != nil {
+	desiredActivation, err := repository.Activate(t.Context(), desired.CandidateID, desired.CandidateHash, "activate")
+	if err != nil {
 		t.Fatal(err)
 	}
 	loadStarted := make(chan struct{})
 	loadStopped := make(chan struct{})
 	factory := &bundleAnalyzerFactory{
 		configuration:  configuration,
+		authority:      &fixtureActivationAuthority{desired: &desiredActivation},
+		repository:     repository,
 		active:         runtimeFixtureAnalyzer{bundleID: "previous-bundle"},
 		activeBundleID: "previous-bundle",
 		analyzers:      make(map[string]app.Analyzer),
@@ -371,6 +478,26 @@ func TestBundleAnalyzerFactoryReloadLoopCancelsBlockedLoad(t *testing.T) {
 }
 
 type runtimeFixtureAnalyzer struct{ bundleID string }
+
+type blockingRuntimeAnalyzer struct {
+	bundleID string
+	started  chan<- struct{}
+	release  <-chan struct{}
+}
+
+func (a blockingRuntimeAnalyzer) Analyze(context.Context, model.AnalyzeRequest) (model.Report, error) {
+	close(a.started)
+	<-a.release
+	return model.Report{BundleID: a.bundleID, Status: model.StatusComplete}, nil
+}
+
+func (blockingRuntimeAnalyzer) LookupIP(context.Context, model.IPLookupRequest) (model.IPLookupResult, error) {
+	return model.IPLookupResult{}, nil
+}
+
+func (a blockingRuntimeAnalyzer) Reclassify(context.Context, model.ReclassifyRequest) (model.Report, error) {
+	return model.Report{BundleID: a.bundleID, Status: model.StatusComplete}, nil
+}
 
 func (a runtimeFixtureAnalyzer) Analyze(context.Context, model.AnalyzeRequest) (model.Report, error) {
 	return model.Report{BundleID: a.bundleID, Status: model.StatusComplete}, nil

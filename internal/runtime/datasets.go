@@ -41,21 +41,35 @@ func ActivateDataset(ctx context.Context, configuration config.Config, candidate
 		return datasets.Activation{}, err
 	}
 	defer store.Close()
-	return repository.ActivateCoordinated(ctx, candidateID, approvalHash, action, func(manifest datasets.Manifest, manifestBytes []byte, publish func() error) error {
-		if err := store.ActivateBundle(ctx, manifest.BundleID, manifestBytes, true, publish); err != nil {
-			return fmt.Errorf("coordinate dataset activation: %w", err)
+	return repository.ActivateCommitted(ctx, candidateID, approvalHash, action, func(proposed datasets.Activation, _ datasets.Manifest, manifestBytes []byte) (datasets.Activation, error) {
+		committed, err := store.CommitBundleActivation(ctx, proposed, manifestBytes, true)
+		if err != nil {
+			return datasets.Activation{}, fmt.Errorf("commit dataset activation: %w", err)
 		}
-		return nil
+		return committed, nil
 	})
 }
 
 // DatasetStatus returns desired, candidate, and process-load state.
-func DatasetStatus(configuration config.Config) (datasets.RepositoryStatus, error) {
+func DatasetStatus(ctx context.Context, configuration config.Config) (datasets.RepositoryStatus, error) {
 	repository, err := datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
 	if err != nil {
 		return datasets.RepositoryStatus{}, err
 	}
-	return repository.Status()
+	status, err := repository.Status()
+	if err != nil {
+		return datasets.RepositoryStatus{}, err
+	}
+	store, err := openDatasetStore(ctx, configuration)
+	if err != nil {
+		return datasets.RepositoryStatus{}, err
+	}
+	defer store.Close()
+	status.Desired, err = store.DesiredBundle(ctx)
+	if err != nil {
+		return datasets.RepositoryStatus{}, err
+	}
+	return status, nil
 }
 
 // PruneDataset removes an unprotected candidate while serialized with durable admission.

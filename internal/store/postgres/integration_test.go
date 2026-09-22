@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 
 	"cloudattrib/internal/app"
 	"cloudattrib/internal/ctlog"
+	"cloudattrib/internal/datasets"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 )
@@ -372,6 +375,34 @@ func TestPostgresActivationCallbackIsNotRetried(t *testing.T) {
 	}
 }
 
+func TestPostgresActivationGenerationIsIdempotentAndResolvesLostAcknowledgement(t *testing.T) {
+	store, ctx := openPostgresTest(t, 1)
+	manifest := []byte(`{"schema_version":1,"bundle_id":"fixture-bundle"}`)
+	proposed := datasets.Activation{
+		OperationID: "activation-fixture", BundleID: "fixture-bundle", CandidateHash: manifestDigestForTest(manifest), Action: "activate",
+	}
+	store.transactionHooks = &transactionHooks{afterActivationCommit: func() error {
+		store.transactionHooks.afterActivationCommit = nil
+		return errors.New("lost commit acknowledgement")
+	}}
+	committed, err := store.CommitBundleActivation(ctx, proposed, manifest, true)
+	if err != nil {
+		t.Fatalf("CommitBundleActivation() error = %v", err)
+	}
+	if committed.Generation < 1 || committed.At.IsZero() {
+		t.Fatalf("committed activation = %#v", committed)
+	}
+	again, err := store.CommitBundleActivation(ctx, proposed, manifest, true)
+	if err != nil || again.Generation != committed.Generation {
+		t.Fatalf("CommitBundleActivation(idempotent) = %#v, %v", again, err)
+	}
+	conflict := proposed
+	conflict.Action = "rollback"
+	if _, err := store.CommitBundleActivation(ctx, conflict, manifest, true); model.ErrorCodeOf(err) != model.CodeIdempotencyConflict {
+		t.Fatalf("CommitBundleActivation(conflict) error = %v", err)
+	}
+}
+
 func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	store, ctx := openPostgresTest(t, 4)
 	var err error
@@ -386,11 +417,19 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 		})
 	}()
 	<-publishStarted
+	desired, err := store.DesiredBundle(ctx)
+	if err != nil || desired == nil || desired.BundleID != "coordinated-bundle" {
+		t.Fatalf("DesiredBundle() during publication = %#v, %v", desired, err)
+	}
 	pruneCtx, cancelPrune := context.WithTimeout(ctx, 100*time.Millisecond)
-	err = store.WithBundlePruneLock(pruneCtx, "coordinated-bundle", func(bool) error { return nil })
+	protectedDuringPublication := false
+	err = store.WithBundlePruneLock(pruneCtx, "coordinated-bundle", func(protected bool) error {
+		protectedDuringPublication = protected
+		return nil
+	})
 	cancelPrune()
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("WithBundlePruneLock() during activation error = %v, want deadline", err)
+	if err != nil || !protectedDuringPublication {
+		t.Fatalf("WithBundlePruneLock() during publication protected=%v, error=%v", protectedDuringPublication, err)
 	}
 	close(releasePublish)
 	if err := <-activationDone; err != nil {
@@ -624,4 +663,9 @@ func assertLifecycleCounts(t *testing.T, ctx context.Context, store *Store, rese
 	if gotReservations != reservations || gotPins != pins {
 		t.Fatalf("lifecycle counts reservations=%d pins=%d, want %d and %d", gotReservations, gotPins, reservations, pins)
 	}
+}
+
+func manifestDigestForTest(manifest []byte) string {
+	digest := sha256.Sum256(manifest)
+	return "sha256:" + hex.EncodeToString(digest[:])
 }

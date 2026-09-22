@@ -761,7 +761,8 @@ Persist these logical tables with migrations and foreign keys:
 | `evidence` | Detector/rule interpretation, classification time, supporting observation references, and retained dataset-record provenance. |
 | `findings` | Canonical provider/product relationship and searchable fields. |
 | `finding_evidence` | Many-to-many finding/evidence links. |
-| `dataset_bundles` | Manifest metadata and activation/audit history. |
+| `dataset_bundles` | Immutable manifest metadata and availability. |
+| `bundle_activation_generations` | Ordered desired generations with durable operation IDs and activation audit fields. |
 | `ct_names` and `ct_checkpoints` | Optional local CT index and collector progress. |
 
 Use typed indexed columns for target, provider/product ID, relation, strength, and time. JSONB may retain evolving typed payloads, but must not replace all useful relational indexes. Do not query PostgreSQL for each cloud-prefix match.
@@ -820,18 +821,22 @@ Record the `wappalyzergo` engine, embedded fingerprint digest, rule digest, and 
 4. Compare against the active bundle. Quarantine unexplained provider removals or extreme coverage changes for review.
 5. Build all indexes and execute smoke checks, including overlap/retirement cases.
 6. Write canonical artifacts, checksums, and a manifest. Sync and rename on the same filesystem.
-7. Activate a complete compatible `AttributionView` through an atomic pointer swap. Persist activation history separately.
+7. Commit a complete compatible activation generation in PostgreSQL. Each generation has a durable operation ID.
 8. Leave old views alive while in-flight jobs reference them. Keep on-disk bundles protected by durable batch pins, including queued targets and pending retries. Reclaim only after all applicable protections are released.
 
-The updater atomically writes a durable `current.json` pointer to the desired bundle. The service watches or polls it, builds and verifies the replacement away from request handling, and then swaps its in-memory view. Loading must not depend on a target request.
+In service mode, PostgreSQL is the authority for the desired generation. After the database commits, the updater reconciles the filesystem pointer as derived state. The service polls the committed generation, verifies the matching immutable candidate away from request handling, and then swaps its in-memory view. Loading must not depend on a target request.
 
-Expose the desired ID and the actually loaded ID separately. Preserve a durable last-known-good reference compatible with the detector build for restart recovery. A failed reload keeps the current view.
+Standalone analysis remains database-independent. It can use the local repository pointer, but service processes never treat that pointer alone as a committed activation.
+
+Reconciliation is idempotent. A process uses the durable operation ID to resolve an ambiguous commit acknowledgement. A restart repairs a missing or stale filesystem pointer from the committed generation. Filesystem publication does not run inside a retried database transaction.
+
+Expose the desired generation, the reconciled filesystem publication, and each process's loaded generation separately. Preserve durable prior generations that are compatible with the detector build. A failed reload keeps the current view. On restart, the service can load a protected prior generation when the desired candidate is corrupt or unavailable.
 
 Use a single-writer lock for the snapshot store. Revalidate approvals against the active baseline at activation. An invalid candidate cannot be forced into service. A review-required candidate needs an explicit operator approval bound to its content hash.
 
 Coordinate bundle pruning with pinned-batch admission under section 12.2. Publication of a newer bundle never invalidates an accepted pin. After terminal completion or cancellation, pruning may remove the formerly pinned bundle only if no other retention protection applies.
 
-On update failure, retain the active bundle and report the failure. Startup loads the last-known-good local bundle without downloading data. Rollback reactivates a validated compatible older bundle. Avoid a startup dependency on the upstream repository being available.
+On update failure, retain the loaded bundle and report the failure. Startup loads a committed desired or protected prior bundle without downloading data. Rollback commits a new generation for a validated compatible older bundle. Avoid a startup dependency on the upstream repository being available.
 
 ### 13.3 Defaults for update scheduling
 

@@ -83,12 +83,12 @@ func main() {
 			return datasets.Activation{}, err
 		}
 		return localruntime.ActivateDataset(ctx, resolved, candidateID, approvalHash, action)
-	}, DatasetStatus: func(_ context.Context, configPath string) (datasets.RepositoryStatus, error) {
+	}, DatasetStatus: func(ctx context.Context, configPath string) (datasets.RepositoryStatus, error) {
 		resolved, err := resolveConfiguration(configuration, configPath)
 		if err != nil {
 			return datasets.RepositoryStatus{}, err
 		}
-		return localruntime.DatasetStatus(resolved)
+		return localruntime.DatasetStatus(ctx, resolved)
 	}, DatasetPrune: func(ctx context.Context, configPath, candidateID string) (bool, error) {
 		resolved, err := resolveConfiguration(configuration, configPath)
 		if err != nil {

@@ -95,7 +95,7 @@ func TestRepositoryRejectsConcurrentWriter(t *testing.T) {
 	}
 }
 
-func TestActivateCoordinatedExcludesPruneAndRestoresPointerOnFailure(t *testing.T) {
+func TestActivateCommittedPublishesOnlyAfterCommit(t *testing.T) {
 	t.Parallel()
 
 	repository, err := NewRepository(filepath.Join(t.TempDir(), "bundles"), "build-a")
@@ -113,42 +113,102 @@ func TestActivateCoordinatedExcludesPruneAndRestoresPointerOnFailure(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	coordinating := make(chan struct{})
-	release := make(chan struct{})
-	done := make(chan error, 1)
-	go func() {
-		_, activateErr := repository.ActivateCoordinated(t.Context(), second.CandidateID, second.CandidateHash, "activate", func(_ Manifest, _ []byte, publish func() error) error {
-			close(coordinating)
-			<-release
-			return publish()
-		})
-		done <- activateErr
-	}()
-	<-coordinating
-	if removed, err := repository.Prune(second.CandidateID, func(string) (bool, error) { return false, nil }); err == nil || removed {
-		t.Fatalf("Prune() while activation owns writer lock = %v, %v", removed, err)
+	activation, err := repository.ActivateCommitted(t.Context(), second.CandidateID, second.CandidateHash, "activate", func(proposed Activation, _ Manifest, _ []byte) (Activation, error) {
+		active, activeErr := repository.Active()
+		if activeErr != nil || active == nil || active.BundleID != first.CandidateID {
+			t.Fatalf("Active() before commit = %#v, %v", active, activeErr)
+		}
+		proposed.Generation = 12
+		proposed.At = time.Unix(12, 0).UTC()
+		return proposed, nil
+	})
+	if err != nil {
+		t.Fatalf("ActivateCommitted() error = %v", err)
 	}
-	close(release)
-	if err := <-done; err != nil {
-		t.Fatalf("ActivateCoordinated() error = %v", err)
+	if activation.Generation != 12 || activation.OperationID == "" {
+		t.Fatalf("activation = %#v", activation)
 	}
 	active, err := repository.Active()
-	if err != nil || active == nil || active.BundleID != second.CandidateID {
+	if err != nil || active == nil || active.BundleID != second.CandidateID || active.Generation != 12 {
 		t.Fatalf("Active() = %#v, %v", active, err)
+	}
+	if err := repository.ReconcileCommitted(t.Context(), activation); err != nil {
+		t.Fatalf("ReconcileCommitted(idempotent) error = %v", err)
 	}
 
 	failure := errors.New("durable activation failed")
-	if _, err := repository.ActivateCoordinated(t.Context(), first.CandidateID, first.CandidateHash, "rollback", func(_ Manifest, _ []byte, publish func() error) error {
-		if err := publish(); err != nil {
-			return err
-		}
-		return failure
+	if _, err := repository.ActivateCommitted(t.Context(), first.CandidateID, first.CandidateHash, "rollback", func(Activation, Manifest, []byte) (Activation, error) {
+		return Activation{}, failure
 	}); !errors.Is(err, failure) {
-		t.Fatalf("ActivateCoordinated(failure) error = %v", err)
+		t.Fatalf("ActivateCommitted(failure) error = %v", err)
 	}
 	active, err = repository.Active()
 	if err != nil || active == nil || active.BundleID != second.CandidateID {
-		t.Fatalf("Active() after rollback = %#v, %v", active, err)
+		t.Fatalf("Active() after failed commit = %#v, %v", active, err)
+	}
+
+	activePath := filepath.Join(repository.root, activeFilename)
+	if err := os.Remove(activePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(activePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var committed Activation
+	if _, err := repository.ActivateCommitted(t.Context(), first.CandidateID, first.CandidateHash, "rollback", func(proposed Activation, _ Manifest, _ []byte) (Activation, error) {
+		proposed.Generation = 13
+		proposed.At = time.Unix(13, 0).UTC()
+		committed = proposed
+		return proposed, nil
+	}); err == nil {
+		t.Fatal("ActivateCommitted() error = nil, want publication failure")
+	}
+	if err := os.Remove(activePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ReconcileCommitted(t.Context(), committed); err != nil {
+		t.Fatalf("ReconcileCommitted(after publication failure) error = %v", err)
+	}
+	active, err = repository.Active()
+	if err != nil || active == nil || active.BundleID != first.CandidateID || active.Generation != 13 {
+		t.Fatalf("Active() after reconciliation = %#v, %v", active, err)
+	}
+	higherPointer := Activation{OperationID: "activation-other-database", Generation: 99, BundleID: second.CandidateID, CandidateHash: second.CandidateHash, Action: "activate", At: time.Unix(99, 0).UTC()}
+	if err := repository.publishCommitted(higherPointer, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ReconcileAuthoritative(t.Context(), committed, func(context.Context) (*Activation, error) {
+		copy := committed
+		return &copy, nil
+	}); err != nil {
+		t.Fatalf("ReconcileAuthoritative(restored database) error = %v", err)
+	}
+	active, err = repository.Active()
+	if err != nil || active == nil || active.OperationID != committed.OperationID {
+		t.Fatalf("Active() after authoritative regression = %#v, %v", active, err)
+	}
+	if err := os.WriteFile(activePath, []byte("{corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ReconcileAuthoritative(t.Context(), committed, func(context.Context) (*Activation, error) {
+		copy := committed
+		return &copy, nil
+	}); err != nil {
+		t.Fatalf("ReconcileAuthoritative(corrupt pointer) error = %v", err)
+	}
+	if err := repository.publishCommitted(higherPointer, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ReconcileAuthoritative(t.Context(), committed, func(context.Context) (*Activation, error) {
+		copy := higherPointer
+		return &copy, nil
+	}); err == nil {
+		t.Fatal("ReconcileAuthoritative() accepted an activation that was no longer desired")
+	}
+
+	stale := Activation{OperationID: "activation-stale", Generation: 11, BundleID: first.CandidateID, CandidateHash: first.CandidateHash, Action: "rollback", At: time.Unix(11, 0).UTC()}
+	if err := repository.ReconcileCommitted(t.Context(), stale); err == nil {
+		t.Fatal("ReconcileCommitted() accepted a stale generation")
 	}
 }
 

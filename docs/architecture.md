@@ -72,7 +72,9 @@ Replay-safe job lifecycle transactions acquire the transaction-scoped lifecycle 
 
 The PostgreSQL adapter retries a complete replay-safe transaction after SQLSTATE `40001` or `40P01`. The retry count and delay are bounded, and retry waits use the caller's context. The adapter returns other commit errors without replay. Connection-level commit failures can have an ambiguous result.
 
-Bundle activation invokes a filesystem publication callback and does not use the retry wrapper. A failed publication returns once, so a database retry cannot repeat the filesystem mutation.
+Bundle activation commits an operation ID and an ordered generation under the lifecycle lock. The transaction contains only database work, so PostgreSQL can retry serialization failures without repeating a filesystem mutation. After commit, reconciliation writes the filesystem pointer. If the commit acknowledgement is lost, the caller reads the operation ID before deciding whether activation failed.
+
+Service reloaders read the committed generation from PostgreSQL. They do not authorize a load from the filesystem pointer. A reload verifies the immutable candidate, preserves the current analyzer on failure, and publishes the replacement only after the complete analyzer is ready. Each attempt keeps the analyzer that it captured at its start.
 
 ## Reclassification time and provenance
 

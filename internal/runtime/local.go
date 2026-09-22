@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"slices"
+	"strings"
 
 	"cloudattrib/internal/app"
 	collectdns "cloudattrib/internal/collect/dns"
@@ -156,7 +158,7 @@ func newAnalyzerDetailsWithController(ctx context.Context, configuration config.
 	loaded, loadErr := datasets.LoadSources(ctx, sourceDirectory, detectorBuildID)
 	if loadErr == nil {
 		if activation != nil && loaded.Candidate.Manifest.BundleID != activation.BundleID {
-			_ = repository.RecordLoad(activation.BundleID, "failed", "loaded content identity differs from active pointer")
+			_ = repository.RecordLoad(*activation, "failed", "loaded content identity differs from active pointer")
 			return nil, "", nil, lookupAvailability{}, fmt.Errorf("active bundle content identity differs from its pointer")
 		}
 		bundleID = loaded.Candidate.Manifest.BundleID
@@ -172,13 +174,13 @@ func newAnalyzerDetailsWithController(ctx context.Context, configuration config.
 		}
 		capabilities = append(capabilities[:4], loaded.Candidate.View.Capabilities()...)
 		if activation != nil {
-			if err := repository.RecordLoad(bundleID, "loaded", ""); err != nil {
+			if err := repository.RecordLoad(*activation, "loaded", ""); err != nil {
 				return nil, "", nil, lookupAvailability{}, fmt.Errorf("record active bundle load: %w", err)
 			}
 		}
 	} else if !errors.Is(loadErr, datasets.ErrNoSources) {
 		if activation != nil {
-			_ = repository.RecordLoad(activation.BundleID, "failed", loadErr.Error())
+			_ = repository.RecordLoad(*activation, "failed", loadErr.Error())
 		}
 		return nil, "", nil, lookupAvailability{}, fmt.Errorf("load local attribution sources: %w", loadErr)
 	}
@@ -211,4 +213,31 @@ func newAnalyzerDetailsWithController(ctx context.Context, configuration config.
 		Controller:        controller,
 		Limits:            configuration.Limits.Target,
 	}), bundleID, manifest, lookupAvailability{prefix: prefixReader != nil, asn: asnReader != nil, data: slices.Clone(capabilities[4:])}, nil
+}
+
+func newAnalyzerDetailsForBundle(ctx context.Context, configuration config.Config, store app.ResultStore, bundleID string) (app.Analyzer, string, []byte, lookupAvailability, error) {
+	controller, err := policy.NewController(
+		configuration.Limits.Target,
+		configuration.Limits.ConcurrentTargets,
+		configuration.Limits.ConcurrentDNS,
+		configuration.Limits.ConcurrentHTTP,
+	)
+	if err != nil {
+		return nil, "", nil, lookupAvailability{}, fmt.Errorf("create execution controller: %w", err)
+	}
+	return newAnalyzerDetailsForBundleWithController(ctx, configuration, store, bundleID, controller)
+}
+
+func newAnalyzerDetailsForBundleWithController(ctx context.Context, configuration config.Config, store app.ResultStore, bundleID string, controller *policy.Controller) (app.Analyzer, string, []byte, lookupAvailability, error) {
+	if bundleID == builtinBundleID {
+		configuration.Data.SourceDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", builtinBundleID, "absent")
+		configuration.Data.BundleDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", builtinBundleID)
+	} else {
+		if !strings.HasPrefix(bundleID, "bundle-sha256-") {
+			return nil, "", nil, lookupAvailability{}, model.NewError(model.CodeBundleUnavailable, "bundle is unavailable to this detector build", nil)
+		}
+		configuration.Data.SourceDirectory = filepath.Join(configuration.Data.BundleDirectory, "candidates", bundleID, "sources")
+		configuration.Data.BundleDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", bundleID)
+	}
+	return newAnalyzerDetailsWithController(ctx, configuration, store, controller)
 }

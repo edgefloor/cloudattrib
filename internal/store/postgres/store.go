@@ -19,6 +19,7 @@ import (
 
 	"cloudattrib/internal/app"
 	"cloudattrib/internal/ctlog"
+	"cloudattrib/internal/datasets"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/observability"
@@ -34,8 +35,9 @@ type Store struct {
 }
 
 type transactionHooks struct {
-	beforeLifecycleLock func(string)
-	afterLifecycleLock  func(string)
+	beforeLifecycleLock   func(string)
+	afterLifecycleLock    func(string)
+	afterActivationCommit func() error
 }
 
 type workRequest struct {
@@ -79,7 +81,7 @@ func (s *Store) Ping(ctx context.Context) error {
 func (s *Store) OperationalMetrics(ctx context.Context) (observability.Snapshot, error) {
 	var snapshot observability.Snapshot
 	err := s.pool.QueryRow(ctx, `WITH active AS (
-		SELECT manifest FROM dataset_bundles WHERE bundle_id=(SELECT bundle_id FROM bundle_activations ORDER BY activation_order DESC LIMIT 1)
+		SELECT manifest FROM dataset_bundles WHERE bundle_id=(SELECT bundle_id FROM bundle_activation_generations ORDER BY generation DESC LIMIT 1)
 	) SELECT
 		reserved_targets,
 		maximum_targets,
@@ -90,7 +92,7 @@ func (s *Store) OperationalMetrics(ctx context.Context) (observability.Snapshot,
 		COALESCE((SELECT GREATEST(EXTRACT(EPOCH FROM clock_timestamp()-max(tree_timestamp)),0) FROM ct_checkpoints WHERE tree_timestamp IS NOT NULL),0),
 		COALESCE((SELECT count(*) FROM active, jsonb_array_elements(COALESCE(manifest->'sources','[]'::jsonb)) source WHERE source->>'status'<>'complete'),0),
 		COALESCE((SELECT GREATEST(EXTRACT(EPOCH FROM clock_timestamp()-min((source->>'published_at')::timestamptz)),0) FROM active, jsonb_array_elements(COALESCE(manifest->'sources','[]'::jsonb)) source WHERE source ? 'published_at'),0),
-		COALESCE((SELECT bundle_id FROM bundle_activations ORDER BY activation_order DESC LIMIT 1),'')
+		COALESCE((SELECT bundle_id FROM bundle_activation_generations ORDER BY generation DESC LIMIT 1),'')
 	FROM queue_capacity WHERE singleton=true`).Scan(
 		&snapshot.ReservedTargets,
 		&snapshot.MaximumTargets,
@@ -126,45 +128,130 @@ func (s *Store) RegisterBundle(ctx context.Context, bundleID string, manifest []
 	return nil
 }
 
-// ActivateBundle serializes durable bundle admission with pruning and invokes
-// filesystem publication before the activation transaction commits.
+// ActivateBundle commits a generated activation operation before invoking the
+// derived-state publication callback. New callers should use CommitBundleActivation
+// when they need the committed generation for reconciliation and status.
 func (s *Store) ActivateBundle(ctx context.Context, bundleID string, manifest []byte, compatible bool, publish func() error) error {
 	if bundleID == "" || !json.Valid(manifest) || publish == nil {
 		return model.NewError(model.CodeInvalidOptions, "bundle ID, JSON manifest, and publication callback are required", nil)
 	}
-	tx, err := s.pool.Begin(ctx)
+	operationID, err := newID("activation")
 	if err != nil {
-		return persistence("begin bundle activation", err)
+		return fmt.Errorf("create activation operation ID: %w", err)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if err := s.lockLifecycle(ctx, tx, "bundle activation"); err != nil {
+	digest := sha256.Sum256(manifest)
+	activation := datasets.Activation{
+		OperationID: operationID, BundleID: bundleID, CandidateHash: "sha256:" + hex.EncodeToString(digest[:]), Action: "activate",
+	}
+	if _, err := s.CommitBundleActivation(ctx, activation, manifest, compatible); err != nil {
 		return err
 	}
-	result, err := tx.Exec(ctx, `INSERT INTO dataset_bundles(bundle_id,manifest,compatible,available) VALUES($1,$2,$3,true)
-		ON CONFLICT (bundle_id) DO UPDATE SET available=true
-		WHERE dataset_bundles.manifest=EXCLUDED.manifest AND dataset_bundles.compatible=EXCLUDED.compatible`, bundleID, manifest, compatible)
-	if err != nil {
-		return persistence("register bundle activation", err)
-	}
-	if result.RowsAffected() != 1 {
-		return model.NewError(model.CodeIdempotencyConflict, "bundle ID is already registered with different immutable content", nil)
-	}
 	if err := publish(); err != nil {
-		return fmt.Errorf("publish bundle activation: %w", err)
-	}
-	result, err = tx.Exec(ctx, `INSERT INTO bundle_activations(bundle_id)
-		SELECT bundle_id FROM dataset_bundles WHERE bundle_id=$1 AND available
-		ON CONFLICT (bundle_id) DO UPDATE SET activation_order=nextval('bundle_activation_order'),activated_at=clock_timestamp()`, bundleID)
-	if err != nil {
-		return persistence("record bundle activation", err)
-	}
-	if result.RowsAffected() != 1 {
-		return model.NewError(model.CodeBundleUnavailable, "bundle is unavailable", nil)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return persistence("commit bundle activation", err)
+		return fmt.Errorf("publish committed bundle activation: %w", err)
 	}
 	return nil
+}
+
+// CommitBundleActivation durably records one immutable activation operation.
+// It resolves an ambiguous commit acknowledgement by reading the operation ID.
+func (s *Store) CommitBundleActivation(ctx context.Context, activation datasets.Activation, manifest []byte, compatible bool) (datasets.Activation, error) {
+	if activation.OperationID == "" || activation.BundleID == "" || activation.CandidateHash == "" || activation.Action == "" || !json.Valid(manifest) {
+		return datasets.Activation{}, model.NewError(model.CodeInvalidOptions, "activation identity, bundle, hash, action, and JSON manifest are required", nil)
+	}
+	digest := sha256.Sum256(manifest)
+	if activation.CandidateHash != "sha256:"+hex.EncodeToString(digest[:]) {
+		return datasets.Activation{}, model.NewError(model.CodeInvalidOptions, "activation hash does not match the manifest", nil)
+	}
+	var committed datasets.Activation
+	err := s.replaySafeTransaction(ctx, "bundle activation", pgx.TxOptions{}, func(tx pgx.Tx) error {
+		committed = datasets.Activation{}
+		if err := s.lockLifecycle(ctx, tx, "bundle activation"); err != nil {
+			return err
+		}
+		result, err := tx.Exec(ctx, `INSERT INTO dataset_bundles(bundle_id,manifest,compatible,available) VALUES($1,$2,$3,true)
+			ON CONFLICT (bundle_id) DO UPDATE SET available=true
+			WHERE dataset_bundles.manifest=EXCLUDED.manifest AND dataset_bundles.compatible=EXCLUDED.compatible`, activation.BundleID, manifest, compatible)
+		if err != nil {
+			return persistence("register bundle activation", err)
+		}
+		if result.RowsAffected() != 1 {
+			return model.NewError(model.CodeIdempotencyConflict, "bundle ID is already registered with different immutable content", nil)
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO bundle_activation_generations(operation_id,bundle_id,candidate_hash,action)
+			SELECT $1,bundle_id,$3,$4 FROM dataset_bundles WHERE bundle_id=$2 AND available
+			ON CONFLICT (operation_id) DO NOTHING`, activation.OperationID, activation.BundleID, activation.CandidateHash, activation.Action); err != nil {
+			return persistence("record bundle activation generation", err)
+		}
+		loaded, err := loadBundleActivation(ctx, tx.QueryRow(ctx, `SELECT operation_id,generation,bundle_id,candidate_hash,action,activated_at
+			FROM bundle_activation_generations WHERE operation_id=$1`, activation.OperationID))
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return model.NewError(model.CodeBundleUnavailable, "bundle is unavailable", nil)
+			}
+			return persistence("load bundle activation generation", err)
+		}
+		if !sameActivationOperation(loaded, activation) {
+			return model.NewError(model.CodeIdempotencyConflict, "activation operation ID was used for different content", nil)
+		}
+		committed = loaded
+		return nil
+	})
+	if err == nil && s.transactionHooks != nil && s.transactionHooks.afterActivationCommit != nil {
+		err = s.transactionHooks.afterActivationCommit()
+	}
+	if err == nil {
+		return committed, nil
+	}
+	resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	resolved, resolveErr := s.committedBundleActivation(resolveCtx, activation.OperationID, manifest, compatible)
+	if resolveErr == nil && resolved != nil && sameActivationOperation(*resolved, activation) {
+		return *resolved, nil
+	}
+	return datasets.Activation{}, err
+}
+
+func (s *Store) committedBundleActivation(ctx context.Context, operationID string, manifest []byte, compatible bool) (*datasets.Activation, error) {
+	activation, err := loadBundleActivation(ctx, s.pool.QueryRow(ctx, `SELECT activation.operation_id,activation.generation,activation.bundle_id,activation.candidate_hash,activation.action,activation.activated_at
+		FROM bundle_activation_generations activation
+		JOIN dataset_bundles bundle ON bundle.bundle_id=activation.bundle_id
+		WHERE activation.operation_id=$1 AND bundle.manifest=$2 AND bundle.compatible=$3`, operationID, manifest, compatible))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, persistence("resolve committed bundle activation", err)
+	}
+	return &activation, nil
+}
+
+// BundleActivation loads a durable activation by operation identity.
+func (s *Store) BundleActivation(ctx context.Context, operationID string) (*datasets.Activation, error) {
+	if operationID == "" {
+		return nil, model.NewError(model.CodeInvalidOptions, "activation operation ID is required", nil)
+	}
+	activation, err := loadBundleActivation(ctx, s.pool.QueryRow(ctx, `SELECT operation_id,generation,bundle_id,candidate_hash,action,activated_at
+		FROM bundle_activation_generations WHERE operation_id=$1`, operationID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, persistence("load bundle activation", err)
+	}
+	return &activation, nil
+}
+
+// DesiredBundle returns the newest committed service activation generation.
+func (s *Store) DesiredBundle(ctx context.Context) (*datasets.Activation, error) {
+	activation, err := loadBundleActivation(ctx, s.pool.QueryRow(ctx, `SELECT operation_id,generation,bundle_id,candidate_hash,action,activated_at
+		FROM bundle_activation_generations ORDER BY generation DESC LIMIT 1`))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, persistence("load desired bundle", err)
+	}
+	return &activation, nil
 }
 
 // Submit atomically admits a job, reserves capacity, and creates its bundle pin.
@@ -683,7 +770,10 @@ func (s *Store) WithBundlePruneLock(ctx context.Context, bundleID string, action
 			return err
 		}
 		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bundle_pins WHERE bundle_id=$1) OR EXISTS(
-			SELECT 1 FROM (SELECT bundle_id FROM bundle_activations ORDER BY activation_order DESC LIMIT 3) protected WHERE bundle_id=$1)`, bundleID).Scan(&protected); err != nil {
+			SELECT 1 FROM (
+				SELECT bundle_id,max(generation) AS latest_generation FROM bundle_activation_generations
+				GROUP BY bundle_id ORDER BY latest_generation DESC LIMIT 3
+			) protected WHERE bundle_id=$1)`, bundleID).Scan(&protected); err != nil {
 			return persistence("check bundle pruning pins", err)
 		}
 		if !protected {
@@ -703,18 +793,38 @@ func (s *Store) WithBundlePruneLock(ctx context.Context, bundleID string, action
 	return action(protected)
 }
 
-// RecordBundleActivation durably orders active and rollback-protected bundles.
+// RecordBundleActivation records a legacy generation for callers without a
+// manifest-bound activation identity. Service activation uses CommitBundleActivation.
 func (s *Store) RecordBundleActivation(ctx context.Context, bundleID string) error {
-	result, err := s.pool.Exec(ctx, `INSERT INTO bundle_activations(bundle_id)
-		SELECT bundle_id FROM dataset_bundles WHERE bundle_id=$1 AND available
-		ON CONFLICT (bundle_id) DO UPDATE SET activation_order=nextval('bundle_activation_order'),activated_at=clock_timestamp()`, bundleID)
+	operationID, err := newID("legacy-activation")
 	if err != nil {
-		return persistence("record bundle activation", err)
+		return fmt.Errorf("create legacy activation operation ID: %w", err)
 	}
-	if result.RowsAffected() != 1 {
-		return model.NewError(model.CodeBundleUnavailable, "bundle is unavailable", nil)
+	err = s.replaySafeTransaction(ctx, "legacy bundle activation", pgx.TxOptions{}, func(tx pgx.Tx) error {
+		if err := s.lockLifecycle(ctx, tx, "legacy bundle activation"); err != nil {
+			return err
+		}
+		result, err := tx.Exec(ctx, `INSERT INTO bundle_activation_generations(operation_id,bundle_id,candidate_hash,action)
+			SELECT $1,bundle_id,'','legacy' FROM dataset_bundles WHERE bundle_id=$2 AND available
+			ON CONFLICT (operation_id) DO NOTHING`, operationID, bundleID)
+		if err != nil {
+			return persistence("record legacy bundle activation", err)
+		}
+		if result.RowsAffected() != 1 {
+			return model.NewError(model.CodeBundleUnavailable, "bundle is unavailable", nil)
+		}
+		return nil
+	})
+	if err == nil {
+		return nil
 	}
-	return nil
+	resolveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	resolved, resolveErr := s.BundleActivation(resolveCtx, operationID)
+	if resolveErr == nil && resolved != nil && resolved.BundleID == bundleID {
+		return nil
+	}
+	return err
 }
 
 // ProtectedBundles returns the active bundle and prior rollback generations.
@@ -722,7 +832,10 @@ func (s *Store) ProtectedBundles(ctx context.Context, limit int) ([]string, erro
 	if limit < 1 {
 		return nil, model.NewError(model.CodeInvalidOptions, "protected bundle limit must be positive", nil)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT bundle_id FROM bundle_activations ORDER BY activation_order DESC LIMIT $1`, limit)
+	rows, err := s.pool.Query(ctx, `SELECT bundle_id FROM (
+		SELECT bundle_id,max(generation) AS latest_generation FROM bundle_activation_generations
+		GROUP BY bundle_id ORDER BY latest_generation DESC LIMIT $1
+	) protected ORDER BY latest_generation DESC`, limit)
 	if err != nil {
 		return nil, persistence("load protected bundles", err)
 	}
@@ -739,6 +852,33 @@ func (s *Store) ProtectedBundles(ctx context.Context, limit int) ([]string, erro
 		return nil, persistence("iterate protected bundles", err)
 	}
 	return bundles, nil
+}
+
+// ActivationHistory returns committed generations newest first.
+func (s *Store) ActivationHistory(ctx context.Context, limit int) ([]datasets.Activation, error) {
+	if limit < 1 {
+		return nil, model.NewError(model.CodeInvalidOptions, "activation history limit must be positive", nil)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT operation_id,generation,bundle_id,candidate_hash,action,activated_at FROM (
+		SELECT DISTINCT ON (bundle_id) operation_id,generation,bundle_id,candidate_hash,action,activated_at
+		FROM bundle_activation_generations ORDER BY bundle_id,generation DESC
+	) latest_by_bundle ORDER BY generation DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, persistence("load bundle activation history", err)
+	}
+	defer rows.Close()
+	history := make([]datasets.Activation, 0, limit)
+	for rows.Next() {
+		activation, scanErr := loadBundleActivation(ctx, rows)
+		if scanErr != nil {
+			return nil, persistence("scan bundle activation history", scanErr)
+		}
+		history = append(history, activation)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, persistence("iterate bundle activation history", err)
+	}
+	return history, nil
 }
 
 // Import atomically adds normalized CT records to the local index.
@@ -1014,6 +1154,30 @@ func decodeWorkRequest(encoded []byte, analyze *model.AnalyzeRequest, reclassify
 	}
 	*reclassify = nil
 	return nil
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func loadBundleActivation(_ context.Context, row rowScanner) (datasets.Activation, error) {
+	var activation datasets.Activation
+	err := row.Scan(
+		&activation.OperationID,
+		&activation.Generation,
+		&activation.BundleID,
+		&activation.CandidateHash,
+		&activation.Action,
+		&activation.At,
+	)
+	return activation, err
+}
+
+func sameActivationOperation(left, right datasets.Activation) bool {
+	return left.OperationID == right.OperationID &&
+		left.BundleID == right.BundleID &&
+		left.CandidateHash == right.CandidateHash &&
+		left.Action == right.Action
 }
 
 func newID(prefix string) (string, error) {

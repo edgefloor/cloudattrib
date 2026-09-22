@@ -2,6 +2,7 @@ package datasets
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -52,8 +53,10 @@ type ValidationReport struct {
 	ValidatedAt    time.Time      `json:"validated_at"`
 }
 
-// Activation records a desired-bundle publication or rollback.
+// Activation identifies one standalone or committed bundle generation.
 type Activation struct {
+	OperationID   string    `json:"operation_id,omitempty"`
+	Generation    int64     `json:"generation,omitempty"`
 	BundleID      string    `json:"bundle_id"`
 	CandidateHash string    `json:"candidate_hash"`
 	Action        string    `json:"action"`
@@ -62,6 +65,7 @@ type Activation struct {
 
 // RepositoryStatus is the operator-visible bundle state.
 type RepositoryStatus struct {
+	Desired    *Activation   `json:"desired,omitempty"`
 	Active     *Activation   `json:"active,omitempty"`
 	Candidates []string      `json:"candidates"`
 	Loads      []ProcessLoad `json:"process_loads"`
@@ -69,11 +73,13 @@ type RepositoryStatus struct {
 
 // ProcessLoad makes desired publication and successful process loading distinct.
 type ProcessLoad struct {
-	BundleID  string    `json:"bundle_id"`
-	ProcessID int       `json:"process_id"`
-	Status    string    `json:"status"`
-	Reason    string    `json:"reason,omitempty"`
-	At        time.Time `json:"at"`
+	OperationID string    `json:"operation_id,omitempty"`
+	Generation  int64     `json:"generation,omitempty"`
+	BundleID    string    `json:"bundle_id"`
+	ProcessID   int       `json:"process_id"`
+	Status      string    `json:"status"`
+	Reason      string    `json:"reason,omitempty"`
+	At          time.Time `json:"at"`
 }
 
 // Repository owns same-filesystem candidate publication and activation pointers.
@@ -192,20 +198,29 @@ func (r *Repository) Validate(ctx context.Context, candidateID string) (Validati
 
 // Activate atomically publishes a reviewed candidate as the desired bundle.
 func (r *Repository) Activate(ctx context.Context, candidateID, approvalHash, action string) (Activation, error) {
-	return r.ActivateCoordinated(ctx, candidateID, approvalHash, action, func(_ Manifest, _ []byte, publish func() error) error {
-		return publish()
+	return r.ActivateCommitted(ctx, candidateID, approvalHash, action, func(proposed Activation, _ Manifest, _ []byte) (Activation, error) {
+		active, err := r.Active()
+		if err != nil {
+			return Activation{}, err
+		}
+		proposed.Generation = 1
+		if active != nil && active.Generation >= proposed.Generation {
+			proposed.Generation = active.Generation + 1
+		}
+		proposed.At = r.now().UTC()
+		return proposed, nil
 	})
 }
 
-// ActivateCoordinated holds the repository writer lock while durable admission
-// and filesystem publication are coordinated in one lock order.
-func (r *Repository) ActivateCoordinated(
+// ActivateCommitted validates a candidate, commits its durable activation, and
+// only then publishes the filesystem pointer as derived state.
+func (r *Repository) ActivateCommitted(
 	ctx context.Context,
 	candidateID, approvalHash, action string,
-	coordinate func(Manifest, []byte, func() error) error,
+	commit func(Activation, Manifest, []byte) (Activation, error),
 ) (Activation, error) {
-	if coordinate == nil {
-		return Activation{}, fmt.Errorf("activation coordinator is required")
+	if commit == nil {
+		return Activation{}, fmt.Errorf("activation commit is required")
 	}
 	var activation Activation
 	err := r.withWriterLock(func() error {
@@ -223,57 +238,140 @@ func (r *Repository) ActivateCoordinated(
 		if err != nil {
 			return err
 		}
-		activation = Activation{BundleID: candidateID, CandidateHash: report.CandidateHash, Action: action, At: r.now().UTC()}
-		encoded, err := json.Marshal(activation)
+		proposed, err := NewActivationProposal(candidateID, report.CandidateHash, action)
 		if err != nil {
 			return err
 		}
-		activePath := filepath.Join(r.root, activeFilename)
-		previous, previousErr := os.ReadFile(activePath)
-		if previousErr != nil && !errors.Is(previousErr, os.ErrNotExist) {
-			return previousErr
-		}
-		published := false
-		publish := func() error {
-			if published {
-				return fmt.Errorf("activation was published more than once")
-			}
-			if err := atomicWrite(activePath, append(encoded, '\n'), 0o640); err != nil {
-				return err
-			}
-			published = true
-			if err := appendAudit(filepath.Join(r.root, "activation-audit.jsonl"), encoded); err != nil {
-				return err
-			}
-			return nil
-		}
-		if err := coordinate(manifest, manifestBytes, publish); err != nil {
-			if published {
-				var restoreErr error
-				if previousErr == nil {
-					restoreErr = atomicWrite(activePath, previous, 0o640)
-				} else {
-					if removeErr := os.Remove(activePath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-						restoreErr = removeErr
-					} else {
-						restoreErr = syncDirectory(r.root)
-					}
-				}
-				if restoreErr != nil {
-					return fmt.Errorf("%w; restore active pointer: %v", err, restoreErr)
-				}
-			}
+		committed, err := commit(proposed, manifest, manifestBytes)
+		if err != nil {
 			return err
 		}
-		if !published {
-			return fmt.Errorf("activation coordinator did not publish the candidate")
+		if committed.OperationID != proposed.OperationID || committed.BundleID != proposed.BundleID || committed.CandidateHash != proposed.CandidateHash || committed.Action != proposed.Action || committed.Generation < 1 || committed.At.IsZero() {
+			return fmt.Errorf("committed activation identity is invalid")
 		}
+		if err := r.publishCommitted(committed, true); err != nil {
+			return err
+		}
+		activation = committed
 		return nil
 	})
 	return activation, err
 }
 
-// Active returns the desired bundle publication, if one exists.
+// ReconcileCommitted converges the filesystem pointer on an already committed
+// activation. It is safe to call repeatedly after startup or publication errors.
+func (r *Repository) ReconcileCommitted(ctx context.Context, activation Activation) error {
+	return r.withWriterLock(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := validCommittedActivation(activation); err != nil {
+			return err
+		}
+		report, err := r.Validate(ctx, activation.BundleID)
+		if err != nil {
+			return err
+		}
+		if report.CandidateHash != activation.CandidateHash {
+			return fmt.Errorf("committed activation hash differs from the candidate")
+		}
+		return r.publishCommitted(activation, false)
+	})
+}
+
+// ReconcileAuthoritative confirms the database authority while holding the
+// repository writer lock, then replaces any stale derived pointer.
+func (r *Repository) ReconcileAuthoritative(ctx context.Context, activation Activation, desired func(context.Context) (*Activation, error)) error {
+	if desired == nil {
+		return fmt.Errorf("desired activation reader is required")
+	}
+	return r.withWriterLock(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := validCommittedActivation(activation); err != nil {
+			return err
+		}
+		report, err := r.Validate(ctx, activation.BundleID)
+		if err != nil {
+			return err
+		}
+		if report.CandidateHash != activation.CandidateHash {
+			return fmt.Errorf("committed activation hash differs from the candidate")
+		}
+		current, err := desired(ctx)
+		if err != nil {
+			return err
+		}
+		if current == nil || current.OperationID != activation.OperationID || current.Generation != activation.Generation {
+			return fmt.Errorf("committed activation is no longer desired")
+		}
+		return r.publishCommitted(activation, true)
+	})
+}
+
+func (r *Repository) publishCommitted(activation Activation, allowRegression bool) error {
+	if err := validCommittedActivation(activation); err != nil {
+		return err
+	}
+	active, err := r.Active()
+	if err != nil {
+		if !allowRegression {
+			return err
+		}
+		active = nil
+	}
+	if active != nil {
+		if active.Generation > activation.Generation && !allowRegression {
+			return fmt.Errorf("committed activation generation is stale")
+		}
+		if active.Generation == activation.Generation {
+			if active.OperationID == activation.OperationID && active.BundleID == activation.BundleID {
+				return nil
+			}
+			if !allowRegression {
+				return fmt.Errorf("committed activation generation conflicts with the published pointer")
+			}
+		}
+	}
+	encoded, err := json.Marshal(activation)
+	if err != nil {
+		return err
+	}
+	if err := atomicWrite(filepath.Join(r.root, activeFilename), append(encoded, '\n'), 0o640); err != nil {
+		return err
+	}
+	return appendAudit(filepath.Join(r.root, "activation-audit.jsonl"), encoded)
+}
+
+func validCommittedActivation(activation Activation) error {
+	if activation.OperationID == "" || activation.Generation < 1 || activation.CandidateHash == "" || activation.Action == "" || activation.At.IsZero() || validCandidateID(activation.BundleID) != nil {
+		return fmt.Errorf("committed activation is incomplete")
+	}
+	return nil
+}
+
+// NewActivationProposal creates an identity that a durable authority can commit.
+func NewActivationProposal(bundleID, candidateHash, action string) (Activation, error) {
+	if bundleID == "" || candidateHash == "" || action == "" {
+		return Activation{}, fmt.Errorf("activation bundle, hash, and action are required")
+	}
+	operationID, err := newActivationOperationID()
+	if err != nil {
+		return Activation{}, err
+	}
+	return Activation{OperationID: operationID, BundleID: bundleID, CandidateHash: candidateHash, Action: action}, nil
+}
+
+func newActivationOperationID() (string, error) {
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		return "", fmt.Errorf("create activation operation ID: %w", err)
+	}
+	return "activation-" + hex.EncodeToString(value[:]), nil
+}
+
+// Active returns the reconciled filesystem publication, if one exists.
 func (r *Repository) Active() (*Activation, error) {
 	data, err := os.ReadFile(filepath.Join(r.root, activeFilename))
 	if errors.Is(err, os.ErrNotExist) {
@@ -306,7 +404,7 @@ func (r *Repository) Manifest(candidateID string) (Manifest, []byte, error) {
 	return readManifest(filepath.Join(r.candidateDirectory(candidateID), manifestFilename))
 }
 
-// Status lists the desired bundle and immutable candidates.
+// Status lists the reconciled publication, immutable candidates, and process loads.
 func (r *Repository) Status() (RepositoryStatus, error) {
 	active, err := r.Active()
 	if err != nil {
@@ -357,11 +455,14 @@ func (r *Repository) Status() (RepositoryStatus, error) {
 }
 
 // RecordLoad publishes one process's load success or failure after activation.
-func (r *Repository) RecordLoad(bundleID, status, reason string) error {
-	if err := validCandidateID(bundleID); err != nil || (status != "loaded" && status != "failed") {
+func (r *Repository) RecordLoad(activation Activation, status, reason string) error {
+	if activation.BundleID == "" || (status != "loaded" && status != "failed") {
 		return fmt.Errorf("bundle ID and load status are invalid")
 	}
-	record := ProcessLoad{BundleID: bundleID, ProcessID: os.Getpid(), Status: status, Reason: reason, At: r.now().UTC()}
+	record := ProcessLoad{
+		OperationID: activation.OperationID, Generation: activation.Generation, BundleID: activation.BundleID,
+		ProcessID: os.Getpid(), Status: status, Reason: reason, At: r.now().UTC(),
+	}
 	encoded, err := json.Marshal(record)
 	if err != nil {
 		return err

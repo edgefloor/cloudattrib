@@ -36,3 +36,18 @@ func TestCTMigrationContainsRecordAndCheckpointConstraints(t *testing.T) {
 		}
 	}
 }
+
+func TestActivationGenerationMigrationContainsDurableOperationIdentity(t *testing.T) {
+	t.Parallel()
+
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS bundle_activation_generations",
+		"operation_id text PRIMARY KEY",
+		"generation bigint",
+		"UNIQUE (generation)",
+	} {
+		if !strings.Contains(activationGenerationMigration, fragment) {
+			t.Fatalf("activation generation migration does not contain %q", fragment)
+		}
+	}
+}

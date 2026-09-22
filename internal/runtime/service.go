@@ -2,6 +2,8 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,7 +12,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -31,6 +32,114 @@ const (
 	serviceShutdownGrace = 10 * time.Second
 	workerCommitTimeout  = 5 * time.Second
 )
+
+func prepareServiceActivation(ctx context.Context, configuration config.Config, store *postgres.Store, repository *datasets.Repository) (*datasets.Activation, error) {
+	desired, err := store.DesiredBundle(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if desired != nil && desired.CandidateHash != "" {
+		return desired, nil
+	}
+	commit := func(proposed datasets.Activation, _ datasets.Manifest, manifest []byte) (datasets.Activation, error) {
+		return store.CommitBundleActivation(ctx, proposed, manifest, true)
+	}
+	if desired != nil && desired.BundleID != builtinBundleID {
+		report, validateErr := repository.Validate(ctx, desired.BundleID)
+		if validateErr != nil {
+			return nil, fmt.Errorf("migrate legacy service activation: %w", validateErr)
+		}
+		activation, activateErr := repository.ActivateCommitted(ctx, report.CandidateID, report.CandidateHash, "migration", commit)
+		if activateErr != nil {
+			return nil, fmt.Errorf("commit migrated service activation: %w", activateErr)
+		}
+		return &activation, nil
+	}
+	if desired != nil {
+		manifest := []byte(`{"schema_version":1,"bundle_id":"builtin-rules-v1"}`)
+		proposal, proposeErr := datasets.NewActivationProposal(builtinBundleID, manifestDigest(manifest), "migration")
+		if proposeErr != nil {
+			return nil, proposeErr
+		}
+		activation, commitErr := store.CommitBundleActivation(ctx, proposal, manifest, true)
+		return &activation, commitErr
+	}
+
+	report, err := repository.Import(ctx, configuration.Data.SourceDirectory)
+	if errors.Is(err, datasets.ErrNoSources) {
+		manifest := []byte(`{"schema_version":1,"bundle_id":"builtin-rules-v1"}`)
+		proposal, proposeErr := datasets.NewActivationProposal(builtinBundleID, manifestDigest(manifest), "bootstrap")
+		if proposeErr != nil {
+			return nil, proposeErr
+		}
+		activation, commitErr := store.CommitBundleActivation(ctx, proposal, manifest, true)
+		if commitErr != nil {
+			return nil, fmt.Errorf("commit initial built-in bundle: %w", commitErr)
+		}
+		return &activation, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("stage initial service bundle: %w", err)
+	}
+	activation, err := repository.ActivateCommitted(ctx, report.CandidateID, report.CandidateHash, "bootstrap", commit)
+	if err != nil {
+		return nil, fmt.Errorf("commit initial service bundle: %w", err)
+	}
+	return &activation, nil
+}
+
+func loadServiceAnalyzer(
+	ctx context.Context,
+	configuration config.Config,
+	store *postgres.Store,
+	repository *datasets.Repository,
+	desired *datasets.Activation,
+	controller *policy.Controller,
+) (app.Analyzer, string, lookupAvailability, datasets.Activation, error) {
+	history, err := store.ActivationHistory(ctx, 3)
+	if err != nil {
+		return nil, "", lookupAvailability{}, datasets.Activation{}, err
+	}
+	if desired != nil && (len(history) == 0 || history[0].OperationID != desired.OperationID) {
+		history = append([]datasets.Activation{*desired}, history...)
+	}
+	if len(history) == 0 {
+		return nil, "", lookupAvailability{}, datasets.Activation{}, model.NewError(model.CodeBundleUnavailable, "no committed service bundle is available", nil)
+	}
+	var failures []error
+	for index, activation := range history {
+		if index == 0 && activation.BundleID != builtinBundleID {
+			if err := repository.ReconcileAuthoritative(ctx, activation, store.DesiredBundle); err != nil {
+				_ = repository.RecordLoad(activation, "failed", err.Error())
+				failures = append(failures, fmt.Errorf("reconcile desired generation %d: %w", activation.Generation, err))
+				continue
+			}
+		}
+		analyzer, bundleID, _, lookup, loadErr := newAnalyzerDetailsForBundleWithController(ctx, configuration, store, activation.BundleID, controller)
+		if loadErr != nil || bundleID != activation.BundleID {
+			if loadErr == nil {
+				loadErr = fmt.Errorf("loaded bundle identity %q differs from committed bundle %q", bundleID, activation.BundleID)
+			}
+			_ = repository.RecordLoad(activation, "failed", loadErr.Error())
+			failures = append(failures, fmt.Errorf("load generation %d: %w", activation.Generation, loadErr))
+			continue
+		}
+		reason := ""
+		if len(failures) > 0 {
+			reason = "desired generation could not be loaded: " + errors.Join(failures...).Error()
+		}
+		if err := repository.RecordLoad(activation, "loaded", reason); err != nil {
+			return nil, "", lookupAvailability{}, datasets.Activation{}, err
+		}
+		return analyzer, bundleID, lookup, activation, nil
+	}
+	return nil, "", lookupAvailability{}, datasets.Activation{}, fmt.Errorf("load committed service bundle: %w", errors.Join(failures...))
+}
+
+func manifestDigest(manifest []byte) string {
+	digest := sha256.Sum256(manifest)
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
 
 // Serve runs the durable API, worker pool, and lease recovery under one lifecycle.
 func Serve(ctx context.Context, configuration config.Config) error {
@@ -55,48 +164,21 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	if err != nil {
 		return fmt.Errorf("create execution controller: %w", err)
 	}
-	analyzer, activeBundleID, manifest, lookup, err := newAnalyzerDetailsWithController(ctx, configuration, store, controller)
+	repository, err := datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
 	if err != nil {
 		return err
 	}
-	var bootstrap *datasets.ValidationReport
-	var repository *datasets.Repository
-	if activeBundleID != builtinBundleID {
-		repository, err = datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
-		if err != nil {
-			return err
-		}
-		active, activeErr := repository.Active()
-		if activeErr != nil {
-			return fmt.Errorf("read active bundle before service staging: %w", activeErr)
-		}
-		if active == nil {
-			report, importErr := repository.Import(ctx, configuration.Data.SourceDirectory)
-			if importErr != nil {
-				return fmt.Errorf("stage initial service bundle: %w", importErr)
-			}
-			if report.CandidateID != activeBundleID {
-				return fmt.Errorf("staged initial service bundle identity differs from loaded view")
-			}
-			bootstrap = &report
-		}
+	desired, err := prepareServiceActivation(ctx, configuration, store, repository)
+	if err != nil {
+		return err
 	}
-	if bootstrap != nil {
-		if _, err := repository.ActivateCoordinated(ctx, bootstrap.CandidateID, bootstrap.CandidateHash, "bootstrap", func(candidate datasets.Manifest, candidateBytes []byte, publish func() error) error {
-			return store.ActivateBundle(ctx, candidate.BundleID, candidateBytes, true, publish)
-		}); err != nil {
-			return fmt.Errorf("activate initial service bundle: %w", err)
-		}
-	} else {
-		if err := store.RegisterBundle(ctx, activeBundleID, manifest, true); err != nil {
-			return fmt.Errorf("register active bundle: %w", err)
-		}
-		if err := store.RecordBundleActivation(ctx, activeBundleID); err != nil {
-			return fmt.Errorf("record active bundle: %w", err)
-		}
+	analyzer, activeBundleID, lookup, loaded, err := loadServiceAnalyzer(ctx, configuration, store, repository, desired, controller)
+	if err != nil {
+		return err
 	}
 	analyzerFactory := &bundleAnalyzerFactory{
-		configuration: configuration, store: store, active: analyzer, activeBundleID: activeBundleID, activeLookup: lookup,
+		configuration: configuration, store: store, authority: store, repository: repository,
+		active: analyzer, activeBundleID: activeBundleID, activeLookup: lookup, loaded: loaded,
 		controller: controller,
 		analyzers:  map[string]app.Analyzer{activeBundleID: analyzer}, lookup: map[string]lookupAvailability{activeBundleID: lookup},
 	}
@@ -192,15 +274,22 @@ func Serve(ctx context.Context, configuration config.Config) error {
 type bundleAnalyzerFactory struct {
 	configuration  config.Config
 	store          app.ResultStore
+	authority      bundleActivationAuthority
+	repository     *datasets.Repository
 	active         app.Analyzer
 	activeBundleID string
 	activeLookup   lookupAvailability
+	loaded         datasets.Activation
 	mu             sync.Mutex
 	analyzers      map[string]app.Analyzer
 	lookup         map[string]lookupAvailability
 	loads          map[string]*bundleLoad
 	load           func(context.Context, string) (app.Analyzer, lookupAvailability, error)
 	controller     *policy.Controller
+}
+
+type bundleActivationAuthority interface {
+	DesiredBundle(context.Context) (*datasets.Activation, error)
 }
 
 type bundleLoad struct {
@@ -263,25 +352,14 @@ func (f *bundleAnalyzerFactory) AnalyzerForBundle(ctx context.Context, bundleID 
 }
 
 func (f *bundleAnalyzerFactory) loadBundle(ctx context.Context, bundleID string) (app.Analyzer, lookupAvailability, error) {
-	configuration := f.configuration
-	if bundleID == builtinBundleID {
-		configuration.Data.SourceDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", builtinBundleID, "absent")
-		configuration.Data.BundleDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", builtinBundleID)
-	} else {
-		if !strings.HasPrefix(bundleID, "bundle-sha256-") {
-			return nil, lookupAvailability{}, model.NewError(model.CodeBundleUnavailable, "bundle is unavailable to this detector build", nil)
-		}
-		configuration.Data.SourceDirectory = filepath.Join(configuration.Data.BundleDirectory, "candidates", bundleID, "sources")
-		configuration.Data.BundleDirectory = filepath.Join(configuration.Data.BundleDirectory, ".isolated", bundleID)
-	}
 	var analyzer app.Analyzer
 	var loadedBundleID string
 	var lookup lookupAvailability
 	var err error
 	if f.controller == nil {
-		analyzer, loadedBundleID, _, lookup, err = newAnalyzerDetails(ctx, configuration, f.store)
+		analyzer, loadedBundleID, _, lookup, err = newAnalyzerDetailsForBundle(ctx, f.configuration, f.store, bundleID)
 	} else {
-		analyzer, loadedBundleID, _, lookup, err = newAnalyzerDetailsWithController(ctx, configuration, f.store, f.controller)
+		analyzer, loadedBundleID, _, lookup, err = newAnalyzerDetailsForBundleWithController(ctx, f.configuration, f.store, bundleID, f.controller)
 	}
 	if err != nil || loadedBundleID != bundleID {
 		return nil, lookupAvailability{}, model.NewError(model.CodeBundleUnavailable, "bundle is unavailable to this detector build", err)
@@ -347,16 +425,39 @@ func (f *bundleAnalyzerFactory) reloadLoop(ctx context.Context, interval time.Du
 }
 
 func (f *bundleAnalyzerFactory) reloadDesired(ctx context.Context) error {
-	repository, err := datasets.NewRepository(f.configuration.Data.BundleDirectory, detectorBuildID)
-	if err != nil {
-		return err
+	authority := f.authority
+	if authority == nil {
+		var ok bool
+		authority, ok = f.store.(bundleActivationAuthority)
+		if !ok {
+			return model.NewError(model.CodePersistenceUnavailable, "committed bundle activation authority is unavailable", nil)
+		}
 	}
-	activation, err := repository.Active()
+	activation, err := authority.DesiredBundle(ctx)
 	if err != nil || activation == nil {
 		return err
 	}
+	repository := f.repository
+	if repository == nil {
+		repository, err = datasets.NewRepository(f.configuration.Data.BundleDirectory, detectorBuildID)
+		if err != nil {
+			return err
+		}
+	}
+	if activation.BundleID != builtinBundleID {
+		if activation.CandidateHash == "" {
+			return fmt.Errorf("committed bundle activation has no candidate hash")
+		}
+		if err := repository.ReconcileAuthoritative(ctx, *activation, authority.DesiredBundle); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			_ = repository.RecordLoad(*activation, "failed", err.Error())
+			return fmt.Errorf("reconcile committed bundle activation: %w", err)
+		}
+	}
 	f.mu.Lock()
-	if activation.BundleID == f.activeBundleID {
+	if activation.OperationID == f.loaded.OperationID && activation.Generation == f.loaded.Generation {
 		f.mu.Unlock()
 		return nil
 	}
@@ -366,7 +467,7 @@ func (f *bundleAnalyzerFactory) reloadDesired(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		_ = repository.RecordLoad(activation.BundleID, "failed", err.Error())
+		_ = repository.RecordLoad(*activation, "failed", err.Error())
 		return err
 	}
 	if err := ctx.Err(); err != nil {
@@ -376,8 +477,9 @@ func (f *bundleAnalyzerFactory) reloadDesired(ctx context.Context) error {
 	f.active = analyzer
 	f.activeBundleID = activation.BundleID
 	f.activeLookup = f.lookup[activation.BundleID]
+	f.loaded = *activation
 	f.mu.Unlock()
-	return repository.RecordLoad(activation.BundleID, "loaded", "")
+	return repository.RecordLoad(*activation, "loaded", "")
 }
 
 var _ app.Analyzer = (*bundleAnalyzerFactory)(nil)
