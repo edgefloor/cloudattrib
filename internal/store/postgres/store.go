@@ -28,8 +28,14 @@ const lifecycleLockID int64 = 174120260921
 
 // Store is a PostgreSQL implementation of the durable job lifecycle.
 type Store struct {
-	pool *pgxpool.Pool
-	now  func() time.Time
+	pool             *pgxpool.Pool
+	now              func() time.Time
+	transactionHooks *transactionHooks
+}
+
+type transactionHooks struct {
+	beforeLifecycleLock func(string)
+	afterLifecycleLock  func(string)
 }
 
 type workRequest struct {
@@ -131,8 +137,8 @@ func (s *Store) ActivateBundle(ctx context.Context, bundleID string, manifest []
 		return persistence("begin bundle activation", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lifecycleLockID); err != nil {
-		return persistence("lock bundle activation", err)
+	if err := s.lockLifecycle(ctx, tx, "bundle activation"); err != nil {
+		return err
 	}
 	result, err := tx.Exec(ctx, `INSERT INTO dataset_bundles(bundle_id,manifest,compatible,available) VALUES($1,$2,$3,true)
 		ON CONFLICT (bundle_id) DO UPDATE SET available=true
@@ -183,105 +189,107 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 			return jobs.Job{}, model.NewError(model.CodeInvalidOptions, "reclassification requires a report and the pinned batch bundle", nil)
 		}
 	}
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.Serializable})
-	if err != nil {
-		return jobs.Job{}, persistence("begin job admission", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lifecycleLockID); err != nil {
-		return jobs.Job{}, persistence("lock bundle admission", err)
-	}
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))`, request.OperatorID+":"+request.IdempotencyKey); err != nil {
-		return jobs.Job{}, persistence("lock idempotency key", err)
-	}
-	var existingID, existingHash string
-	err = tx.QueryRow(ctx, `SELECT id,payload_hash FROM jobs WHERE operator_id=$1 AND idempotency_key=$2`, request.OperatorID, request.IdempotencyKey).Scan(&existingID, &existingHash)
-	if err == nil {
-		if existingHash != hash {
-			return jobs.Job{}, model.NewError(model.CodeIdempotencyConflict, "idempotency key was used for a different request", nil)
+	var result jobs.Job
+	var existingID string
+	err = s.replaySafeTransaction(ctx, "job admission", pgx.TxOptions{}, func(tx pgx.Tx) error {
+		result = jobs.Job{}
+		existingID = ""
+		if err := s.lockLifecycle(ctx, tx, "job admission"); err != nil {
+			return err
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return jobs.Job{}, persistence("commit idempotent admission", err)
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1::text,0))`, request.OperatorID+":"+request.IdempotencyKey); err != nil {
+			return persistence("lock idempotency key", err)
 		}
-		return s.Job(ctx, existingID)
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return jobs.Job{}, persistence("check idempotency key", err)
-	}
-	if request.BundleID != "" {
-		var compatible bool
-		if err := tx.QueryRow(ctx, `SELECT compatible FROM dataset_bundles WHERE bundle_id=$1 AND available FOR SHARE`, request.BundleID).Scan(&compatible); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return jobs.Job{}, model.NewError(model.CodeBundleUnavailable, "requested bundle is unavailable", nil)
+		var existingHash string
+		err := tx.QueryRow(ctx, `SELECT id,payload_hash FROM jobs WHERE operator_id=$1 AND idempotency_key=$2`, request.OperatorID, request.IdempotencyKey).Scan(&existingID, &existingHash)
+		if err == nil {
+			if existingHash != hash {
+				return model.NewError(model.CodeIdempotencyConflict, "idempotency key was used for a different request", nil)
 			}
-			return jobs.Job{}, persistence("validate requested bundle", err)
+			return nil
 		}
-		if !compatible {
-			return jobs.Job{}, model.NewError(model.CodeBundleIncompatible, "requested bundle is incompatible", nil)
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return persistence("check idempotency key", err)
 		}
-	}
-	capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets+$1 WHERE singleton=true AND reserved_targets+$1<=maximum_targets`, reservations)
+		if request.BundleID != "" {
+			var compatible bool
+			if err := tx.QueryRow(ctx, `SELECT compatible FROM dataset_bundles WHERE bundle_id=$1 AND available FOR SHARE`, request.BundleID).Scan(&compatible); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return model.NewError(model.CodeBundleUnavailable, "requested bundle is unavailable", nil)
+				}
+				return persistence("validate requested bundle", err)
+			}
+			if !compatible {
+				return model.NewError(model.CodeBundleIncompatible, "requested bundle is incompatible", nil)
+			}
+		}
+		capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets+$1 WHERE singleton=true AND reserved_targets+$1<=maximum_targets`, reservations)
+		if err != nil {
+			return persistence("reserve queue capacity", err)
+		}
+		if capacity.RowsAffected() != 1 {
+			return model.NewError(model.CodeQueueCapacityExceeded, "nonterminal target capacity is exhausted", nil)
+		}
+		now := s.now().UTC()
+		jobID, err := newID("job")
+		if err != nil {
+			return fmt.Errorf("create job ID: %w", err)
+		}
+		jobStatus := jobs.JobQueued
+		if reservations == 0 {
+			jobStatus = jobs.JobFailed
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO jobs(id,operator_id,idempotency_key,payload_hash,bundle_id,status,created_at,updated_at) VALUES($1,$2,$3,$4,NULLIF($5,''),$6,$7,$7)`, jobID, request.OperatorID, request.IdempotencyKey, hash, request.BundleID, jobStatus, now); err != nil {
+			return persistence("insert job", err)
+		}
+		result = jobs.Job{ID: jobID, OperatorID: request.OperatorID, IdempotencyKey: request.IdempotencyKey, BundleID: request.BundleID, Status: jobStatus, CreatedAt: now, UpdatedAt: now, Targets: make([]jobs.Target, request.WorkCount())}
+		for index, targetRequest := range request.Targets {
+			targetID, idErr := newID("target")
+			if idErr != nil {
+				return fmt.Errorf("create target ID: %w", idErr)
+			}
+			copied := targetRequest
+			encoded, encodeErr := json.Marshal(workRequest{Analyze: &copied})
+			if encodeErr != nil {
+				return fmt.Errorf("encode target request: %w", encodeErr)
+			}
+			targetStatus, reason := jobs.TargetQueued, ""
+			if validationErrors[index] != nil {
+				targetStatus, reason = jobs.TargetFailed, jobs.ValidationReason(validationErrors[index])
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO job_targets(id,job_id,input_index,request,status,terminal_reason) VALUES($1,$2,$3,$4,$5,NULLIF($6,''))`, targetID, jobID, index, encoded, targetStatus, reason); err != nil {
+				return persistence("insert target", err)
+			}
+			result.Targets[index] = jobs.Target{ID: targetID, Index: index, Request: targetRequest, Status: targetStatus, TerminalReason: reason}
+		}
+		for requestIndex, reclassifyRequest := range request.Reclassifications {
+			index := len(request.Targets) + requestIndex
+			targetID, idErr := newID("target")
+			if idErr != nil {
+				return fmt.Errorf("create target ID: %w", idErr)
+			}
+			copied := reclassifyRequest
+			encoded, encodeErr := json.Marshal(workRequest{Reclassify: &copied})
+			if encodeErr != nil {
+				return fmt.Errorf("encode reclassification request: %w", encodeErr)
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO job_targets(id,job_id,input_index,request,status) VALUES($1,$2,$3,$4,'queued')`, targetID, jobID, index, encoded); err != nil {
+				return persistence("insert reclassification target", err)
+			}
+			result.Targets[index] = jobs.Target{ID: targetID, Index: index, Reclassify: &copied, Status: jobs.TargetQueued}
+		}
+		if request.BundleID != "" && reservations > 0 {
+			if _, err := tx.Exec(ctx, `INSERT INTO bundle_pins(bundle_id,job_id) VALUES($1,$2)`, request.BundleID, jobID); err != nil {
+				return persistence("pin job bundle", err)
+			}
+		}
+		return nil
+	})
 	if err != nil {
-		return jobs.Job{}, persistence("reserve queue capacity", err)
+		return jobs.Job{}, err
 	}
-	if capacity.RowsAffected() != 1 {
-		return jobs.Job{}, model.NewError(model.CodeQueueCapacityExceeded, "nonterminal target capacity is exhausted", nil)
-	}
-	now := s.now().UTC()
-	jobID, err := newID("job")
-	if err != nil {
-		return jobs.Job{}, fmt.Errorf("create job ID: %w", err)
-	}
-	jobStatus := jobs.JobQueued
-	if reservations == 0 {
-		jobStatus = jobs.JobFailed
-	}
-	if _, err := tx.Exec(ctx, `INSERT INTO jobs(id,operator_id,idempotency_key,payload_hash,bundle_id,status,created_at,updated_at) VALUES($1,$2,$3,$4,NULLIF($5,''),$6,$7,$7)`, jobID, request.OperatorID, request.IdempotencyKey, hash, request.BundleID, jobStatus, now); err != nil {
-		return jobs.Job{}, persistence("insert job", err)
-	}
-	result := jobs.Job{ID: jobID, OperatorID: request.OperatorID, IdempotencyKey: request.IdempotencyKey, BundleID: request.BundleID, Status: jobStatus, CreatedAt: now, UpdatedAt: now, Targets: make([]jobs.Target, request.WorkCount())}
-	for index, targetRequest := range request.Targets {
-		targetID, idErr := newID("target")
-		if idErr != nil {
-			return jobs.Job{}, fmt.Errorf("create target ID: %w", idErr)
-		}
-		copied := targetRequest
-		encoded, encodeErr := json.Marshal(workRequest{Analyze: &copied})
-		if encodeErr != nil {
-			return jobs.Job{}, fmt.Errorf("encode target request: %w", encodeErr)
-		}
-		targetStatus, reason := jobs.TargetQueued, ""
-		if validationErrors[index] != nil {
-			targetStatus, reason = jobs.TargetFailed, jobs.ValidationReason(validationErrors[index])
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO job_targets(id,job_id,input_index,request,status,terminal_reason) VALUES($1,$2,$3,$4,$5,NULLIF($6,''))`, targetID, jobID, index, encoded, targetStatus, reason); err != nil {
-			return jobs.Job{}, persistence("insert target", err)
-		}
-		result.Targets[index] = jobs.Target{ID: targetID, Index: index, Request: targetRequest, Status: targetStatus, TerminalReason: reason}
-	}
-	for requestIndex, reclassifyRequest := range request.Reclassifications {
-		index := len(request.Targets) + requestIndex
-		targetID, idErr := newID("target")
-		if idErr != nil {
-			return jobs.Job{}, fmt.Errorf("create target ID: %w", idErr)
-		}
-		copied := reclassifyRequest
-		encoded, encodeErr := json.Marshal(workRequest{Reclassify: &copied})
-		if encodeErr != nil {
-			return jobs.Job{}, fmt.Errorf("encode reclassification request: %w", encodeErr)
-		}
-		if _, err := tx.Exec(ctx, `INSERT INTO job_targets(id,job_id,input_index,request,status) VALUES($1,$2,$3,$4,'queued')`, targetID, jobID, index, encoded); err != nil {
-			return jobs.Job{}, persistence("insert reclassification target", err)
-		}
-		result.Targets[index] = jobs.Target{ID: targetID, Index: index, Reclassify: &copied, Status: jobs.TargetQueued}
-	}
-	if request.BundleID != "" && reservations > 0 {
-		if _, err := tx.Exec(ctx, `INSERT INTO bundle_pins(bundle_id,job_id) VALUES($1,$2)`, request.BundleID, jobID); err != nil {
-			return jobs.Job{}, persistence("pin job bundle", err)
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return jobs.Job{}, persistence("commit job admission", err)
+	if existingID != "" {
+		return s.Job(ctx, existingID)
 	}
 	return result, nil
 }
@@ -333,36 +341,39 @@ func (s *Store) Claim(ctx context.Context, worker string, lease time.Duration) (
 	if worker == "" || lease <= 0 {
 		return jobs.Claim{}, model.NewError(model.CodeInvalidOptions, "worker and positive lease are required", nil)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return jobs.Claim{}, persistence("begin claim", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	var claim jobs.Claim
-	var requestJSON []byte
-	if err := tx.QueryRow(ctx, `SELECT jt.id,j.id,COALESCE(j.bundle_id,''),jt.request,jt.attempts FROM job_targets jt JOIN jobs j ON j.id=jt.job_id WHERE jt.status='queued' AND NOT j.cancel_requested AND (jt.next_attempt_at IS NULL OR jt.next_attempt_at<=clock_timestamp()) ORDER BY j.created_at,jt.input_index FOR UPDATE OF jt SKIP LOCKED LIMIT 1`).Scan(&claim.TargetID, &claim.JobID, &claim.BundleID, &requestJSON, &claim.Attempt); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return jobs.Claim{}, model.NewError(model.CodeCapabilityUnavailable, "no target is ready to claim", nil)
+	err := s.replaySafeTransaction(ctx, "target claim", pgx.TxOptions{}, func(tx pgx.Tx) error {
+		claim = jobs.Claim{}
+		if err := s.lockLifecycle(ctx, tx, "target claim"); err != nil {
+			return err
 		}
-		return jobs.Claim{}, persistence("select claim", err)
-	}
-	if err := decodeWorkRequest(requestJSON, &claim.Request, &claim.Reclassify); err != nil {
-		return jobs.Claim{}, persistence("decode claimed request", err)
-	}
-	claim.Attempt++
-	claim.AttemptToken, err = newID("attempt")
+		var requestJSON []byte
+		if err := tx.QueryRow(ctx, `SELECT jt.id,j.id,COALESCE(j.bundle_id,''),jt.request,jt.attempts FROM job_targets jt JOIN jobs j ON j.id=jt.job_id WHERE jt.status='queued' AND NOT j.cancel_requested AND (jt.next_attempt_at IS NULL OR jt.next_attempt_at<=clock_timestamp()) ORDER BY j.created_at,jt.input_index FOR UPDATE OF j,jt SKIP LOCKED LIMIT 1`).Scan(&claim.TargetID, &claim.JobID, &claim.BundleID, &requestJSON, &claim.Attempt); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return model.NewError(model.CodeCapabilityUnavailable, "no target is ready to claim", nil)
+			}
+			return persistence("select claim", err)
+		}
+		if err := decodeWorkRequest(requestJSON, &claim.Request, &claim.Reclassify); err != nil {
+			return persistence("decode claimed request", err)
+		}
+		claim.Attempt++
+		var err error
+		claim.AttemptToken, err = newID("attempt")
+		if err != nil {
+			return fmt.Errorf("create attempt token: %w", err)
+		}
+		claim.LeaseExpires = s.now().UTC().Add(lease)
+		if _, err := tx.Exec(ctx, `UPDATE job_targets SET status='running',attempts=$2,attempt_token=$3,lease_owner=$4,lease_expires_at=$5 WHERE id=$1`, claim.TargetID, claim.Attempt, claim.AttemptToken, worker, claim.LeaseExpires); err != nil {
+			return persistence("update claim", err)
+		}
+		if _, err := tx.Exec(ctx, `UPDATE jobs SET status='running',updated_at=clock_timestamp() WHERE id=$1`, claim.JobID); err != nil {
+			return persistence("update claimed job", err)
+		}
+		return nil
+	})
 	if err != nil {
-		return jobs.Claim{}, fmt.Errorf("create attempt token: %w", err)
-	}
-	claim.LeaseExpires = s.now().UTC().Add(lease)
-	if _, err := tx.Exec(ctx, `UPDATE job_targets SET status='running',attempts=$2,attempt_token=$3,lease_owner=$4,lease_expires_at=$5 WHERE id=$1`, claim.TargetID, claim.Attempt, claim.AttemptToken, worker, claim.LeaseExpires); err != nil {
-		return jobs.Claim{}, persistence("update claim", err)
-	}
-	if _, err := tx.Exec(ctx, `UPDATE jobs SET status='running',updated_at=clock_timestamp() WHERE id=$1`, claim.JobID); err != nil {
-		return jobs.Claim{}, persistence("update claimed job", err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return jobs.Claim{}, persistence("commit claim", err)
+		return jobs.Claim{}, err
 	}
 	return claim, nil
 }
@@ -396,59 +407,53 @@ func (s *Store) Complete(ctx context.Context, targetID, token string, report mod
 			return model.NewError(model.CodeInvalidOptions, "report references are invalid", err)
 		}
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return persistence("begin completion", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	var jobID, existingReason, existingReportID string
-	var existingStatus jobs.TargetStatus
-	if err := tx.QueryRow(ctx, `SELECT job_id,status,COALESCE(terminal_reason,''),COALESCE(report_id,'') FROM job_targets WHERE id=$1 AND attempt_token=$2 FOR UPDATE`, targetID, token).Scan(&jobID, &existingStatus, &existingReason, &existingReportID); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return model.NewError(model.CodeIdempotencyConflict, "attempt token is stale", nil)
-		}
-		return persistence("lock target completion", err)
-	}
-	if existingStatus != jobs.TargetRunning {
-		matches := existingStatus == status && existingReason == reason && existingReportID == report.ID
-		if matches && report.ID != "" {
-			document, encodeErr := report.CanonicalJSON()
-			if encodeErr != nil {
-				return model.NewError(model.CodeInvalidOptions, "encode repeated report completion", encodeErr)
-			}
-			var existingDocument []byte
-			if err := tx.QueryRow(ctx, `SELECT document FROM reports WHERE id=$1`, report.ID).Scan(&existingDocument); err != nil {
-				return persistence("load repeated report completion", err)
-			}
-			matches = sameJSON(existingDocument, document)
-		}
-		if matches {
-			return nil
-		}
-		return model.NewError(model.CodeIdempotencyConflict, "attempt completion conflicts with the committed result", nil)
-	}
-	if report.ID != "" {
-		if err := saveReport(ctx, tx, report); err != nil {
+	return s.replaySafeTransaction(ctx, "target completion", pgx.TxOptions{}, func(tx pgx.Tx) error {
+		if err := s.lockLifecycle(ctx, tx, "target completion"); err != nil {
 			return err
 		}
-	}
-	if _, err := tx.Exec(ctx, `UPDATE job_targets SET status=$2,terminal_reason=NULLIF($3,''),report_id=NULLIF($4,''),lease_owner=NULL,lease_expires_at=NULL WHERE id=$1`, targetID, status, reason, report.ID); err != nil {
-		return persistence("terminalize target", err)
-	}
-	released, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-1 WHERE singleton=true AND reserved_targets>0`)
-	if err != nil {
-		return persistence("release queue reservation", err)
-	}
-	if released.RowsAffected() != 1 {
-		return persistence("release queue reservation", fmt.Errorf("reservation invariant is inconsistent"))
-	}
-	if err := finalizeJob(ctx, tx, jobID); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return persistence("commit target completion", err)
-	}
-	return nil
+		var jobID, existingReason, existingReportID string
+		var existingStatus jobs.TargetStatus
+		if err := tx.QueryRow(ctx, `SELECT job_id,status,COALESCE(terminal_reason,''),COALESCE(report_id,'') FROM job_targets WHERE id=$1 AND attempt_token=$2 FOR UPDATE`, targetID, token).Scan(&jobID, &existingStatus, &existingReason, &existingReportID); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return model.NewError(model.CodeIdempotencyConflict, "attempt token is stale", nil)
+			}
+			return persistence("lock target completion", err)
+		}
+		if existingStatus != jobs.TargetRunning {
+			matches := existingStatus == status && existingReason == reason && existingReportID == report.ID
+			if matches && report.ID != "" {
+				document, encodeErr := report.CanonicalJSON()
+				if encodeErr != nil {
+					return model.NewError(model.CodeInvalidOptions, "encode repeated report completion", encodeErr)
+				}
+				var existingDocument []byte
+				if err := tx.QueryRow(ctx, `SELECT document FROM reports WHERE id=$1`, report.ID).Scan(&existingDocument); err != nil {
+					return persistence("load repeated report completion", err)
+				}
+				matches = sameJSON(existingDocument, document)
+			}
+			if matches {
+				return nil
+			}
+			return model.NewError(model.CodeIdempotencyConflict, "attempt completion conflicts with the committed result", nil)
+		}
+		if report.ID != "" {
+			if err := saveReport(ctx, tx, report); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(ctx, `UPDATE job_targets SET status=$2,terminal_reason=NULLIF($3,''),report_id=NULLIF($4,''),lease_owner=NULL,lease_expires_at=NULL WHERE id=$1`, targetID, status, reason, report.ID); err != nil {
+			return persistence("terminalize target", err)
+		}
+		released, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-1 WHERE singleton=true AND reserved_targets>0`)
+		if err != nil {
+			return persistence("release queue reservation", err)
+		}
+		if released.RowsAffected() != 1 {
+			return persistence("release queue reservation", fmt.Errorf("reservation invariant is inconsistent"))
+		}
+		return finalizeJob(ctx, tx, jobID)
+	})
 }
 
 // RequestCancel accepts cancellation from any authenticated shared operator.
@@ -456,38 +461,32 @@ func (s *Store) RequestCancel(ctx context.Context, jobID, operatorID string) err
 	if operatorID == "" {
 		return model.NewError(model.CodeInvalidOptions, "cancelling operator is required", nil)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return persistence("begin cancellation", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	result, err := tx.Exec(ctx, `UPDATE jobs SET cancel_requested=true,cancel_requested_by=$2,updated_at=clock_timestamp() WHERE id=$1`, jobID, operatorID)
-	if err != nil {
-		return persistence("request cancellation", err)
-	}
-	if result.RowsAffected() != 1 {
-		return model.NewError(model.CodeInvalidTarget, "job was not found", nil)
-	}
-	var released int
-	if err := tx.QueryRow(ctx, `WITH cancelled AS (UPDATE job_targets SET status='cancelled',terminal_reason='cancelled before claim' WHERE job_id=$1 AND status='queued' RETURNING 1) SELECT count(*) FROM cancelled`, jobID).Scan(&released); err != nil {
-		return persistence("cancel queued targets", err)
-	}
-	if released > 0 {
-		capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-$1 WHERE singleton=true AND reserved_targets >= $1`, released)
+	return s.replaySafeTransaction(ctx, "job cancellation", pgx.TxOptions{}, func(tx pgx.Tx) error {
+		if err := s.lockLifecycle(ctx, tx, "job cancellation"); err != nil {
+			return err
+		}
+		result, err := tx.Exec(ctx, `UPDATE jobs SET cancel_requested=true,cancel_requested_by=$2,updated_at=clock_timestamp() WHERE id=$1`, jobID, operatorID)
 		if err != nil {
-			return persistence("release cancelled reservations", err)
+			return persistence("request cancellation", err)
 		}
-		if capacity.RowsAffected() != 1 {
-			return persistence("release cancelled reservations", fmt.Errorf("reservation invariant is inconsistent"))
+		if result.RowsAffected() != 1 {
+			return model.NewError(model.CodeInvalidTarget, "job was not found", nil)
 		}
-	}
-	if err := finalizeJob(ctx, tx, jobID); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return persistence("commit cancellation", err)
-	}
-	return nil
+		var released int
+		if err := tx.QueryRow(ctx, `WITH cancelled AS (UPDATE job_targets SET status='cancelled',terminal_reason='cancelled before claim' WHERE job_id=$1 AND status='queued' RETURNING 1) SELECT count(*) FROM cancelled`, jobID).Scan(&released); err != nil {
+			return persistence("cancel queued targets", err)
+		}
+		if released > 0 {
+			capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-$1 WHERE singleton=true AND reserved_targets >= $1`, released)
+			if err != nil {
+				return persistence("release cancelled reservations", err)
+			}
+			if capacity.RowsAffected() != 1 {
+				return persistence("release cancelled reservations", fmt.Errorf("reservation invariant is inconsistent"))
+			}
+		}
+		return finalizeJob(ctx, tx, jobID)
+	})
 }
 
 // RecoverExpired requeues or terminalizes expired attempts under one lifecycle lock.
@@ -495,68 +494,62 @@ func (s *Store) RecoverExpired(ctx context.Context, maximumAttempts int) error {
 	if maximumAttempts <= 0 {
 		return model.NewError(model.CodeInvalidOptions, "maximum attempts must be positive", nil)
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return persistence("begin lease recovery", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lifecycleLockID); err != nil {
-		return persistence("lock lease recovery", err)
-	}
-	rows, err := tx.Query(ctx, `SELECT jt.id,jt.job_id,jt.attempts,j.cancel_requested FROM job_targets jt JOIN jobs j ON j.id=jt.job_id WHERE jt.status='running' AND jt.lease_expires_at<=clock_timestamp() FOR UPDATE OF jt`)
-	if err != nil {
-		return persistence("select expired attempts", err)
-	}
-	type expired struct {
-		id, jobID string
-		attempts  int
-		cancelled bool
-	}
-	var expiredTargets []expired
-	for rows.Next() {
-		var item expired
-		if err := rows.Scan(&item.id, &item.jobID, &item.attempts, &item.cancelled); err != nil {
-			rows.Close()
-			return persistence("scan expired attempt", err)
-		}
-		expiredTargets = append(expiredTargets, item)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return persistence("iterate expired attempts", err)
-	}
-	terminalCount := 0
-	affectedJobs := make(map[string]struct{})
-	for _, item := range expiredTargets {
-		status, reason := jobs.TargetQueued, ""
-		if item.cancelled {
-			status, reason, terminalCount = jobs.TargetCancelled, "cancelled after lease expiry", terminalCount+1
-		} else if item.attempts >= maximumAttempts {
-			status, reason, terminalCount = jobs.TargetFailed, "attempt limit exhausted", terminalCount+1
-		}
-		if _, err := tx.Exec(ctx, `UPDATE job_targets SET status=$2,terminal_reason=NULLIF($3,''),attempt_token=NULL,lease_owner=NULL,lease_expires_at=NULL,next_attempt_at=CASE WHEN $2='queued' THEN clock_timestamp() ELSE NULL END WHERE id=$1`, item.id, status, reason); err != nil {
-			return persistence("recover expired attempt", err)
-		}
-		affectedJobs[item.jobID] = struct{}{}
-	}
-	if terminalCount > 0 {
-		capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-$1 WHERE singleton=true AND reserved_targets >= $1`, terminalCount)
-		if err != nil {
-			return persistence("release expired reservations", err)
-		}
-		if capacity.RowsAffected() != 1 {
-			return persistence("release expired reservations", fmt.Errorf("reservation invariant is inconsistent"))
-		}
-	}
-	for jobID := range affectedJobs {
-		if err := finalizeJob(ctx, tx, jobID); err != nil {
+	return s.replaySafeTransaction(ctx, "lease recovery", pgx.TxOptions{}, func(tx pgx.Tx) error {
+		if err := s.lockLifecycle(ctx, tx, "lease recovery"); err != nil {
 			return err
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return persistence("commit lease recovery", err)
-	}
-	return nil
+		rows, err := tx.Query(ctx, `SELECT jt.id,jt.job_id,jt.attempts,j.cancel_requested FROM jobs j JOIN job_targets jt ON jt.job_id=j.id WHERE jt.status='running' AND jt.lease_expires_at<=clock_timestamp() ORDER BY j.created_at,jt.input_index FOR UPDATE OF j,jt`)
+		if err != nil {
+			return persistence("select expired attempts", err)
+		}
+		type expired struct {
+			id, jobID string
+			attempts  int
+			cancelled bool
+		}
+		var expiredTargets []expired
+		for rows.Next() {
+			var item expired
+			if err := rows.Scan(&item.id, &item.jobID, &item.attempts, &item.cancelled); err != nil {
+				rows.Close()
+				return persistence("scan expired attempt", err)
+			}
+			expiredTargets = append(expiredTargets, item)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return persistence("iterate expired attempts", err)
+		}
+		terminalCount := 0
+		affectedJobs := make(map[string]struct{})
+		for _, item := range expiredTargets {
+			status, reason := jobs.TargetQueued, ""
+			if item.cancelled {
+				status, reason, terminalCount = jobs.TargetCancelled, "cancelled after lease expiry", terminalCount+1
+			} else if item.attempts >= maximumAttempts {
+				status, reason, terminalCount = jobs.TargetFailed, "attempt limit exhausted", terminalCount+1
+			}
+			if _, err := tx.Exec(ctx, `UPDATE job_targets SET status=$2,terminal_reason=NULLIF($3,''),attempt_token=NULL,lease_owner=NULL,lease_expires_at=NULL,next_attempt_at=CASE WHEN $2='queued' THEN clock_timestamp() ELSE NULL END WHERE id=$1`, item.id, status, reason); err != nil {
+				return persistence("recover expired attempt", err)
+			}
+			affectedJobs[item.jobID] = struct{}{}
+		}
+		if terminalCount > 0 {
+			capacity, err := tx.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=reserved_targets-$1 WHERE singleton=true AND reserved_targets >= $1`, terminalCount)
+			if err != nil {
+				return persistence("release expired reservations", err)
+			}
+			if capacity.RowsAffected() != 1 {
+				return persistence("release expired reservations", fmt.Errorf("reservation invariant is inconsistent"))
+			}
+		}
+		for jobID := range affectedJobs {
+			if err := finalizeJob(ctx, tx, jobID); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // LoadReport loads one immutable report document.
@@ -681,30 +674,28 @@ func (s *Store) BundlePinned(ctx context.Context, bundleID string) (bool, error)
 
 // WithBundlePruneLock serializes pruning with admission and exposes durable pins.
 func (s *Store) WithBundlePruneLock(ctx context.Context, bundleID string, action func(bool) error) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return persistence("begin bundle pruning", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lifecycleLockID); err != nil {
-		return persistence("lock bundle pruning", err)
-	}
 	var protected bool
-	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bundle_pins WHERE bundle_id=$1) OR EXISTS(
-		SELECT 1 FROM (SELECT bundle_id FROM bundle_activations ORDER BY activation_order DESC LIMIT 3) protected WHERE bundle_id=$1)`, bundleID).Scan(&protected); err != nil {
-		return persistence("check bundle pruning pins", err)
-	}
-	if !protected {
-		result, err := tx.Exec(ctx, `UPDATE dataset_bundles SET available=false WHERE bundle_id=$1 AND available`, bundleID)
-		if err != nil {
-			return persistence("mark bundle unavailable", err)
+	err := s.replaySafeTransaction(ctx, "bundle pruning", pgx.TxOptions{}, func(tx pgx.Tx) error {
+		if err := s.lockLifecycle(ctx, tx, "bundle pruning"); err != nil {
+			return err
 		}
-		if result.RowsAffected() != 1 {
-			return model.NewError(model.CodeBundleUnavailable, "bundle is unavailable", nil)
+		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM bundle_pins WHERE bundle_id=$1) OR EXISTS(
+			SELECT 1 FROM (SELECT bundle_id FROM bundle_activations ORDER BY activation_order DESC LIMIT 3) protected WHERE bundle_id=$1)`, bundleID).Scan(&protected); err != nil {
+			return persistence("check bundle pruning pins", err)
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return persistence("commit bundle pruning", err)
+		if !protected {
+			result, err := tx.Exec(ctx, `UPDATE dataset_bundles SET available=false WHERE bundle_id=$1 AND available`, bundleID)
+			if err != nil {
+				return persistence("mark bundle unavailable", err)
+			}
+			if result.RowsAffected() != 1 {
+				return model.NewError(model.CodeBundleUnavailable, "bundle is unavailable", nil)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 	return action(protected)
 }

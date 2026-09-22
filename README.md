@@ -181,4 +181,10 @@ Run the repository checks before submitting a change:
 make check
 ```
 
-Set `CLOUDATTRIB_POSTGRES_TEST_DSN` to a disposable PostgreSQL database to include the integration tests.
+Ordinary `go test` and `make check` runs skip PostgreSQL integration tests when no test database is configured. To run the required PostgreSQL lifecycle and contention suite, set `CLOUDATTRIB_POSTGRES_TEST_DSN` to a disposable database and run:
+
+```sh
+make test-postgres
+```
+
+`make test-postgres` fails when the variable is unset or the database is unavailable. CI runs this command against a disposable PostgreSQL service.

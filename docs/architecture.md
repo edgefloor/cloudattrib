@@ -58,6 +58,14 @@ Pins cover queued work, running attempts, and pending retries across restarts. A
 
 See SPEC sections [3.4](../SPEC.md#34-execution-order-and-consistency), [12.2](../SPEC.md#122-durable-job-execution), and [13.2](../SPEC.md#132-update-transaction).
 
+## PostgreSQL job transaction protocol
+
+Replay-safe job lifecycle transactions acquire the transaction-scoped lifecycle advisory lock before they lock a job or a target row. Admission, claim, cancellation, completion, lease recovery, and bundle pruning use this order. The lock covers only short database transactions. DNS and HTTP work runs after the claim transaction commits.
+
+The PostgreSQL adapter retries a complete replay-safe transaction after SQLSTATE `40001` or `40P01`. The retry count and delay are bounded, and retry waits use the caller's context. The adapter returns other commit errors without replay. Connection-level commit failures can have an ambiguous result.
+
+Bundle activation invokes a filesystem publication callback and does not use the retry wrapper. A failed publication returns once, so a database retry cannot repeat the filesystem mutation.
+
 ## Reclassification time and provenance
 
 Reclassification creates a new report from retained observations and reusable detector outputs. It selects a compatible bundle and records a new classification time. Collection times and original collection coverage remain unchanged. Reclassification performs no collection.

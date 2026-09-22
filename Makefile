@@ -5,7 +5,7 @@ GOLANGCI_LINT_VERSION := v2.10.1
 GOLANGCI_LINT := $(TOOLS_BIN)/$(GOLANGCI_LINT_VERSION)/golangci-lint
 
 .DEFAULT_GOAL := build
-.PHONY: build run fmt fmt-check vet test race lint-install lint skills-check sbom-check verify check clean
+.PHONY: build run fmt fmt-check vet test test-postgres race lint-install lint skills-check sbom-check verify check clean
 
 build:
 	mkdir -p "$(BIN_DIR)"
@@ -25,6 +25,10 @@ vet:
 
 test:
 	GOCACHE="$(GOCACHE_DIR)" go test ./...
+
+test-postgres:
+	@test -n "$$CLOUDATTRIB_POSTGRES_TEST_DSN" || (echo "CLOUDATTRIB_POSTGRES_TEST_DSN is required" >&2; exit 1)
+	GOCACHE="$(GOCACHE_DIR)" go test ./internal/store/postgres -run '^TestPostgres' -count=1
 
 race:
 	GOCACHE="$(GOCACHE_DIR)" go test -race ./...

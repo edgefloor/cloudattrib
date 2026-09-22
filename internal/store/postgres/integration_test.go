@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"cloudattrib/internal/app"
 	"cloudattrib/internal/ctlog"
@@ -75,21 +77,282 @@ func TestPostgresJobProjectionKeepsReportDocumentsOutOfPolling(t *testing.T) {
 	}
 }
 
-func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
-	dsn := os.Getenv("CLOUDATTRIB_POSTGRES_TEST_DSN")
-	if dsn == "" {
-		t.Skip("CLOUDATTRIB_POSTGRES_TEST_DSN is not set")
+func TestPostgresConcurrentIdempotentAdmission(t *testing.T) {
+	store, ctx := openPostgresTest(t, 32)
+	if err := store.RegisterBundle(ctx, "fixture-bundle", []byte(`{"schema_version":1}`), true); err != nil {
+		t.Fatalf("RegisterBundle() error = %v", err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-	defer cancel()
-	store, err := Open(ctx, dsn, 4)
+
+	request := jobs.SubmitRequest{
+		OperatorID: "operator-a", IdempotencyKey: "same-key", BundleID: "fixture-bundle",
+		Targets: []model.AnalyzeRequest{{Target: "example.com", Kind: model.TargetDomain}},
+	}
+	const submitters = 16
+	start := make(chan struct{})
+	results := make(chan jobs.Job, submitters)
+	errorsFound := make(chan error, submitters)
+	var ready sync.WaitGroup
+	ready.Add(submitters)
+	for range submitters {
+		go func() {
+			ready.Done()
+			<-start
+			job, err := store.Submit(ctx, request)
+			results <- job
+			errorsFound <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	jobID := ""
+	for range submitters {
+		if err := <-errorsFound; err != nil {
+			t.Errorf("concurrent Submit() error = %v (cause: %v)", err, errors.Unwrap(err))
+		}
+		job := <-results
+		if jobID == "" {
+			jobID = job.ID
+		} else if job.ID != "" && job.ID != jobID {
+			t.Errorf("concurrent Submit() job ID = %q, want %q", job.ID, jobID)
+		}
+	}
+
+	var jobsFound, targets, reservations, pins int
+	if err := store.pool.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM jobs),
+		(SELECT count(*) FROM job_targets),
+		(SELECT reserved_targets FROM queue_capacity WHERE singleton=true),
+		(SELECT count(*) FROM bundle_pins)`).Scan(&jobsFound, &targets, &reservations, &pins); err != nil {
+		t.Fatalf("inspect admission state: %v", err)
+	}
+	if jobsFound != 1 || targets != 1 || reservations != 1 || pins != 1 {
+		t.Fatalf("admission state jobs=%d targets=%d reservations=%d pins=%d, want 1 each", jobsFound, targets, reservations, pins)
+	}
+
+	conflict := request
+	conflict.Targets = []model.AnalyzeRequest{{Target: "other.example.com", Kind: model.TargetDomain}}
+	if _, err := store.Submit(ctx, conflict); model.ErrorCodeOf(err) != model.CodeIdempotencyConflict {
+		t.Fatalf("conflicting Submit() error = %v, want idempotency conflict", err)
+	}
+}
+
+func TestPostgresConcurrentDifferentKeyAdmissionConservesCapacity(t *testing.T) {
+	const capacity = 8
+	store, ctx := openPostgresTest(t, capacity)
+	if err := store.RegisterBundle(ctx, "fixture-bundle", []byte(`{"schema_version":1}`), true); err != nil {
+		t.Fatalf("RegisterBundle() error = %v", err)
+	}
+
+	const submitters = 12
+	start := make(chan struct{})
+	errorsFound := make(chan error, submitters)
+	var ready sync.WaitGroup
+	ready.Add(submitters)
+	for index := range submitters {
+		go func() {
+			ready.Done()
+			<-start
+			_, err := store.Submit(ctx, jobs.SubmitRequest{
+				OperatorID: "operator-a", IdempotencyKey: fmt.Sprintf("key-%d", index), BundleID: "fixture-bundle",
+				Targets: []model.AnalyzeRequest{{Target: fmt.Sprintf("target-%d.example.com", index), Kind: model.TargetDomain}},
+			})
+			errorsFound <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	accepted, rejected := 0, 0
+	for range submitters {
+		switch err := <-errorsFound; model.ErrorCodeOf(err) {
+		case "":
+			accepted++
+		case model.CodeQueueCapacityExceeded:
+			rejected++
+		default:
+			t.Errorf("concurrent Submit() error = %v (cause: %v)", err, errors.Unwrap(err))
+		}
+	}
+	if accepted != capacity || rejected != submitters-capacity {
+		t.Fatalf("accepted=%d rejected=%d, want %d and %d", accepted, rejected, capacity, submitters-capacity)
+	}
+	assertLifecycleCounts(t, ctx, store, capacity, capacity)
+}
+
+func TestPostgresClaimAndCancellationUseOneLockProtocol(t *testing.T) {
+	store, ctx := openPostgresTest(t, 2)
+	if err := store.RegisterBundle(ctx, "fixture-bundle", []byte(`{"schema_version":1}`), true); err != nil {
+		t.Fatalf("RegisterBundle() error = %v", err)
+	}
+	job, err := store.Submit(ctx, jobs.SubmitRequest{
+		OperatorID: "operator-a", IdempotencyKey: "claim-cancel", BundleID: "fixture-bundle",
+		Targets: []model.AnalyzeRequest{
+			{Target: "one.example.com", Kind: model.TargetDomain},
+			{Target: "two.example.com", Kind: model.TargetDomain},
+		},
+	})
 	if err != nil {
-		t.Fatalf("Open() error = %v", err)
+		t.Fatalf("Submit() error = %v", err)
 	}
-	t.Cleanup(store.Close)
-	if _, err := store.pool.Exec(ctx, `TRUNCATE ct_records,ct_checkpoints,finding_evidence,findings,evidence,observations,job_targets,reports,bundle_pins,jobs,dataset_bundles RESTART IDENTITY CASCADE; UPDATE queue_capacity SET reserved_targets=0,maximum_targets=4 WHERE singleton=true`); err != nil {
-		t.Fatalf("reset database: %v", err)
+
+	claimLocked := make(chan struct{})
+	releaseClaim := make(chan struct{})
+	cancelAtLock := make(chan struct{})
+	var claimOnce, cancelOnce sync.Once
+	store.transactionHooks = &transactionHooks{
+		beforeLifecycleLock: func(operation string) {
+			if operation == "job cancellation" {
+				cancelOnce.Do(func() { close(cancelAtLock) })
+			}
+		},
+		afterLifecycleLock: func(operation string) {
+			if operation == "target claim" {
+				claimOnce.Do(func() {
+					close(claimLocked)
+					<-releaseClaim
+				})
+			}
+		},
 	}
+	claimResult := make(chan jobs.Claim, 1)
+	claimDone := make(chan error, 1)
+	go func() {
+		claim, claimErr := store.Claim(ctx, "worker", time.Nanosecond)
+		claimResult <- claim
+		claimDone <- claimErr
+	}()
+	<-claimLocked
+	cancelDone := make(chan error, 1)
+	go func() { cancelDone <- store.RequestCancel(ctx, job.ID, "operator-b") }()
+	<-cancelAtLock
+	select {
+	case err := <-cancelDone:
+		t.Fatalf("RequestCancel() returned before claim released lifecycle lock: %v", err)
+	default:
+	}
+	close(releaseClaim)
+	if err := <-claimDone; err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+	claim := <-claimResult
+	if err := <-cancelDone; err != nil {
+		t.Fatalf("RequestCancel() error = %v", err)
+	}
+	store.transactionHooks = nil
+
+	assertLifecycleCounts(t, ctx, store, 1, 1)
+	pinned, err := store.BundlePinned(ctx, "fixture-bundle")
+	if err != nil || !pinned {
+		t.Fatalf("BundlePinned() during running cancellation = %v, %v", pinned, err)
+	}
+	if err := store.RecoverExpired(ctx, 1); err != nil {
+		t.Fatalf("RecoverExpired() error = %v", err)
+	}
+	if err := store.Complete(ctx, claim.TargetID, claim.AttemptToken, model.Report{}, jobs.TargetCompleted, ""); model.ErrorCodeOf(err) != model.CodeIdempotencyConflict {
+		t.Fatalf("stale Complete() error = %v", err)
+	}
+	assertLifecycleCounts(t, ctx, store, 0, 0)
+	loaded, err := store.Job(ctx, job.ID)
+	if err != nil || loaded.Status != jobs.JobCancelled {
+		t.Fatalf("Job() = %#v, %v", loaded, err)
+	}
+}
+
+func TestPostgresSimultaneousCompletionReleasesOneReservation(t *testing.T) {
+	store, ctx := openPostgresTest(t, 1)
+	job, err := store.Submit(ctx, jobs.SubmitRequest{
+		OperatorID: "operator-a", IdempotencyKey: "complete-race",
+		Targets: []model.AnalyzeRequest{{Target: "example.com", Kind: model.TargetDomain}},
+	})
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	claim, err := store.Claim(ctx, "worker", time.Minute)
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	completions := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			completions <- store.Complete(ctx, claim.TargetID, claim.AttemptToken, model.Report{}, jobs.TargetCompleted, "")
+		}()
+	}
+	close(start)
+	for range 2 {
+		if err := <-completions; err != nil {
+			t.Errorf("Complete() error = %v", err)
+		}
+	}
+	assertLifecycleCounts(t, ctx, store, 0, 0)
+	loaded, err := store.Job(ctx, job.ID)
+	if err != nil || loaded.Status != jobs.JobCompleted {
+		t.Fatalf("Job() = %#v, %v", loaded, err)
+	}
+}
+
+func TestPostgresCompletionRecoveryRacePreservesAttemptFence(t *testing.T) {
+	store, ctx := openPostgresTest(t, 1)
+	job, err := store.Submit(ctx, jobs.SubmitRequest{
+		OperatorID: "operator-a", IdempotencyKey: "recovery-race",
+		Targets: []model.AnalyzeRequest{{Target: "example.com", Kind: model.TargetDomain}},
+	})
+	if err != nil {
+		t.Fatalf("Submit() error = %v", err)
+	}
+	store.now = func() time.Time { return time.Now().Add(-time.Minute) }
+	claim, err := store.Claim(ctx, "worker", time.Nanosecond)
+	if err != nil {
+		t.Fatalf("Claim() error = %v", err)
+	}
+
+	start := make(chan struct{})
+	completionDone := make(chan error, 1)
+	recoveryDone := make(chan error, 1)
+	go func() {
+		<-start
+		completionDone <- store.Complete(ctx, claim.TargetID, claim.AttemptToken, model.Report{}, jobs.TargetCompleted, "")
+	}()
+	go func() {
+		<-start
+		recoveryDone <- store.RecoverExpired(ctx, 1)
+	}()
+	close(start)
+	completionErr := <-completionDone
+	if code := model.ErrorCodeOf(completionErr); completionErr != nil && code != model.CodeIdempotencyConflict {
+		t.Fatalf("Complete() error = %v, want success or stale token", completionErr)
+	}
+	if err := <-recoveryDone; err != nil {
+		t.Fatalf("RecoverExpired() error = %v", err)
+	}
+	assertLifecycleCounts(t, ctx, store, 0, 0)
+	loaded, err := store.Job(ctx, job.ID)
+	if err != nil || (loaded.Status != jobs.JobCompleted && loaded.Status != jobs.JobFailed) {
+		t.Fatalf("Job() = %#v, %v", loaded, err)
+	}
+}
+
+func TestPostgresActivationCallbackIsNotRetried(t *testing.T) {
+	store, ctx := openPostgresTest(t, 1)
+	calls := 0
+	err := store.ActivateBundle(ctx, "fixture-bundle", []byte(`{"schema_version":1}`), true, func() error {
+		calls++
+		return &pgconn.PgError{Code: "40001", Message: "serialization failure"}
+	})
+	if err == nil {
+		t.Fatal("ActivateBundle() error = nil, want publication failure")
+	}
+	if calls != 1 {
+		t.Fatalf("publication callback calls = %d, want 1", calls)
+	}
+}
+
+func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
+	store, ctx := openPostgresTest(t, 4)
+	var err error
 	publishStarted := make(chan struct{})
 	releasePublish := make(chan struct{})
 	activationDone := make(chan error, 1)
@@ -301,5 +564,42 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 	var reservations int
 	if err := store.pool.QueryRow(ctx, `SELECT reserved_targets FROM queue_capacity WHERE singleton=true`).Scan(&reservations); err != nil || reservations != 0 {
 		t.Fatalf("reserved targets after invalid row = %d, %v", reservations, err)
+	}
+}
+
+func openPostgresTest(t *testing.T, maximumTargets int) (*Store, context.Context) {
+	t.Helper()
+
+	dsn := os.Getenv("CLOUDATTRIB_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("CLOUDATTRIB_POSTGRES_TEST_DSN is not set")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	t.Cleanup(cancel)
+	store, err := Open(ctx, dsn, 10_000)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	t.Cleanup(store.Close)
+	if _, err := store.pool.Exec(ctx, `TRUNCATE ct_records,ct_checkpoints,finding_evidence,findings,evidence,observations,job_targets,reports,bundle_pins,jobs,dataset_bundles RESTART IDENTITY CASCADE`); err != nil {
+		t.Fatalf("reset database: %v", err)
+	}
+	if _, err := store.pool.Exec(ctx, `UPDATE queue_capacity SET reserved_targets=0,maximum_targets=$1 WHERE singleton=true`, maximumTargets); err != nil {
+		t.Fatalf("reset queue capacity: %v", err)
+	}
+	return store, ctx
+}
+
+func assertLifecycleCounts(t *testing.T, ctx context.Context, store *Store, reservations, pins int) {
+	t.Helper()
+
+	var gotReservations, gotPins int
+	if err := store.pool.QueryRow(ctx, `SELECT
+		(SELECT reserved_targets FROM queue_capacity WHERE singleton=true),
+		(SELECT count(*) FROM bundle_pins)`).Scan(&gotReservations, &gotPins); err != nil {
+		t.Fatalf("inspect lifecycle counts: %v", err)
+	}
+	if gotReservations != reservations || gotPins != pins {
+		t.Fatalf("lifecycle counts reservations=%d pins=%d, want %d and %d", gotReservations, gotPins, reservations, pins)
 	}
 }

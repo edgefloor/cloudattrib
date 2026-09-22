@@ -27,3 +27,35 @@ jobs:
           cache: false
       - name: Run checks
         run: make check
+
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18.0-alpine3.22@sha256:48c8ad3a7284b82be4482a52076d47d879fd6fb084a1cbfccbd551f9331b0e40
+        env:
+          POSTGRES_DB: cloudattrib_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: cloudattrib
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cloudattrib -d cloudattrib_test"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+    env:
+      CLOUDATTRIB_POSTGRES_TEST_DSN: postgres://cloudattrib:postgres@127.0.0.1:5432/cloudattrib_test?sslmode=disable
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@0a12ed9d6a96ab950c8f026ed9f722fe0da7ef32 # v5.0.2
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Run PostgreSQL lifecycle tests
+        run: make test-postgres

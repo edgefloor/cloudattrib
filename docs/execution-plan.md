@@ -67,6 +67,14 @@ make check
 
 `make check` runs formatting, vet, tests, GolangCI-Lint, the SBOM check, race tests, and the build. PostgreSQL integration tests also need `CLOUDATTRIB_POSTGRES_TEST_DSN`.
 
+Run the mandatory PostgreSQL lifecycle and contention suite separately:
+
+```sh
+CLOUDATTRIB_POSTGRES_TEST_DSN='postgres://...' make test-postgres
+```
+
+The command fails if `CLOUDATTRIB_POSTGRES_TEST_DSN` is unset. Ordinary `go test` runs keep the optional skip for local development without PostgreSQL.
+
 For lifecycle, synchronization, cancellation, or worker changes, run the focused race tests before the full check. For documentation-only changes, validate links, examples, and referenced paths.
 
 Record the commands and results. Name any skipped integration test or untested platform.
