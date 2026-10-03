@@ -6,10 +6,12 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
+	"cloudattrib/internal/app"
 	"cloudattrib/internal/model"
 )
 
@@ -287,6 +289,36 @@ func TestLoadSourcesBuildsOfflinePrefixAndASNIndexes(t *testing.T) {
 	records, coverage, err := loaded.ASN.LookupASN(context.Background(), mustAddress(t, "192.0.2.1"), loaded.Candidate.View)
 	if err != nil || len(records) == 0 || coverage.Status != model.CoverageComplete {
 		t.Fatalf("LookupASN() = %#v, %#v, %v", records, coverage, err)
+	}
+}
+
+func TestLoadSourcesKeepsCDNAssociationIdentityAcrossLoads(t *testing.T) {
+	directory := t.TempDir()
+	data := []byte(`{"cdn":{"edge":["192.0.2.0/24"],"other":["192.0.2.0/25"]},"waf":{"edge":["192.0.2.0/24"]}}`)
+	if err := os.WriteFile(filepath.Join(directory, "cdncheck-sources-data.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var previous []model.Association
+	for i := 0; i < 50; i++ {
+		loaded, err := LoadSources(t.Context(), directory, "build-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		analyzer := app.NewService(app.Dependencies{Prefixes: loaded.Prefixes, View: loaded.Candidate.View})
+		result, err := analyzer.LookupIP(t.Context(), model.IPLookupRequest{
+			Address: netip.MustParseAddr("192.0.2.1"), Match: "all",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := result.Associations
+		if len(got) != 3 {
+			t.Fatalf("lookup = %#v", got)
+		}
+		if i > 0 && !reflect.DeepEqual(got, previous) {
+			t.Fatalf("load %d changed associations: %#v vs %#v", i, got, previous)
+		}
+		previous = got
 	}
 }
 

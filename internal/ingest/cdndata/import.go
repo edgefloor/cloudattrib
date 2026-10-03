@@ -2,8 +2,11 @@
 package cdndata
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 
 	"cloudattrib/internal/ingest/cloudranges"
@@ -14,8 +17,16 @@ type Metadata struct{ Revision, Digest, ProvenanceGroup string }
 
 // CIDRRecord is one normalized CDN, WAF, or cloud prefix record.
 type CIDRRecord struct {
-	Prefix                                                                     netip.Prefix
-	Category, Provider, SourceID, RecordRef, Revision, Digest, ProvenanceGroup string
+	Prefix          netip.Prefix
+	Category        string
+	Provider        string
+	SourceID        string
+	ID              string
+	RecordRef       string
+	RecordRefs      []string
+	Revision        string
+	Digest          string
+	ProvenanceGroup string
 }
 
 // SuffixRecord is one normalized local DNS suffix classification.
@@ -56,7 +67,8 @@ func Parse(data []byte, metadata Metadata) (Result, error) {
 					if err != nil {
 						return Result{}, fmt.Errorf("parse cdn data %s: invalid CIDR: %w", ref, err)
 					}
-					result.CIDRs = append(result.CIDRs, CIDRRecord{Prefix: prefix.Masked(), Category: category, Provider: provider, SourceID: "cdncheck-data", RecordRef: ref, Revision: metadata.Revision, Digest: metadata.Digest, ProvenanceGroup: group})
+					canonical := prefix.Masked()
+					result.CIDRs = append(result.CIDRs, CIDRRecord{Prefix: canonical, Category: category, Provider: provider, SourceID: "cdncheck-data", ID: cidrID("cdncheck-data", provider, category, canonical), RecordRef: ref, RecordRefs: []string{ref}, Revision: metadata.Revision, Digest: metadata.Digest, ProvenanceGroup: group})
 					continue
 				}
 				suffix, err := normalizeSuffix(value)
@@ -70,8 +82,31 @@ func Parse(data []byte, metadata Metadata) (Result, error) {
 	if len(result.CIDRs) == 0 && len(result.Suffixes) == 0 {
 		return Result{}, fmt.Errorf("parse cdn data: source contains no records")
 	}
+	slices.SortFunc(result.CIDRs, func(a, b CIDRRecord) int {
+		return strings.Compare(a.ID, b.ID)
+	})
+	unique := result.CIDRs[:0]
+	for _, record := range result.CIDRs {
+		if len(unique) > 0 && unique[len(unique)-1].ID == record.ID {
+			unique[len(unique)-1].RecordRefs = append(unique[len(unique)-1].RecordRefs, record.RecordRef)
+			continue
+		}
+		unique = append(unique, record)
+	}
+	result.CIDRs = unique
+	for i := range result.CIDRs {
+		slices.Sort(result.CIDRs[i].RecordRefs)
+		result.CIDRs[i].RecordRef = result.CIDRs[i].RecordRefs[0]
+	}
 	return result, nil
 }
+
+func cidrID(sourceID, provider, category string, prefix netip.Prefix) string {
+	semantic := fmt.Sprintf("%q\x00%q\x00%q\x00%q", sourceID, provider, category, prefix.String())
+	sum := sha256.Sum256([]byte(semantic))
+	return "cdn:" + hex.EncodeToString(sum[:])
+}
+
 func normalizeSuffix(value string) (string, error) {
 	value = strings.ToLower(strings.TrimSuffix(value, "."))
 	if value == "" || len(value) > 253 || !strings.Contains(value, ".") {

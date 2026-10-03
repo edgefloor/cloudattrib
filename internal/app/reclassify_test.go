@@ -6,11 +6,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"cloudattrib/internal/datasets"
 	"cloudattrib/internal/enrich/asn"
 	"cloudattrib/internal/enrich/prefix"
 	"cloudattrib/internal/ingest/iptoasn"
@@ -275,6 +279,48 @@ func TestReclassifyEnrichesHTTPRedirectPeerWithNewPrefixAndASNData(t *testing.T)
 		if finding.Scope == model.ScopeRoot {
 			t.Fatalf("redirect peer contaminated root findings: %#v", replayed.Findings)
 		}
+	}
+}
+
+func TestReclassifyKeepsImportedCDNEvidenceIdentityAcrossLoads(t *testing.T) {
+	directory := t.TempDir()
+	data := []byte(`{"cdn":{"edge":["203.0.113.0/24"],"other":["203.0.113.0/25"]},"waf":{"edge":["203.0.113.0/24"]}}`)
+	if err := os.WriteFile(filepath.Join(directory, "cdncheck-sources-data.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(model.HTTPPayload{URL: "https://example.com/", StatusCode: 200, PeerAddress: netip.MustParseAddr("203.0.113.9")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := model.Report{
+		ID: "cdn-replay", Target: model.Target{Canonical: "example.com", Kind: model.TargetDomain},
+		Observations: []model.Observation{{ID: "http-1", Type: "http_response", Subject: "example.com", Scope: model.ScopeRoot, Status: "responded", Payload: payload}},
+	}
+	var previous []string
+	for i := 0; i < 30; i++ {
+		loaded, err := datasets.LoadSources(t.Context(), directory, "build-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		service := NewService(Dependencies{Store: fixtureResultStore{report: original}, Prefixes: loaded.Prefixes, View: loaded.Candidate.View})
+		replayed, err := service.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: original.ID, BundleID: loaded.Candidate.View.BundleID()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(replayed.Evidence) != 3 {
+			t.Fatalf("replay evidence = %#v", replayed.Evidence)
+		}
+		ids := make([]string, len(replayed.Evidence))
+		for j, evidence := range replayed.Evidence {
+			ids[j] = evidence.ID
+			if evidence.DatasetRecords[0].SourceID != "cdncheck-data" || evidence.DatasetRecords[0].RecordRef == "" {
+				t.Fatalf("missing CDN provenance: %#v", evidence)
+			}
+		}
+		if i > 0 && !slices.Equal(ids, previous) {
+			t.Fatalf("load %d changed replay evidence IDs: %v vs %v", i, ids, previous)
+		}
+		previous = ids
 	}
 }
 
