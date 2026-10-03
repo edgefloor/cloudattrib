@@ -153,7 +153,8 @@ func (s *Service) Retrieve(ctx context.Context, request RetrievalRequest) (Retri
 			lexical, lexicalErr = s.store.SearchInventoryEvidence(ctx, query)
 		}
 	}
-	if request.Mode == RetrievalHybrid {
+	switch request.Mode {
+	case RetrievalHybrid:
 		lexicalDone := make(chan struct{})
 		go func() {
 			defer close(lexicalDone)
@@ -161,9 +162,9 @@ func (s *Service) Retrieve(ctx context.Context, request RetrievalRequest) (Retri
 		}()
 		semantic, generationID, semanticErr = s.searchSemantic(ctx, request, candidateLimit)
 		<-lexicalDone
-	} else if request.Mode == RetrievalLexical {
+	case RetrievalLexical:
 		searchLexical()
-	} else {
+	case RetrievalSemantic:
 		semantic, generationID, semanticErr = s.searchSemantic(ctx, request, candidateLimit)
 	}
 	if lexicalErr != nil {
