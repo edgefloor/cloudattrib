@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"net"
 	stdhttp "net/http"
+	"net/http/httptrace"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -76,6 +78,16 @@ func WithRequestTimeout(timeout time.Duration) Option {
 	return func(collector *Collector) { collector.requestTimeout = timeout }
 }
 
+// WithTLSRootCAs supplies an explicit trust store for controlled collectors.
+// Hostname verification remains enabled.
+func WithTLSRootCAs(roots *x509.CertPool) Option {
+	return func(collector *Collector) {
+		if roots != nil {
+			collector.tlsRootCAs = roots.Clone()
+		}
+	}
+}
+
 // WithLimits applies the configured HTTP count, redirect, header, document,
 // and per-request limits. Cumulative request and body accounting comes from the
 // admitted execution context.
@@ -91,14 +103,15 @@ func WithLimits(limits policy.Limits) Option {
 
 // Result contains response observations and the final passive detector input.
 type Result struct {
-	Observation    model.Observation
-	Observations   []model.Observation
-	Coverage       model.Coverage
-	SignalCoverage []model.Coverage
-	PeerAddress    netip.Addr
-	Headers        stdhttp.Header
-	Body           []byte
-	TLSAttempted   bool
+	Observation     model.Observation
+	Observations    []model.Observation
+	TLSObservations []model.Observation
+	Coverage        model.Coverage
+	SignalCoverage  []model.Coverage
+	PeerAddress     netip.Addr
+	Headers         stdhttp.Header
+	Body            []byte
+	TLSAttempted    bool
 }
 
 // Collector owns the application HTTP transport settings.
@@ -112,6 +125,7 @@ type Collector struct {
 	maxRedirects   int
 	maxCandidates  int
 	requestTimeout time.Duration
+	tlsRootCAs     *x509.CertPool
 	now            func() time.Time
 }
 
@@ -223,6 +237,7 @@ func (c *Collector) collectTargetCandidatesOccurrence(ctx context.Context, rawUR
 		hopOccurrence.Hop = hop
 		hopResult, location, collectErr := c.collectHopCandidates(ctx, currentURL, currentCandidates, originalHostname, hopOccurrence, &coverage)
 		signalCoverage = append(signalCoverage, hopResult.SignalCoverage...)
+		observations = append(observations, hopResult.TLSObservations...)
 		if collectErr != nil {
 			if hopResult.Observation.ID != "" {
 				observations = append(observations, hopResult.Observation)
@@ -329,17 +344,18 @@ func (c *Collector) collectTargetCandidatesOccurrence(ctx context.Context, rawUR
 
 func (c *Collector) collectHopCandidates(ctx context.Context, targetURL *url.URL, next addressSource, originalHostname string, occurrence model.ObservationOccurrence, coverage *model.Coverage) (Result, string, error) {
 	var lastErr error
+	var tlsObservations []model.Observation
 	dialAttempt := 0
 	for {
 		address, ok, err := next(ctx)
 		if err != nil {
-			return Result{}, "", err
+			return Result{TLSObservations: tlsObservations}, "", err
 		}
 		if !ok {
 			if lastErr != nil {
-				return Result{}, "", lastErr
+				return Result{TLSObservations: tlsObservations}, "", lastErr
 			}
-			return Result{}, "", model.NewError(model.CodeCapabilityUnavailable, "no approved HTTP destination address", nil)
+			return Result{TLSObservations: tlsObservations}, "", model.NewError(model.CodeCapabilityUnavailable, "no approved HTTP destination address", nil)
 		}
 		address = address.Unmap()
 		if decision := c.policy.Check(address, portForURL(targetURL)); !decision.Allowed {
@@ -351,7 +367,7 @@ func (c *Collector) collectHopCandidates(ctx context.Context, targetURL *url.URL
 		destination := net.JoinHostPort(address.String(), fmt.Sprint(portForURL(targetURL)))
 		release, acquireErr := policy.AcquireHTTP(ctx, destination)
 		if acquireErr != nil {
-			return Result{}, "", acquireErr
+			return Result{TLSObservations: tlsObservations}, "", acquireErr
 		}
 		coverage.Attempted++
 		requestCtx := ctx
@@ -363,6 +379,8 @@ func (c *Collector) collectHopCandidates(ctx context.Context, targetURL *url.URL
 		attemptOccurrence.Attempt += dialAttempt
 		dialAttempt++
 		result, location, collectErr := c.collectHop(requestCtx, targetURL, address, originalHostname, attemptOccurrence)
+		tlsObservations = append(tlsObservations, result.TLSObservations...)
+		result.TLSObservations = tlsObservations
 		cancel()
 		release()
 		if collectErr == nil {
@@ -375,7 +393,7 @@ func (c *Collector) collectHopCandidates(ctx context.Context, targetURL *url.URL
 		}
 		lastErr = collectErr
 		if !eligibleAddressFallback(ctx, collectErr) {
-			return Result{}, "", collectErr
+			return Result{TLSObservations: tlsObservations}, "", collectErr
 		}
 	}
 }
@@ -414,14 +432,25 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 			return c.dial(dialCtx, network, address, port)
 		},
 	}
+	if c.tlsRootCAs != nil {
+		transport.TLSClientConfig = &tls.Config{RootCAs: c.tlsRootCAs, MinVersion: tls.VersionTLS12}
+	}
 	defer transport.CloseIdleConnections()
 	request, err := stdhttp.NewRequestWithContext(ctx, stdhttp.MethodGet, targetURL.String(), nil)
 	if err != nil {
 		return Result{}, "", fmt.Errorf("create HTTP request: %w", err)
 	}
+	var handshake handshakeCapture
+	if targetURL.Scheme == "https" {
+		request = request.WithContext(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{TLSHandshakeDone: handshake.record}))
+	}
 	response, err := transport.RoundTrip(request)
+	var tlsObservations []model.Observation
+	if observation, ok := handshake.observation(targetURL, address, originalHostname, occurrence, c.now); ok {
+		tlsObservations = append(tlsObservations, observation)
+	}
 	if err != nil {
-		return Result{}, "", &preResponseError{err: fmt.Errorf("collect HTTP response: %w", err)}
+		return Result{TLSObservations: tlsObservations}, "", &preResponseError{err: fmt.Errorf("collect HTTP response: %w", err)}
 	}
 	allowance, commitBody := policy.ReserveHTTPBody(ctx, c.maxBody)
 	retained := int64(0)
@@ -489,7 +518,7 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 	if isRedirectStatus(response.StatusCode) {
 		location = response.Header.Get("Location")
 	}
-	result := Result{Observation: observation, Coverage: coverage, SignalCoverage: []model.Coverage{signalCoverage}, PeerAddress: address, Headers: response.Header.Clone(), Body: slices.Clone(body)}
+	result := Result{Observation: observation, TLSObservations: tlsObservations, Coverage: coverage, SignalCoverage: []model.Coverage{signalCoverage}, PeerAddress: address, Headers: response.Header.Clone(), Body: slices.Clone(body)}
 	if readErr != nil {
 		return result, "", fmt.Errorf("read HTTP response: %w", readErr)
 	}

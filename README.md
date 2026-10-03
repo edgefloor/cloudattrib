@@ -48,7 +48,7 @@ CLOUDATTRIB_RESOLVER=192.168.1.1:53 ./bin/cloudattrib analyze example.com
 
 The standalone CLI works without PostgreSQL when Certificate Transparency discovery is disabled, as it is by default. Product rules and web fingerprints are included in the binary. Cloud, CDN, and ASN datasets are separate inputs. Without those datasets, domain analysis can still return findings, but IP enrichment is unavailable.
 
-The command writes a report to standard output. Expect `status: "partial"` when useful results remain but a required data source or collection step is unavailable. Current full HTTPS analysis also reports unavailable TLS certificate evidence, even when the website request succeeds. A partial report exits with code `3`.
+The command writes a report to standard output. Expect `status: "partial"` when useful results remain but a required data source or collection step is unavailable. HTTPS analysis retains bounded certificate evidence from verified connections. A partial report exits with code `3`.
 
 For a service installation with PostgreSQL and an Unbound resolver, follow the [Compose setup guide](docs/operations.md#compose-installation).
 
@@ -81,8 +81,7 @@ This illustrative excerpt shows a CloudFront finding for a hostname with a match
 	"coverage": [
 		{
 			"capability": "tls_certificate",
-			"status": "unavailable",
-			"reason": "TLS certificate evidence collection is unsupported"
+			"status": "complete"
 		}
 	]
 }
@@ -153,7 +152,7 @@ Set `CLOUDATTRIB_CONFIG` to a YAML or JSON configuration file. `CLOUDATTRIB_RESO
 
 ## Current limits
 
-- HTTPS requests verify server certificates, but reports do not retain certificate evidence. Applicable reports mark `tls_certificate` as unavailable.
+- HTTPS requests verify server certificates and retain bounded leaf-certificate and connection evidence. Failed verification is disclosed without retrying insecurely.
 - Certificate Transparency discovery is experimental and disabled by default. It uses a local PostgreSQL index. Live log collection has not yet been tested against public CT logs. See [CT operations](docs/ct-operations.md).
 - Collection does not execute JavaScript, authenticate to websites, or discover hidden origin servers. Results depend on public observations, supported rules, and the datasets you load.
 

@@ -214,6 +214,32 @@ type HTTPPayload struct {
 	ScriptScanComplete *bool        `json:"script_scan_complete,omitempty"`
 }
 
+// TLSCertificatePayload retains bounded evidence from one HTTPS connection.
+// Verified means the normal TLS handshake, including hostname validation,
+// completed successfully. Issuer fields do not imply hosting attribution.
+type TLSCertificatePayload struct {
+	URL                string     `json:"url"`
+	Hostname           string     `json:"hostname"`
+	PeerAddress        netip.Addr `json:"peer_address"`
+	CollectionRunID    string     `json:"collection_run_id"`
+	Attempt            int        `json:"attempt"`
+	Hop                int        `json:"hop"`
+	Verified           bool       `json:"verified"`
+	Failure            string     `json:"failure,omitempty"`
+	FingerprintSHA256  string     `json:"fingerprint_sha256,omitempty"`
+	SubjectCommonName  string     `json:"subject_common_name,omitempty"`
+	DNSNames           []string   `json:"dns_names,omitempty"`
+	IPAddresses        []string   `json:"ip_addresses,omitempty"`
+	NamesOmitted       int        `json:"names_omitted,omitempty"`
+	FieldsTruncated    int        `json:"fields_truncated,omitempty"`
+	IssuerCommonName   string     `json:"issuer_common_name,omitempty"`
+	IssuerOrganization []string   `json:"issuer_organization,omitempty"`
+	NotBefore          *time.Time `json:"not_before,omitempty"`
+	NotAfter           *time.Time `json:"not_after,omitempty"`
+	TLSVersion         string     `json:"tls_version,omitempty"`
+	ALPN               string     `json:"alpn,omitempty"`
+}
+
 // TechnologyPayload retains a passive detector's raw technology label.
 type TechnologyPayload struct {
 	Name                   string `json:"name"`

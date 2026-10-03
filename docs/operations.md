@@ -202,6 +202,8 @@ If a process stops after the database commit but before filesystem publication, 
 
 ## Resource tuning
 
+HTTPS collection retains one `tls_certificate` observation per completed handshake using the same connection as the HTTP request. The fingerprint is lowercase SHA-256 of the leaf DER certificate with a `sha256:` prefix. At most 64 DNS and IP SAN names, four issuer organization strings, and 255 bytes per string field are retained; `names_omitted` and `fields_truncated` disclose omissions. The full chain, private keys, and TLS session secrets are not retained. A failed verification is marked unverified and never retried with verification disabled. TLS observations are retained through later HTTP body failures and reused without network traffic during reclassification.
+
 Start with the limits in [config/example.yaml](../config/example.yaml). The service applies one process-level permit pool to synchronous API requests and durable workers. Loaded bundle generations share the same pool.
 
 The `limits.target` settings apply to one admitted target execution except `http_destination_interval`, which is process-wide because every loaded generation shares one execution controller. Duration values use Go duration syntax. HTTP body byte values count decoded bytes. `http_response_headers` caps the headers that the transport accepts. `target_deadline` starts after target admission, but a shorter caller deadline also applies during the wait. `http_destination_interval` sets the minimum time between request starts to the same approved IP address and port; the default `100ms` is at most ten starts per second. `redirects: 0` collects the first HTTP response and does not follow its redirect. The other target limits must be positive.

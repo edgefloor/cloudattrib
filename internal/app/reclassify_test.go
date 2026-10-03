@@ -436,3 +436,50 @@ func TestReclassifyDisclosesRetainedScriptSignalCompleteness(t *testing.T) {
 }
 
 func boolPointer(value bool) *bool { return &value }
+
+func TestReclassifyPreservesTLSCaptureAndDisclosesMissingHistoricalInput(t *testing.T) {
+	t.Parallel()
+	observedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	tlsPayload, err := json.Marshal(model.TLSCertificatePayload{URL: "https://example.com", Hostname: "example.com", PeerAddress: netip.MustParseAddr("93.184.216.34"), Verified: true, FingerprintSHA256: "sha256:fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name    string
+		keepTLS bool
+		want    model.CoverageStatus
+	}{
+		{"retained TLS", true, model.CoverageComplete},
+		{"historical missing TLS", false, model.CoverageUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			original := model.Report{
+				ID: "tls-original", Target: model.Target{Kind: model.TargetDomain, Original: "example.com", Canonical: "example.com"},
+				Coverage:     []model.Coverage{{Capability: "tls_certificate", Status: model.CoverageUnavailable}},
+				Observations: []model.Observation{{ID: "dns-observation", Type: "dns_record", Subject: "example.com", ObservedAt: observedAt, Status: "answered", Payload: model.JSONValue(`{"rrtype":"TXT","owner":"example.com","value":"fixture"}`)}},
+			}
+			if test.keepTLS {
+				original.Coverage[0].Status = model.CoverageComplete
+				original.Observations = append(original.Observations, model.Observation{ID: "tls-observation", Type: "tls_certificate", Subject: "example.com", ObservedAt: observedAt, Status: "verified", Payload: tlsPayload})
+			}
+			service := NewService(Dependencies{Store: fixtureResultStore{report: original}, Detectors: []Detector{emptyReplayDetector{}}, View: model.NewAttributionView("new-bundle", "policy", nil, nil)})
+			replayed, err := service.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: original.ID, BundleID: "new-bundle"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var replayCoverage model.Coverage
+			for _, item := range replayed.Coverage {
+				if item.Capability == "replay_tls_certificate" {
+					replayCoverage = item
+				}
+			}
+			if replayCoverage.Status != test.want || len(replayed.Observations) != len(original.Observations) {
+				t.Fatalf("replay coverage=%#v observations=%d", replayCoverage, len(replayed.Observations))
+			}
+			if test.keepTLS && (replayed.Observations[1].ObservedAt != observedAt || string(replayed.Observations[1].Payload) != string(tlsPayload)) {
+				t.Fatalf("TLS observation changed during replay: %#v", replayed.Observations[1])
+			}
+		})
+	}
+}

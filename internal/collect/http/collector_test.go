@@ -207,8 +207,8 @@ func TestCollectReportsTLSAttemptWhenHTTPSRedirectFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
-	if len(result.Observations) != 1 || !result.TLSAttempted || result.Coverage.Status != model.CoveragePartial {
-		t.Fatalf("Collect() result = %#v, want retained HTTP hop with attempted TLS", result)
+	if len(result.Observations) != 2 || result.Observations[0].Type != "http_response" || result.Observations[1].Type != "tls_certificate" || !result.TLSAttempted || result.Coverage.Status != model.CoveragePartial {
+		t.Fatalf("Collect() retained types = %v, TLS attempted = %t, coverage = %#v", observationTypes(result.Observations), result.TLSAttempted, result.Coverage)
 	}
 }
 

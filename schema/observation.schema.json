@@ -16,5 +16,11 @@
     "status": {"type": "string", "minLength": 1},
     "payload": {},
     "content_hash": {"type": "string"}
-  }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"type": {"const": "tls_certificate"}}, "required": ["type"]},
+      "then": {"properties": {"payload": {"$ref": "tls-certificate.schema.json"}}}
+    }
+  ]
 }
