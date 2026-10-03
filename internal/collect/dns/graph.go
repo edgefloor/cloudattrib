@@ -82,10 +82,12 @@ func (c *Collector) followCNAMEGraph(ctx context.Context, job *Job, seed string,
 		linkOccurrence.Hop = item.depth
 		requestIndex++
 		c.appendGraphQuery(ctx, collected, seed, port, model.ScopeCNAME, linkOccurrence, result, err, observedAt, fromCache, onCandidate, published)
-		if err != nil || normalizeOutcome(result, err) != model.DNSOutcomeAnswered {
-			if err != nil {
-				continue
-			}
+		if err != nil {
+			continue
+		}
+		outcome := normalizeOutcome(result, err)
+		if outcome != model.DNSOutcomeAnswered && outcome != model.DNSOutcomeNoData {
+			continue
 		}
 		var next []string
 		for _, record := range result.Records {

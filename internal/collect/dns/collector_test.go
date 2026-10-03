@@ -62,6 +62,38 @@ func TestCollectDistinguishesNegativeAnswersFromProtocolFailures(t *testing.T) {
 	}
 }
 
+func TestCollectStopsTerminalAddressQuestionsAfterCNAMENXDomain(t *testing.T) {
+	var mu sync.Mutex
+	calls := make(map[model.DNSQuestion]int)
+	collector := New(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		mu.Lock()
+		calls[question]++
+		mu.Unlock()
+		result := model.DNSResult{Question: question, ResponseCode: 0}
+		switch {
+		case question.Name == "example.com" && question.Type == typeCNAME:
+			payload, _ := json.Marshal(model.DNSPayload{RRType: "CNAME", Owner: question.Name, Value: "missing.example.net", TTL: 300})
+			result.Records = []model.Observation{{Type: "dns_record", Subject: question.Name, Status: "answered", Payload: payload}}
+		case question.Name == "example.com" && question.Type == typeNS:
+			return fixtureNSResult(question, "ns.example.net"), nil
+		case question.Name == "missing.example.net" && question.Type == typeCNAME:
+			result.ResponseCode = 3
+		}
+		return result, nil
+	}, policy.PublicDestinationPolicy())
+	result := collector.Collect(t.Context(), "example.com", 443, nil)
+	if result.Coverage.Status != model.CoverageComplete {
+		t.Fatalf("DNS coverage = %#v", result.Coverage)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls[model.DNSQuestion{Name: "missing.example.net", Type: typeCNAME}] != 1 ||
+		calls[model.DNSQuestion{Name: "missing.example.net", Type: typeA}] != 0 ||
+		calls[model.DNSQuestion{Name: "missing.example.net", Type: typeAAAA}] != 0 {
+		t.Fatalf("terminal negative questions = %#v", calls)
+	}
+}
+
 func TestCollectFollowsCNAMEChainAndPublishesTerminalAddress(t *testing.T) {
 	var mu sync.Mutex
 	calls := make(map[model.DNSQuestion]int)
