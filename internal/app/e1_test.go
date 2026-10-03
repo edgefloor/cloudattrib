@@ -1060,3 +1060,45 @@ func TestRedirectUsesSharedDNSQuestionBudgetAndRetainsPriorHop(t *testing.T) {
 		t.Fatalf("completed hop = %t, budget outcome = %t, landing = %t", completedHop, exhaustedRedirect, landing)
 	}
 }
+
+func TestAnalysisAndLookupCalculateSourceAgeAtUseTime(t *testing.T) {
+	published := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	clock := published.Add(24 * time.Hour)
+	view := model.NewAttributionView("bundle", "policy", nil, []model.CapabilityState{{
+		Name: "prefix_source/aws-ip-ranges", Status: model.CoverageComplete, PublishedAt: &published,
+	}})
+	service := app.NewService(app.Dependencies{
+		DNS:      collectdns.New(fixtureDNSClient{failedAAAA: true}.Query, policy.PublicDestinationPolicy()),
+		Prefixes: prefix.New(nil), View: view, Now: func() time.Time { return clock },
+	})
+	ageFor := func(coverage []model.Coverage) int64 {
+		for _, item := range coverage {
+			if item.Capability == "prefix_source/aws-ip-ranges" && item.DataAgeSeconds != nil {
+				return *item.DataAgeSeconds
+			}
+		}
+		t.Fatal("source age missing from coverage")
+		return -1
+	}
+	includeWWW := false
+	request := model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeDNS, IncludeWWW: &includeWWW}
+	first, err := service.Analyze(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock = clock.Add(48 * time.Hour)
+	second, err := service.Analyze(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup, err := service.LookupIP(t.Context(), model.IPLookupRequest{Address: netip.MustParseAddr("93.184.216.34")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ageFor(first.Coverage) != 86400 || ageFor(second.Coverage) != 259200 || ageFor(lookup.Coverage) != 259200 {
+		t.Fatalf("ages: first=%d second=%d lookup=%d", ageFor(first.Coverage), ageFor(second.Coverage), ageFor(lookup.Coverage))
+	}
+	if ageFor(first.Coverage) != 86400 {
+		t.Fatal("later classification changed historical report age")
+	}
+}

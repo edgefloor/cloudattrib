@@ -141,6 +141,8 @@ Place supported source files in `data/sources`, or set `data.source_directory` i
 
 The standalone CLI loads these files when no active bundle is selected. The service supports versioned data bundles with activation and rollback. Missing sources are reported in coverage. IP lookup requires at least one usable local IP source.
 
+Source age in a new report is calculated from its publication date at classification time. Readiness recalculates age on each request; saved reports keep the age recorded when they were classified. Sources without a publication date have unknown age.
+
 Use the [source format reference](docs/source-contracts.md) to prepare files and the [bundle operations guide](docs/operations.md#import-and-activate-data) to import and activate them. These guides cover source revisions, retired ranges, and update procedures.
 
 Set `CLOUDATTRIB_CONFIG` to a YAML or JSON configuration file. `CLOUDATTRIB_RESOLVER` overrides the resolver loaded through that environment variable. Start with the [example configuration](config/example.yaml). For service setup, authentication, and resource limits, see the [operations guide](docs/operations.md).

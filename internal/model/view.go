@@ -8,10 +8,28 @@ import (
 
 // CapabilityState records whether one immutable view component can execute.
 type CapabilityState struct {
-	Name      string         `json:"name"`
-	Status    CoverageStatus `json:"status"`
-	Reason    string         `json:"reason,omitempty"`
-	SourceAge *time.Duration `json:"source_age,omitempty"`
+	Name        string         `json:"name"`
+	Status      CoverageStatus `json:"status"`
+	Reason      string         `json:"reason,omitempty"`
+	SourceAge   *time.Duration `json:"source_age,omitempty"`
+	PublishedAt *time.Time     `json:"-"`
+}
+
+// At returns a caller-owned state with source age at the requested time.
+// A future publication time has zero age; an unknown time keeps age unknown.
+func (c CapabilityState) At(now time.Time) CapabilityState {
+	if c.PublishedAt != nil {
+		age := max(time.Duration(0), now.Sub(*c.PublishedAt))
+		c.SourceAge = &age
+	} else if c.SourceAge != nil {
+		age := *c.SourceAge
+		c.SourceAge = &age
+	}
+	if c.PublishedAt != nil {
+		publishedAt := *c.PublishedAt
+		c.PublishedAt = &publishedAt
+	}
+	return c
 }
 
 // AttributionView identifies one immutable set of data, rules, and detectors.
@@ -29,7 +47,7 @@ func NewAttributionView(bundleID, policyVersion string, detectorIDs []string, ca
 		bundleID:      bundleID,
 		policyVersion: policyVersion,
 		detectorIDs:   slices.Clone(detectorIDs),
-		capabilities:  slices.Clone(capabilities),
+		capabilities:  cloneCapabilities(capabilities),
 	}
 }
 
@@ -50,7 +68,35 @@ func (v AttributionView) DetectorIDs() []string {
 
 // Capabilities returns a caller-owned copy of capability states.
 func (v AttributionView) Capabilities() []CapabilityState {
-	return slices.Clone(v.capabilities)
+	return cloneCapabilities(v.capabilities)
+}
+
+// CapabilitiesAt calculates source ages without changing the captured view.
+func (v AttributionView) CapabilitiesAt(now time.Time) []CapabilityState {
+	capabilities := make([]CapabilityState, len(v.capabilities))
+	for index, capability := range v.capabilities {
+		capabilities[index] = capability.At(now)
+	}
+	return capabilities
+}
+
+func cloneCapabilities(capabilities []CapabilityState) []CapabilityState {
+	cloned := make([]CapabilityState, len(capabilities))
+	for index, capability := range capabilities {
+		cloned[index] = capability
+		if capability.PublishedAt != nil {
+			publishedAt := *capability.PublishedAt
+			cloned[index].PublishedAt = &publishedAt
+		}
+		if capability.SourceAge != nil {
+			age := *capability.SourceAge
+			cloned[index].SourceAge = &age
+		}
+		if capability.PublishedAt != nil {
+			cloned[index].SourceAge = nil
+		}
+	}
+	return cloned
 }
 
 // Association is one normalized prefix or source relationship.

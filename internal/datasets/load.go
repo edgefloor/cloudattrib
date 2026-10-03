@@ -277,11 +277,8 @@ func sourceCapabilities(sources []Source) []model.CapabilityState {
 		}
 		state := model.CapabilityState{Name: name, Status: source.Status, Reason: source.Reason}
 		if source.PublishedAt != nil {
-			age := time.Since(*source.PublishedAt)
-			if age < 0 {
-				age = 0
-			}
-			state.SourceAge = &age
+			publishedAt := *source.PublishedAt
+			state.PublishedAt = &publishedAt
 		}
 		if current, exists := byName[name]; !exists || current.Status != model.CoverageComplete {
 			byName[name] = state

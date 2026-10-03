@@ -469,7 +469,7 @@ func (s *Service) LookupIP(ctx context.Context, request model.IPLookupRequest) (
 		defer release()
 	}
 	result := model.IPLookupResult{Address: request.Address.Unmap(), Status: model.StatusComplete}
-	result.Coverage = append(result.Coverage, s.sourceCoverage([]netip.Addr{result.Address})...)
+	result.Coverage = append(result.Coverage, s.sourceCoverage([]netip.Addr{result.Address}, s.now())...)
 	usable := 0
 	prefixUsable := s.prefixes != nil && s.sourceGroupUsable("prefix_source/")
 	if !prefixUsable {
@@ -824,7 +824,7 @@ func (s *Service) enrichAddresses(ctx context.Context, observations []model.Obse
 	for _, input := range inputs {
 		addresses = append(addresses, input.address)
 	}
-	coverage := s.sourceCoverage(addresses)
+	coverage := s.sourceCoverage(addresses, classifiedAt)
 	var evidence []model.Evidence
 	prefixUsable := s.prefixes != nil && s.sourceGroupUsable("prefix_source/")
 	if !prefixUsable {
@@ -883,14 +883,14 @@ func (s *Service) enrichAddresses(ctx context.Context, observations []model.Obse
 	return evidence, coverage, nil
 }
 
-func (s *Service) sourceCoverage(addresses []netip.Addr) []model.Coverage {
+func (s *Service) sourceCoverage(addresses []netip.Addr, classifiedAt time.Time) []model.Coverage {
 	wantV4, wantV6 := false, false
 	for _, address := range addresses {
 		wantV4 = wantV4 || address.Unmap().Is4()
 		wantV6 = wantV6 || address.Is6() && !address.Is4In6()
 	}
 	var coverage []model.Coverage
-	for _, capability := range s.view.Capabilities() {
+	for _, capability := range s.view.CapabilitiesAt(classifiedAt) {
 		include := strings.HasPrefix(capability.Name, "prefix_source/")
 		if capability.Name == "asn_source/ipv4" {
 			include = wantV4
