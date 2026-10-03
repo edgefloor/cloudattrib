@@ -183,7 +183,21 @@ docker run --rm \
 5. Start the application.
 6. Check `/readyz`, `datasets status`, and `cloudattrib_bundle_info` before admitting work.
 
-Reports and retained observations currently have no automatic age-based deletion. Define a backup and deletion policy for PostgreSQL. Bundle pruning preserves provenance embedded in reports. The specification's default retention requirement is not an automatic cleanup schedule in this implementation.
+Reports and retained observations have no automatic age-based deletion. Back up PostgreSQL before invoking report retention. Bundle artifact pruning has its own policy and preserves provenance embedded in reports.
+
+### Report retention
+
+Report history has a configurable 30-day default in `storage.report_retention`. The cutoff uses the report's database `created_at` time, so a report imported during an upgrade gets a full retention period from import. No cleanup runs at service startup or on a timer. Operators must invoke it explicitly and preview first:
+
+```sh
+docker compose exec app /usr/local/bin/cloudattrib retention preview --limit 100
+```
+
+The JSON output lists each older report, its serialized document bytes, and a protection reason when one applies. It includes the exact `cutoff` and a `next_cursor` when another page remains. Pass the same cutoff as `--before` and the returned cursor as `--cursor` on later pages. A cursor used with another cutoff is rejected. The maximum page size is 500. A preview does not remove anything.
+
+After reviewing the selection and backing up PostgreSQL, an operator can run `retention apply` with the same flags. Each page is one cancellable transaction. An eligible report and its normalized observations, evidence, and findings are deleted together. Terminal job result links are cleared. A report still required by a retained replay, an active reclassification, a pending projection, or current inventory evidence is preserved. Protected reports can become eligible on a later run when those references are released. Repeating a page is safe; it does not restore or duplicate deleted data. Expired result and observation requests return HTTP 404 with `not_found`.
+
+This command does not delete CT records, job history, or bundle manifests. Bundle artifact pruning remains a separate operation with its existing active, rollback, reader, and durable pin protections. Existing installations do not delete pre-existing history until an operator explicitly runs `retention apply`; there is no automatic first-run purge. Log and monitor the command's JSON counts and errors in the scheduler used to invoke it.
 
 ## Failure and recovery behavior
 

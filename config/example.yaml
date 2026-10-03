@@ -41,3 +41,4 @@ storage:
   postgres_dsn_file: ./secrets/postgres-dsn
   lease_duration: 30s
   maximum_attempts: 3
+  report_retention: 720h
