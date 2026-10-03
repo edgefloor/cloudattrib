@@ -91,13 +91,14 @@ func WithLimits(limits policy.Limits) Option {
 
 // Result contains response observations and the final passive detector input.
 type Result struct {
-	Observation  model.Observation
-	Observations []model.Observation
-	Coverage     model.Coverage
-	PeerAddress  netip.Addr
-	Headers      stdhttp.Header
-	Body         []byte
-	TLSAttempted bool
+	Observation    model.Observation
+	Observations   []model.Observation
+	Coverage       model.Coverage
+	SignalCoverage []model.Coverage
+	PeerAddress    netip.Addr
+	Headers        stdhttp.Header
+	Body           []byte
+	TLSAttempted   bool
 }
 
 // Collector owns the application HTTP transport settings.
@@ -183,6 +184,8 @@ func (c *Collector) collectTargetCandidatesOccurrence(ctx context.Context, rawUR
 	}
 	originalHostname := currentURL.Hostname()
 	coverage := model.Coverage{Capability: "http", Status: model.CoverageComplete}
+	var signalCoverage []model.Coverage
+	defer func() { output.SignalCoverage = signalCoverage }()
 	type pendingResolution struct {
 		addresses <-chan netip.Addr
 		done      <-chan error
@@ -219,16 +222,22 @@ func (c *Collector) collectTargetCandidatesOccurrence(ctx context.Context, rawUR
 		hopOccurrence := occurrence
 		hopOccurrence.Hop = hop
 		hopResult, location, collectErr := c.collectHopCandidates(ctx, currentURL, currentCandidates, originalHostname, hopOccurrence, &coverage)
+		signalCoverage = append(signalCoverage, hopResult.SignalCoverage...)
 		if collectErr != nil {
+			if hopResult.Observation.ID != "" {
+				observations = append(observations, hopResult.Observation)
+				final = hopResult
+				coverage.Truncated += hopResult.Coverage.Truncated
+			}
 			coverage.Status = model.CoveragePartial
 			coverage.ErrorCodes = append(coverage.ErrorCodes, collectionErrorCode(collectErr))
 			if model.ErrorCodeOf(collectErr) == model.CodeBudgetExceeded {
 				coverage.Omitted++
 			}
-			if len(observations) > 0 {
+			if final.Observation.ID != "" {
 				return finish(final, observations, coverage, tlsAttempted), nil
 			}
-			return Result{Observations: observations, Coverage: coverage, TLSAttempted: tlsAttempted}, collectErr
+			return finish(final, observations, coverage, tlsAttempted), collectErr
 		}
 		observations = append(observations, hopResult.Observation)
 		if hopResult.Coverage.Status == model.CoveragePartial {
@@ -360,6 +369,10 @@ func (c *Collector) collectHopCandidates(ctx context.Context, targetURL *url.URL
 			coverage.Completed++
 			return result, location, nil
 		}
+		if result.Observation.ID != "" {
+			coverage.Completed++
+			return result, location, collectErr
+		}
 		lastErr = collectErr
 		if !eligibleAddressFallback(ctx, collectErr) {
 			return Result{}, "", collectErr
@@ -415,19 +428,21 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 	defer func() { commitBody(retained) }()
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, allowance+1))
 	closeErr := response.Body.Close()
-	if readErr != nil {
-		return Result{}, "", fmt.Errorf("read HTTP response: %w", readErr)
-	}
-	if closeErr != nil {
-		return Result{}, "", fmt.Errorf("close HTTP response: %w", closeErr)
-	}
 	truncated := int64(len(body)) > allowance
 	if truncated {
 		body = body[:allowance]
 	}
 	retained = int64(len(body))
 	bodyDigest := sha256.Sum256(body)
-	payload := model.HTTPPayload{URL: redactQuery(targetURL), StatusCode: response.StatusCode, PeerAddress: address, Headers: selectedHeaders(response.Header), BodyHash: "sha256:" + hex.EncodeToString(bodyDigest[:]), BodyLength: int64(len(body)), BodyTruncated: truncated, ScriptURLs: scriptURLs(body, targetURL, 128)}
+	scripts, omittedScripts := scriptURLs(body, targetURL, 128)
+	bodyReadFailed := readErr != nil || closeErr != nil
+	scriptScanComplete := !truncated && !bodyReadFailed && omittedScripts == 0
+	payload := model.HTTPPayload{
+		URL: redactQuery(targetURL), StatusCode: response.StatusCode, PeerAddress: address,
+		Headers: selectedHeaders(response.Header), BodyHash: "sha256:" + hex.EncodeToString(bodyDigest[:]),
+		BodyLength: int64(len(body)), BodyTruncated: truncated, BodyReadFailed: bodyReadFailed,
+		ScriptURLs: scripts, ScriptURLsOmitted: omittedScripts, ScriptScanComplete: &scriptScanComplete,
+	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
 		return Result{}, "", fmt.Errorf("encode HTTP observation: %w", err)
@@ -436,6 +451,26 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 	if truncated {
 		coverage.Status = model.CoveragePartial
 		coverage.Truncated = 1
+	}
+	if bodyReadFailed {
+		coverage.Status = model.CoveragePartial
+		if readErr != nil {
+			coverage.ErrorCodes = append(coverage.ErrorCodes, collectionErrorCode(readErr))
+		}
+		if closeErr != nil {
+			coverage.ErrorCodes = append(coverage.ErrorCodes, collectionErrorCode(closeErr))
+		}
+	}
+	signalCoverage := model.Coverage{Capability: "http_script_signals", Status: model.CoverageComplete, Attempted: 1, Completed: 1, Omitted: omittedScripts}
+	if !scriptScanComplete {
+		signalCoverage.Status = model.CoveragePartial
+		if truncated || bodyReadFailed {
+			signalCoverage.Truncated = 1
+			signalCoverage.Omitted++
+			signalCoverage.Reason = "body collection ended before all script signals could be examined"
+		} else {
+			signalCoverage.Reason = "unique script signal limit reached"
+		}
 	}
 	scope := model.ScopeRoot
 	if !strings.EqualFold(targetURL.Hostname(), originalHostname) {
@@ -454,7 +489,14 @@ func (c *Collector) collectHop(ctx context.Context, targetURL *url.URL, address 
 	if isRedirectStatus(response.StatusCode) {
 		location = response.Header.Get("Location")
 	}
-	return Result{Observation: observation, Coverage: coverage, PeerAddress: address, Headers: response.Header.Clone(), Body: slices.Clone(body)}, location, nil
+	result := Result{Observation: observation, Coverage: coverage, SignalCoverage: []model.Coverage{signalCoverage}, PeerAddress: address, Headers: response.Header.Clone(), Body: slices.Clone(body)}
+	if readErr != nil {
+		return result, "", fmt.Errorf("read HTTP response: %w", readErr)
+	}
+	if closeErr != nil {
+		return result, "", fmt.Errorf("close HTTP response: %w", closeErr)
+	}
+	return result, location, nil
 }
 
 func isRedirectStatus(status int) bool {
@@ -481,11 +523,12 @@ func eligibleAddressFallback(parent context.Context, err error) bool {
 	return !errors.As(err, &verificationError)
 }
 
-func scriptURLs(body []byte, base *url.URL, limit int) []string {
+func scriptURLs(body []byte, base *url.URL, limit int) ([]string, int) {
 	tokenizer := html.NewTokenizer(bytes.NewReader(body))
 	result := make([]string, 0)
 	seen := make(map[string]struct{})
-	for len(result) < limit {
+	omitted := 0
+	for {
 		tokenType := tokenizer.Next()
 		if tokenType == html.ErrorToken {
 			break
@@ -510,13 +553,17 @@ func scriptURLs(body []byte, base *url.URL, limit int) []string {
 			value := parsed.String()
 			if _, exists := seen[value]; !exists {
 				seen[value] = struct{}{}
-				result = append(result, value)
+				if len(result) < limit {
+					result = append(result, value)
+				} else {
+					omitted++
+				}
 			}
 			break
 		}
 	}
 	slices.Sort(result)
-	return result
+	return result, omitted
 }
 
 func (c *Collector) approvedAddresses(addresses []netip.Addr, port uint16) ([]netip.Addr, bool) {

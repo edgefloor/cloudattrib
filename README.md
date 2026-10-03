@@ -56,6 +56,8 @@ For a service installation with PostgreSQL and an Unbound resolver, follow the [
 
 Reports contain collected observations, evidence from matching rules and datasets, findings, and coverage for each capability.
 
+HTTP reports retain a validated response and a bounded body prefix when reading the body fails. The `http_script_signals` coverage entry reports omitted unique script URLs or an incomplete body scan separately from overall HTTP collection.
+
 This illustrative excerpt shows a CloudFront finding for a hostname with a matching CNAME. It is not live output from `example.com`. Other report fields are omitted:
 
 ```json

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	stdhttp "net/http"
 	"net/http/httptest"
@@ -849,5 +850,96 @@ func TestStreamingRedirectRetainsBlockedSiblingAfterSuccessfulHTTP(t *testing.T)
 	}
 	if len(result.Observations) != 2 || result.Coverage.Status != model.CoveragePartial || !slices.Contains(result.Coverage.ErrorCodes, model.CodePolicyBlocked) {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+func TestCollectDisclosesUniqueScriptSignalsBeyondRetainedLimit(t *testing.T) {
+	var body strings.Builder
+	for index := range 129 {
+		_, _ = fmt.Fprintf(&body, `<script src="https://cdn.example/%03d.js?token=secret"></script>`, index)
+		if index == 127 {
+			_, _ = body.WriteString(`<script src="https://cdn.example/000.js?token=other"></script>`)
+		}
+	}
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		_, _ = writer.Write([]byte(body.String()))
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := New((&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext, policy.PublicDestinationPolicy(), 2<<20)
+	result, err := collector.Collect(t.Context(), "http", "example.com", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload model.HTTPPayload
+	if err := json.Unmarshal(result.Observation.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.ScriptURLs) != 128 || payload.ScriptURLsOmitted != 1 || len(result.SignalCoverage) != 1 || result.SignalCoverage[0].Status != model.CoveragePartial || result.SignalCoverage[0].Omitted != 1 {
+		t.Fatalf("payload = %#v, signal coverage = %#v", payload, result.SignalCoverage)
+	}
+	for _, script := range payload.ScriptURLs {
+		if strings.Contains(script, "secret") || strings.Contains(script, "other") {
+			t.Fatalf("script URL contains query value: %q", script)
+		}
+	}
+}
+
+func TestCollectRetainsResponseAndBoundedPrefixAfterBodyReadFailure(t *testing.T) {
+	server := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.Header().Set("Content-Length", "9999")
+		writer.Header().Set("X-Powered-By", "fixture")
+		writer.Header().Set("Set-Cookie", "session=secret")
+		_, _ = writer.Write([]byte(`<script src="https://cdn.segment.com/analytics.js?token=secret"></script>`))
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := New((&mappedDialer{destinations: map[netip.Addr]string{address: server.Listener.Addr().String()}}).DialContext, policy.PublicDestinationPolicy(), 2<<20)
+	result, err := collector.Collect(t.Context(), "http", "example.com", address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Observation.ID == "" || result.Coverage.Status != model.CoveragePartial || len(result.Body) == 0 {
+		t.Fatalf("partial result = %#v", result)
+	}
+	var payload model.HTTPPayload
+	if err := json.Unmarshal(result.Observation.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.BodyReadFailed || payload.StatusCode != stdhttp.StatusOK || payload.PeerAddress != address || len(payload.ScriptURLs) != 1 || strings.Contains(string(result.Observation.Payload), "session=secret") {
+		t.Fatalf("partial payload = %#v", payload)
+	}
+}
+
+func TestCollectRetainsEarlierAndCurrentHopsWhenRedirectBodyFails(t *testing.T) {
+	start := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.Header().Set("Location", "http://redirect.example/")
+		writer.WriteHeader(stdhttp.StatusFound)
+	}))
+	t.Cleanup(start.Close)
+	landing := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.Header().Set("Content-Length", "9999")
+		_, _ = writer.Write([]byte("partial body"))
+	}))
+	t.Cleanup(landing.Close)
+	first := netip.MustParseAddr("93.184.216.34")
+	second := netip.MustParseAddr("1.1.1.1")
+	dialer := &mappedDialer{destinations: map[netip.Addr]string{first: start.Listener.Addr().String(), second: landing.Listener.Addr().String()}}
+	collector := New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20, WithRedirectResolver(func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{second}, nil
+	}))
+	result, err := collector.Collect(t.Context(), "http", "example.com", first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Observations) != 2 || result.Observations[0].Subject != "example.com" || result.Observations[1].Subject != "redirect.example" || result.Coverage.Status != model.CoveragePartial {
+		t.Fatalf("redirect result = %#v", result)
+	}
+	var payload model.HTTPPayload
+	if err := json.Unmarshal(result.Observations[1].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.BodyReadFailed || payload.PeerAddress != second {
+		t.Fatalf("current hop payload = %#v", payload)
 	}
 }
