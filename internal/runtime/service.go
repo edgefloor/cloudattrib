@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -760,6 +759,7 @@ func (p serviceMetricsProvider) OperationalMetrics(ctx context.Context) (observa
 type serviceReadiness struct {
 	store     *postgres.Store
 	analyzers *bundleAnalyzerFactory
+	now       func() time.Time
 }
 
 func (r serviceReadiness) Readiness(ctx context.Context) api.ReadinessSnapshot {
@@ -768,12 +768,20 @@ func (r serviceReadiness) Readiness(ctx context.Context) api.ReadinessSnapshot {
 	if r.analyzers != nil {
 		lookup = r.analyzers.localLookupAvailability()
 	}
-	return serviceReadinessSnapshot(persistenceReady, lookup)
+	now := time.Now
+	if r.now != nil {
+		now = r.now
+	}
+	return serviceReadinessSnapshotAt(persistenceReady, lookup, now())
 }
 
 func serviceReadinessSnapshot(persistenceReady bool, lookup lookupAvailability) api.ReadinessSnapshot {
+	return serviceReadinessSnapshotAt(persistenceReady, lookup, time.Now())
+}
+
+func serviceReadinessSnapshotAt(persistenceReady bool, lookup lookupAvailability, now time.Time) api.ReadinessSnapshot {
 	analyze := runtimeOperationReadiness("analyze", persistenceReady, "writable PostgreSQL storage is unavailable")
-	analyze.Capabilities = append([]model.CapabilityState{{Name: "tls_certificate", Status: model.CoverageUnavailable, Reason: "TLS certificate evidence collection is unsupported"}}, localLookupCapabilities(lookup)...)
+	analyze.Capabilities = append([]model.CapabilityState{{Name: "tls_certificate", Status: model.CoverageUnavailable, Reason: "TLS certificate evidence collection is unsupported"}}, localLookupCapabilitiesAt(lookup, now)...)
 	if persistenceReady && !lookup.complete() {
 		analyze.State = api.ReadinessDegraded
 		analyze.Reason = "TLS certificate evidence and some local attribution data are unavailable"
@@ -781,7 +789,7 @@ func serviceReadinessSnapshot(persistenceReady bool, lookup lookupAvailability) 
 		analyze.State = api.ReadinessDegraded
 		analyze.Reason = "TLS certificate evidence collection is unsupported"
 	}
-	lookupOperation := api.OperationReadiness{Name: "lookup_ip", Capabilities: localLookupCapabilities(lookup)}
+	lookupOperation := api.OperationReadiness{Name: "lookup_ip", Capabilities: localLookupCapabilitiesAt(lookup, now)}
 	switch {
 	case lookup.complete():
 		lookupOperation.State = api.ReadinessReady
@@ -805,8 +813,16 @@ func serviceReadinessSnapshot(persistenceReady bool, lookup lookupAvailability) 
 }
 
 func localLookupCapabilities(availability lookupAvailability) []model.CapabilityState {
+	return localLookupCapabilitiesAt(availability, time.Now())
+}
+
+func localLookupCapabilitiesAt(availability lookupAvailability, now time.Time) []model.CapabilityState {
 	if len(availability.data) > 0 {
-		return slices.Clone(availability.data)
+		capabilities := make([]model.CapabilityState, len(availability.data))
+		for index, capability := range availability.data {
+			capabilities[index] = capability.At(now)
+		}
+		return capabilities
 	}
 	prefix := model.CapabilityState{Name: "prefix", Status: model.CoverageComplete}
 	if !availability.prefix {

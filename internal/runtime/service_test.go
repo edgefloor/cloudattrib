@@ -1214,3 +1214,31 @@ func runtimeFixtureSources(t *testing.T, syncToken string) string {
 	}
 	return directory
 }
+
+func TestServiceReadinessRecalculatesLoadedSourceAge(t *testing.T) {
+	published := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	lookup := lookupAvailability{data: []model.CapabilityState{{Name: "prefix_source/aws-ip-ranges", Status: model.CoverageComplete, PublishedAt: &published}}}
+	clock := published.Add(24 * time.Hour)
+	provider := serviceReadiness{analyzers: newBundleAnalyzerFactory(2, nil, "", lookup, datasets.Activation{}, 0), now: func() time.Time { return clock }}
+	readAge := func() time.Duration {
+		snapshot := provider.Readiness(t.Context())
+		for _, operation := range snapshot.Operations {
+			if operation.Name != "analyze" {
+				continue
+			}
+			for _, capability := range operation.Capabilities {
+				if capability.Name == "prefix_source/aws-ip-ranges" && capability.SourceAge != nil {
+					return *capability.SourceAge
+				}
+			}
+		}
+		t.Fatal("source age missing from readiness")
+		return 0
+	}
+	first := readAge()
+	clock = clock.Add(48 * time.Hour)
+	second := readAge()
+	if first != 24*time.Hour || second != 72*time.Hour || lookup.data[0].SourceAge != nil {
+		t.Fatalf("readiness ages = %v then %v, loaded state = %#v", first, second, lookup.data[0])
+	}
+}

@@ -362,3 +362,37 @@ type emptyReplayDetector struct{}
 func (emptyReplayDetector) Detect(context.Context, []model.Observation, model.AttributionView) ([]model.Evidence, []model.Coverage) {
 	return nil, []model.Coverage{{Capability: "rules", Status: model.CoverageComplete}}
 }
+
+func TestReclassifyUsesSelectedBundlesSourceAgeAtNewClassificationTime(t *testing.T) {
+	published := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
+	classifiedAt := published.Add(72 * time.Hour)
+	address := netip.MustParseAddr("93.184.216.34")
+	payload, _ := json.Marshal(model.DNSPayload{RRType: "A", Owner: "example.com", Address: address})
+	priorAge := int64(86400)
+	original := model.Report{
+		ID: "dated-report", Target: model.Target{Kind: model.TargetDomain, Original: "example.com", Canonical: "example.com"},
+		ClassifiedAt: published.Add(24 * time.Hour), Observations: []model.Observation{{ID: "address-observation", Type: "dns_address", Subject: "example.com", Scope: model.ScopeRoot, Status: "answered", Payload: payload}},
+		Coverage: []model.Coverage{{Capability: "prefix_source/aws-ip-ranges", Status: model.CoverageComplete, DataAgeSeconds: &priorAge}},
+	}
+	service := NewService(Dependencies{
+		Prefixes: prefix.New(nil), Store: fixtureResultStore{report: original},
+		View: model.NewAttributionView("selected-bundle", "policy", nil, []model.CapabilityState{{Name: "prefix_source/aws-ip-ranges", Status: model.CoverageComplete, PublishedAt: &published}}),
+		Now:  func() time.Time { return classifiedAt },
+	})
+	replayed, err := service.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: original.ID, BundleID: "selected-bundle"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldAge, newAge *int64
+	for _, item := range replayed.Coverage {
+		switch item.Capability {
+		case "original_collection/prefix_source/aws-ip-ranges":
+			oldAge = item.DataAgeSeconds
+		case "prefix_source/aws-ip-ranges":
+			newAge = item.DataAgeSeconds
+		}
+	}
+	if oldAge == nil || *oldAge != 86400 || newAge == nil || *newAge != 259200 || *original.Coverage[0].DataAgeSeconds != 86400 {
+		t.Fatalf("replay coverage = %#v", replayed.Coverage)
+	}
+}
