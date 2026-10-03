@@ -233,6 +233,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	}
 	for _, run := range httpRuns {
 		coverage = append(coverage, run.result.Coverage)
+		coverage = append(coverage, run.result.SignalCoverage...)
 		observations = append(observations, run.redirectObservations...)
 		for _, observation := range run.result.Observations {
 			if observation.Scope != model.ScopeExternalRedirect {
@@ -563,6 +564,7 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 		originalCoverage.Capability = "original_collection/" + originalCoverage.Capability
 		coverage = append(coverage, originalCoverage)
 	}
+	coverage = append(coverage, replayScriptSignalCoverage(observations)...)
 	for _, detector := range s.detectors {
 		detected, detectorCoverage := detector.Detect(ctx, observations, s.view)
 		for index := range detected {
@@ -614,6 +616,33 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 		return model.Report{}, fmt.Errorf("validate reclassified report references: %w", err)
 	}
 	return report, nil
+}
+
+func replayScriptSignalCoverage(observations []model.Observation) []model.Coverage {
+	var coverage []model.Coverage
+	for _, observation := range observations {
+		if observation.Type != "http_response" {
+			continue
+		}
+		item := model.Coverage{Capability: "replay_script_signals", Status: model.CoverageComplete, Attempted: 1, Completed: 1}
+		var payload model.HTTPPayload
+		if json.Unmarshal(observation.Payload, &payload) != nil || payload.ScriptScanComplete == nil {
+			item.Status = model.CoverageUnavailable
+			item.Reason = "retained response does not identify script scan completeness"
+		} else if !*payload.ScriptScanComplete {
+			item.Status = model.CoveragePartial
+			item.Omitted = payload.ScriptURLsOmitted
+			if payload.BodyTruncated || payload.BodyReadFailed {
+				item.Truncated = 1
+				item.Omitted++
+				item.Reason = "body collection ended before all script signals could be examined"
+			} else {
+				item.Reason = "unique script signal limit reached"
+			}
+		}
+		coverage = append(coverage, item)
+	}
+	return coverage
 }
 
 func (s *Service) liveProvenance() *model.ReportProvenance {

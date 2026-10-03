@@ -396,3 +396,43 @@ func TestReclassifyUsesSelectedBundlesSourceAgeAtNewClassificationTime(t *testin
 		t.Fatalf("replay coverage = %#v", replayed.Coverage)
 	}
 }
+
+func TestReclassifyDisclosesRetainedScriptSignalCompleteness(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		complete   *bool
+		omitted    int
+		bodyFailed bool
+		wantStatus model.CoverageStatus
+		wantOmit   int
+	}{
+		{name: "script limit", complete: boolPointer(false), omitted: 1, wantStatus: model.CoveragePartial, wantOmit: 1},
+		{name: "body failure", complete: boolPointer(false), bodyFailed: true, wantStatus: model.CoveragePartial, wantOmit: 1},
+		{name: "complete scan", complete: boolPointer(true), wantStatus: model.CoverageComplete},
+		{name: "historical unknown", wantStatus: model.CoverageUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			payload, _ := json.Marshal(model.HTTPPayload{URL: "http://example.com/", StatusCode: 200, ScriptURLs: []string{"https://cdn.example/a.js"}, ScriptURLsOmitted: test.omitted, BodyReadFailed: test.bodyFailed, ScriptScanComplete: test.complete})
+			original := model.Report{
+				ID: "script-report", Target: model.Target{Kind: model.TargetDomain, Original: "example.com", Canonical: "example.com"},
+				Observations: []model.Observation{{ID: "http-1", Type: "http_response", Subject: "example.com", Status: "responded", Payload: payload}},
+			}
+			service := NewService(Dependencies{Store: fixtureResultStore{report: original}, Detectors: []Detector{emptyReplayDetector{}}, View: model.NewAttributionView("bundle", "policy", nil, nil)})
+			replayed, err := service.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: original.ID, BundleID: "bundle"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, item := range replayed.Coverage {
+				if item.Capability == "replay_script_signals" {
+					if item.Status != test.wantStatus || item.Omitted != test.wantOmit {
+						t.Fatalf("replay script coverage = %#v", item)
+					}
+					return
+				}
+			}
+			t.Fatal("missing replay script signal coverage")
+		})
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }

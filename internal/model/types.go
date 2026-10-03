@@ -201,14 +201,17 @@ type DNSPayload struct {
 
 // HTTPPayload contains sanitized response metadata used by the early pipeline.
 type HTTPPayload struct {
-	URL           string       `json:"url"`
-	StatusCode    int          `json:"status_code"`
-	PeerAddress   netip.Addr   `json:"peer_address"`
-	Headers       []HTTPHeader `json:"headers"`
-	BodyHash      string       `json:"body_hash"`
-	BodyLength    int64        `json:"body_length"`
-	BodyTruncated bool         `json:"body_truncated"`
-	ScriptURLs    []string     `json:"script_urls,omitempty"`
+	URL                string       `json:"url"`
+	StatusCode         int          `json:"status_code"`
+	PeerAddress        netip.Addr   `json:"peer_address"`
+	Headers            []HTTPHeader `json:"headers"`
+	BodyHash           string       `json:"body_hash"`
+	BodyLength         int64        `json:"body_length"`
+	BodyTruncated      bool         `json:"body_truncated"`
+	BodyReadFailed     bool         `json:"body_read_failed,omitempty"`
+	ScriptURLs         []string     `json:"script_urls,omitempty"`
+	ScriptURLsOmitted  int          `json:"script_urls_omitted,omitempty"`
+	ScriptScanComplete *bool        `json:"script_scan_complete,omitempty"`
 }
 
 // TechnologyPayload retains a passive detector's raw technology label.

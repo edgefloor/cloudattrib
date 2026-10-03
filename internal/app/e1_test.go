@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1101,4 +1102,103 @@ func TestAnalysisAndLookupCalculateSourceAgeAtUseTime(t *testing.T) {
 	if ageFor(first.Coverage) != 86400 {
 		t.Fatal("later classification changed historical report age")
 	}
+}
+
+func TestAnalyzeDisclosesRetainedScriptLimitInSeparateCoverage(t *testing.T) {
+	var body strings.Builder
+	for index := range 129 {
+		body.WriteString(`<script src="https://cdn.example/`)
+		body.WriteString(strconv.Itoa(index))
+		body.WriteString(`.js"></script>`)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(body.String()))
+	}))
+	t.Cleanup(server.Close)
+	dialer := &fixtureDialer{fixtureAddress: server.Listener.Addr().String(), started: make(chan struct{})}
+	service := app.NewService(app.Dependencies{
+		DNS:         collectdns.New(fixtureDNSClient{failedAAAA: true}.Query, policy.PublicDestinationPolicy()),
+		HTTP:        collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20),
+		WebDetector: fixtureTechnologyDetector{},
+		View:        model.NewAttributionView("bundle", "policy", nil, nil), HTTPScheme: "http", Now: time.Now,
+	})
+	includeWWW := false
+	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull, IncludeWWW: &includeWWW})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := observationByType(report.Observations, "http_response")
+	var payload model.HTTPPayload
+	if err := json.Unmarshal(response.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	var scriptCoverage *model.Coverage
+	var webtechComplete bool
+	for index := range report.Coverage {
+		if report.Coverage[index].Capability == "http_script_signals" {
+			scriptCoverage = &report.Coverage[index]
+		}
+		webtechComplete = webtechComplete || report.Coverage[index].Capability == "webtech" && report.Coverage[index].Status == model.CoverageComplete
+	}
+	if len(payload.ScriptURLs) != 128 || payload.ScriptURLsOmitted != 1 || scriptCoverage == nil || scriptCoverage.Status != model.CoveragePartial || scriptCoverage.Omitted != 1 || !webtechComplete || observationByType(report.Observations, "technology").ID == "" {
+		t.Fatalf("payload = %#v, coverage = %#v", payload, report.Coverage)
+	}
+	if err := report.ValidateReferences(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnalyzeRetainsPartialHTTPResponseAfterBodyReadFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Length", "9999")
+		writer.Header().Set("X-Powered-By", "fixture")
+		writer.Header().Set("Set-Cookie", "session=secret")
+		_, _ = writer.Write([]byte(`<script src="https://cdn.segment.com/analytics.js/v1/key.js?token=secret"></script>`))
+	}))
+	t.Cleanup(server.Close)
+	dialer := &fixtureDialer{fixtureAddress: server.Listener.Addr().String(), started: make(chan struct{})}
+	service := app.NewService(app.Dependencies{
+		DNS:         collectdns.New(fixtureDNSClient{failedAAAA: true}.Query, policy.PublicDestinationPolicy()),
+		HTTP:        collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20),
+		WebDetector: partialResponseTechnologyDetector{},
+		View:        model.NewAttributionView("bundle", "policy", nil, nil), HTTPScheme: "http", Now: time.Now,
+	})
+	includeWWW := false
+	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull, IncludeWWW: &includeWWW})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := observationByType(report.Observations, "http_response")
+	var payload model.HTTPPayload
+	if err := json.Unmarshal(response.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if response.ID == "" || payload.StatusCode != http.StatusOK || !payload.BodyReadFailed || payload.PeerAddress != netip.MustParseAddr("93.184.216.34") || len(payload.ScriptURLs) != 1 || strings.Contains(string(response.Payload), "session=secret") || strings.Contains(string(response.Payload), "token=secret") {
+		t.Fatalf("partial response = %#v, payload = %#v", response, payload)
+	}
+	var partialHTTP, partialScripts bool
+	for _, item := range report.Coverage {
+		partialHTTP = partialHTTP || item.Capability == "http" && item.Status == model.CoveragePartial
+		partialScripts = partialScripts || item.Capability == "http_script_signals" && item.Status == model.CoveragePartial
+	}
+	if !partialHTTP || !partialScripts {
+		t.Fatalf("coverage = %#v", report.Coverage)
+	}
+	technology := observationByType(report.Observations, "technology")
+	if technology.ID == "" || technology.Subject != "example.com" {
+		t.Fatalf("partial response did not produce technology evidence: %#v", technology)
+	}
+	if evidenceForProduct(report.Evidence, "webtech.react").ID == "" {
+		t.Fatalf("partial response technology evidence missing: %#v", report.Evidence)
+	}
+}
+
+type partialResponseTechnologyDetector struct{}
+
+func (partialResponseTechnologyDetector) Detect(_ context.Context, headers http.Header, body []byte) ([]model.TechnologyDetection, model.Coverage) {
+	coverage := model.Coverage{Capability: "webtech", Status: model.CoverageComplete, Attempted: 1, Completed: 1}
+	if headers.Get("X-Powered-By") != "fixture" || !strings.Contains(string(body), "cdn.segment.com/analytics.js") {
+		return nil, coverage
+	}
+	return []model.TechnologyDetection{{Name: "React", DetectorID: "partial-response-fixture-v1", ExplanationGranularity: model.ExplanationGranularityDetectorResult}}, coverage
 }
