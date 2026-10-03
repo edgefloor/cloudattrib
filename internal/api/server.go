@@ -64,8 +64,9 @@ type OperationReadiness struct {
 
 // ReadinessSnapshot is the bounded operational health response.
 type ReadinessSnapshot struct {
-	State      ReadinessState       `json:"state"`
-	Operations []OperationReadiness `json:"operations"`
+	State       ReadinessState                  `json:"state"`
+	Operations  []OperationReadiness            `json:"operations"`
+	Generations *observability.GenerationStatus `json:"generations,omitempty"`
 }
 
 // ReadinessProvider supplies operation-level readiness without exposing storage ownership.
@@ -693,9 +694,36 @@ func (s *server) writeMetrics(writer http.ResponseWriter, request *http.Request)
 	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_ct_ingestion_lag_seconds gauge\ncloudattrib_ct_ingestion_lag_seconds %.3f\n", snapshot.CTIngestionLagSeconds)
 	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_dataset_unavailable_sources gauge\ncloudattrib_dataset_unavailable_sources %d\n", snapshot.UnavailableSources)
 	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_dataset_oldest_source_age_seconds gauge\ncloudattrib_dataset_oldest_source_age_seconds %.3f\n", snapshot.OldestSourceAgeSeconds)
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_loaded_dataset_unavailable_sources gauge\ncloudattrib_loaded_dataset_unavailable_sources %d\n", snapshot.LoadedUnavailableSources)
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_loaded_dataset_oldest_source_age_seconds gauge\ncloudattrib_loaded_dataset_oldest_source_age_seconds %.3f\n", snapshot.LoadedOldestSourceAgeSeconds)
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_bundle_reload_failed gauge\ncloudattrib_bundle_reload_failed %d\n", boolMetric(snapshot.Generations.Reload.Failed))
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_bundle_reload_last_attempt_timestamp_seconds gauge\ncloudattrib_bundle_reload_last_attempt_timestamp_seconds %d\n", unixOrZero(snapshot.Generations.Reload.LastAttemptAt))
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_bundle_reload_last_success_timestamp_seconds gauge\ncloudattrib_bundle_reload_last_success_timestamp_seconds %d\n", unixOrZero(snapshot.Generations.Reload.LastSuccessAt))
+	if desired := snapshot.Generations.Desired; desired != nil {
+		_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_bundle_desired_generation gauge\ncloudattrib_bundle_desired_generation %d\n", desired.Number)
+		_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_bundle_desired_info gauge\ncloudattrib_bundle_desired_info{bundle_id=%q} 1\n", desired.BundleID)
+	}
+	if loaded := snapshot.Generations.Loaded; loaded != nil {
+		_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_bundle_loaded_generation gauge\ncloudattrib_bundle_loaded_generation %d\n", loaded.Number)
+		_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_bundle_loaded_info gauge\ncloudattrib_bundle_loaded_info{bundle_id=%q} 1\n", loaded.BundleID)
+	}
 	if snapshot.ActiveBundleID != "" {
 		_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_bundle_info gauge\ncloudattrib_bundle_info{bundle_id=%q} 1\n", snapshot.ActiveBundleID)
 	}
+}
+
+func boolMetric(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
+}
+
+func unixOrZero(value *time.Time) int64 {
+	if value == nil {
+		return 0
+	}
+	return value.Unix()
 }
 
 func (s *server) defaultReadiness(_ context.Context) ReadinessSnapshot {
