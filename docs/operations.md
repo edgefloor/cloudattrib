@@ -5,6 +5,7 @@ This guide installs and runs the service. For the standalone CLI, start with the
 The service uses PostgreSQL for reports and jobs, Unbound for DNS, and local source files. Operators populate those files before staging a data bundle.
 
 - [Install with Compose](#compose-installation)
+- [Optional local semantic search](#optional-local-semantic-search)
 - [Import and activate data](#import-and-activate-data)
 - [Schedule staging](#scheduled-staging)
 - [Back up and restore](#backup-and-restore)
@@ -36,6 +37,8 @@ Caller-supplied URL queries are rejected before collection and before ordinary j
 ## Compose installation
 
 Use Docker Engine with Compose v2. The pinned Unbound image needs an `amd64` runtime or emulation. See the [SBOM](../sbom/cloudattrib.cdx.json) for image and module identities.
+
+PostgreSQL 18 stores its cluster under `/var/lib/postgresql/18/docker`; the Compose volume mounts `/var/lib/postgresql`. Back up and restore an existing deployment prepared with the older `/var/lib/postgresql/data` layout into a fresh volume before adopting this Compose file. Moving the mount path alone does not migrate the cluster.
 
 ### 1. Create secrets for a new installation
 
@@ -85,6 +88,40 @@ All routes require the bearer token, including health and metrics.
 | `/metrics` | Requests, admission rejections, queue capacity, targets, pins, resident generations, estimated retained bytes, bundle identity, source availability and age, and CT lag. |
 
 A PostgreSQL outage disables durable operations while local lookup may remain usable. A 200 readiness response means at least one operation can run; inspect the operation you need. Before loading datasets, expect enrichment coverage to be unavailable or partial.
+
+## Optional local semantic search
+
+The [embedding Compose override](../compose.embedding.yaml) adds a pinned pgvector PostgreSQL image and a local embedding worker. Use it for a new installation or restore a reviewed database dump into its separate `postgres-embedding` volume. Do not switch an existing installation to this override in place: the override selects a different PostgreSQL image and data volume. Keep the base installation and its backup until the restored service and inventory retrieval have been checked.
+
+Provision one supported FastEmbed model cache and a generation contract before startup. The worker supports `sentence-transformers/all-MiniLM-L6-v2` and `BAAI/bge-small-en-v1.5`, each with 384 dimensions and the `fastembed-0.8.1-default` preprocessing label. The contract records the exact model revision and SHA-256 of its ONNX artifact. See [local worker qualification](benchmarks/local-embedding-worker.md) for the contract fields and tested cache layout. The existing synthetic evaluation does not establish production relevance, and the 100,000-asset warm hybrid p95 exceeded the proposed 500 ms target.
+
+On a new installation, create the base secrets as above, place the model cache and contract in operator-controlled host paths, then set absolute paths:
+
+```sh
+export COMPOSE_FILE=compose.yaml:compose.embedding.yaml
+export CLOUDATTRIB_EMBEDDING_CACHE_DIR=/absolute/path/to/pinned-model-cache
+export CLOUDATTRIB_EMBEDDING_CONTRACT_FILE=/absolute/path/to/generation.json
+docker compose config --quiet
+docker compose build
+docker compose up -d
+docker compose ps
+```
+
+The contract file must be readable by container user 65532. It contains model identity, revision, digest, and formatting metadata; do not put credentials in it. The cache is mounted read-only. The worker has no network, runs as user 65532 with a read-only root filesystem, and serves only a private Unix socket shared with the application. It verifies the cached artifact digest and refuses to serve if it differs from the contract. Build the image and provision the complete cache before running in an isolated environment; neither startup nor inference downloads a model. Back up the cache and contract alongside PostgreSQL. Keep the worker image available for recovery.
+
+After the worker is serving, enable the vector extension and create a generation that matches the mounted contract:
+
+```sh
+docker compose exec app /usr/local/bin/cloudattrib inventory embedding enable-vectors
+docker compose exec app /usr/local/bin/cloudattrib inventory embedding begin \
+  --contract /etc/cloudattrib/embedding-contract.json
+docker compose exec app /usr/local/bin/cloudattrib inventory embedding status \
+  --generation GENERATION_ID
+```
+
+Wait for `status` to show current coverage and no pending or failed tasks, then run `inventory embedding activate --generation GENERATION_ID`. Use `inventory embedding rollback --generation PREVIOUS_ID` to return to a retained generation. Prune only a generation that the status and retention rules mark eligible. Semantic-only retrieval reports a capability error while its active worker is unavailable; hybrid retrieval reports lexical degradation. Check `docker compose logs embedding-worker` for startup failures and verify the model cache, contract, socket volume permissions, and worker state. A forced worker stop can leave a stale socket; the next worker instance recovers it under a per-generation lock.
+
+For recovery, archive the model cache with symlinks intact and copy the generation contract before moving the data. Restore the PostgreSQL dump into a compatible PostgreSQL 18 and pgvector 0.8.6 installation, restore both files to their configured host paths, start the worker, and verify `/health` and an embedding request through its private socket before activating semantic traffic. A local cache-and-contract archive/restore drill returned a 384-dimensional vector from the restarted container. The larger database restore drill kept the original worker and model mounted, so it does not prove end-to-end restore at 100,000 assets.
 
 ## Import and activate data
 

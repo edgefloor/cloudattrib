@@ -311,6 +311,17 @@ func (s *Store) updateInventoryContext(ctx context.Context, tx pgx.Tx, assetID, 
 				assetID, contextID, revision, currentHash, assetGeneration); err != nil {
 				return persistence("advance unchanged inventory embedding work", err)
 			}
+			var vectorStorageReady bool
+			if err := tx.QueryRow(ctx, `SELECT to_regclass('inventory_embeddings') IS NOT NULL`).Scan(&vectorStorageReady); err != nil {
+				return persistence("check inventory vector storage", err)
+			}
+			if vectorStorageReady {
+				if _, err := tx.Exec(ctx, `UPDATE inventory_embeddings SET description_revision=$3,updated_at=clock_timestamp()
+					WHERE asset_id=$1 AND context_id=$2 AND description_hash=$4 AND deletion_generation=$5`,
+					assetID, contextID, revision, currentHash, assetGeneration); err != nil {
+					return persistence("advance unchanged inventory vectors", err)
+				}
+			}
 		}
 	}
 	if !replay {

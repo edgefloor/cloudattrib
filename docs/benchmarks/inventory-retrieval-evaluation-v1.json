@@ -1,0 +1,268 @@
+{
+  "corpus_version": "1",
+  "document_count": 30,
+  "lexical": {
+    "mean_ndcg10": 0.12262943855309168,
+    "mean_recall20": 0.1
+  },
+  "models": {
+    "BAAI/bge-small-en-v1.5": {
+      "dimensions": 384,
+      "document_seconds": 0.07158337498549372,
+      "hybrid_mean_ndcg10": 0.9511239292641195,
+      "hybrid_mean_recall20": 1.0,
+      "load_seconds": 0.04367670801002532,
+      "mean_ndcg10": 0.9511239292641195,
+      "mean_recall20": 1.0,
+      "model_file_bytes": 66465124,
+      "model_file_sha256": "51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431",
+      "per_query": [
+        {
+          "ndcg10": 0.9197207891481876,
+          "query": "customer sign in service",
+          "top5": [
+            "a02",
+            "a09",
+            "a01",
+            "a26",
+            "a25"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "test or preview deployments",
+          "top5": [
+            "a07",
+            "a06",
+            "a12",
+            "a20",
+            "a05"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "email delivery infrastructure",
+          "top5": [
+            "a12",
+            "a11",
+            "a10",
+            "a14",
+            "a13"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "content delivery edge cache",
+          "top5": [
+            "a13",
+            "a14",
+            "a20",
+            "a21",
+            "a26"
+          ]
+        },
+        {
+          "ndcg10": 0.6240505200038379,
+          "query": "developer API endpoints",
+          "top5": [
+            "a18",
+            "a16",
+            "a19",
+            "a24",
+            "a17"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "developer documentation",
+          "top5": [
+            "a18",
+            "a19",
+            "a07",
+            "a20",
+            "a06"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "file and object storage",
+          "top5": [
+            "a20",
+            "a21",
+            "a19",
+            "a06",
+            "a04"
+          ]
+        },
+        {
+          "ndcg10": 0.9674679834891693,
+          "query": "service monitoring and health",
+          "top5": [
+            "a22",
+            "a03",
+            "a24",
+            "a23",
+            "a07"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "payment checkout services",
+          "top5": [
+            "a25",
+            "a26",
+            "a08",
+            "a09",
+            "a24"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "historical or retired evidence",
+          "top5": [
+            "a28",
+            "a05",
+            "a20",
+            "a23",
+            "a29"
+          ]
+        }
+      ],
+      "query_seconds": 0.009408999991137534,
+      "source_revision": "aa8f8b060edb00e03bfdd08813a2949946c8ba55"
+    },
+    "sentence-transformers/all-MiniLM-L6-v2": {
+      "dimensions": 384,
+      "document_seconds": 0.02437604102306068,
+      "hybrid_mean_ndcg10": 0.9386852807234541,
+      "hybrid_mean_recall20": 1.0,
+      "load_seconds": 0.03508529198006727,
+      "mean_ndcg10": 0.9386852807234541,
+      "mean_recall20": 1.0,
+      "model_file_bytes": 90387630,
+      "model_file_sha256": "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+      "per_query": [
+        {
+          "ndcg10": 1.0,
+          "query": "customer sign in service",
+          "top5": [
+            "a01",
+            "a02",
+            "a09",
+            "a22",
+            "a29"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "test or preview deployments",
+          "top5": [
+            "a07",
+            "a06",
+            "a12",
+            "a08",
+            "a09"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "email delivery infrastructure",
+          "top5": [
+            "a11",
+            "a12",
+            "a10",
+            "a14",
+            "a13"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "content delivery edge cache",
+          "top5": [
+            "a13",
+            "a14",
+            "a21",
+            "a20",
+            "a04"
+          ]
+        },
+        {
+          "ndcg10": 0.38685280723454163,
+          "query": "developer API endpoints",
+          "top5": [
+            "a18",
+            "a16",
+            "a19",
+            "a03",
+            "a23"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "developer documentation",
+          "top5": [
+            "a18",
+            "a19",
+            "a03",
+            "a07",
+            "a20"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "file and object storage",
+          "top5": [
+            "a20",
+            "a21",
+            "a19",
+            "a29",
+            "a13"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "service monitoring and health",
+          "top5": [
+            "a22",
+            "a23",
+            "a03",
+            "a24",
+            "a17"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "payment checkout services",
+          "top5": [
+            "a25",
+            "a08",
+            "a26",
+            "a03",
+            "a01"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "historical or retired evidence",
+          "top5": [
+            "a28",
+            "a05",
+            "a23",
+            "a20",
+            "a30"
+          ]
+        }
+      ],
+      "query_seconds": 0.0031325000163633376,
+      "source_revision": "d13954661f83248295ba75c1ed411eef3b7b936e"
+    }
+  },
+  "query_count": 10,
+  "runtime": {
+    "fastembed": "0.8.1",
+    "machine": "arm64",
+    "peak_maxrss": 528449536,
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "python": "3.13.14"
+  }
+}

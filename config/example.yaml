@@ -42,3 +42,7 @@ storage:
   lease_duration: 30s
   maximum_attempts: 3
   report_retention: 720h
+embedding:
+  enabled: false
+  # When enabled, point to an absolute 0700 directory with generation sockets.
+  # socket_directory: /run/cloudattrib/embedding

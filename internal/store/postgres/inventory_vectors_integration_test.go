@@ -25,6 +25,13 @@ func (embed fixtureEmbedder) Embed(ctx context.Context, text string) ([]float32,
 
 func TestPostgresTargetCompletionWhileEmbeddingInferenceRuns(t *testing.T) {
 	store, ctx := openPostgresTest(t, 4)
+	var available bool
+	if err := store.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name='vector')`).Scan(&available); err != nil {
+		t.Fatal(err)
+	}
+	if !available {
+		t.Skip("optional pgvector extension is unavailable")
+	}
 	if err := store.EnableInventoryVectors(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -354,6 +361,46 @@ func TestInventoryEmbeddingGenerationCapturesExistingAndFutureDescriptions(t *te
 	if err := store.pool.QueryRow(ctx, `SELECT embedding <=> '[1,0,0]'::vector FROM inventory_embeddings
 		WHERE generation_id=$1 AND asset_id=$2`, generationID, inventory.AssetID(hostname)).Scan(&distance); err != nil || distance != 0 {
 		t.Fatalf("stored cosine distance=%v error=%v", distance, err)
+	}
+	var beforeRevision int64
+	var beforeHash string
+	if err := store.pool.QueryRow(ctx, `SELECT description_revision,description_hash FROM inventory_asset_contexts WHERE asset_id=$1`,
+		inventory.AssetID(hostname)).Scan(&beforeRevision, &beforeHash); err != nil {
+		t.Fatal(err)
+	}
+	repeated := report
+	repeated.ID = fmt.Sprintf("vector-repeat-report-%d", stamp)
+	repeated.ClassifiedAt = time.Now().UTC().Add(time.Second)
+	repeated.Observations = append([]model.Observation(nil), report.Observations...)
+	repeated.Observations[0].ID = fmt.Sprintf("vector-repeat-dns-%d", stamp)
+	repeated.Observations[0].ObservedAt = repeated.ClassifiedAt
+	if err := store.SaveReport(ctx, repeated); err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		if processed, err := store.ProcessNextInventoryProjection(ctx); err != nil || !processed {
+			t.Fatalf("project unchanged description = %t, %v", processed, err)
+		}
+		var selected string
+		if err := store.pool.QueryRow(ctx, `SELECT description_report_id FROM inventory_asset_contexts WHERE asset_id=$1`,
+			inventory.AssetID(hostname)).Scan(&selected); err != nil {
+			t.Fatal(err)
+		}
+		if selected == repeated.ID {
+			break
+		}
+	}
+	var afterRevision, vectorRevision int64
+	var afterHash string
+	if err := store.pool.QueryRow(ctx, `SELECT c.description_revision,c.description_hash,e.description_revision
+		FROM inventory_asset_contexts c JOIN inventory_embeddings e USING (asset_id,context_id)
+		WHERE c.asset_id=$1 AND e.generation_id=$2`, inventory.AssetID(hostname), generationID).
+		Scan(&afterRevision, &afterHash, &vectorRevision); err != nil {
+		t.Fatal(err)
+	}
+	if afterHash != beforeHash || afterRevision <= beforeRevision || vectorRevision != afterRevision {
+		t.Fatalf("unchanged text lost current vector: before=(%d,%s) after=(%d,%s) vector=%d",
+			beforeRevision, beforeHash, afterRevision, afterHash, vectorRevision)
 	}
 	futureHostname := fmt.Sprintf("vector-future-%d.example.com", stamp)
 	future := report

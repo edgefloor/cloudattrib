@@ -12,6 +12,8 @@ Report history has a configurable 30-day retention period. Cleanup is an explici
 
 For the persistent searchable hostname inventory, imports, CT backfill, and explicit validation jobs, see [Hostname inventory](docs/inventory.md).
 
+Optional local semantic and hybrid retrieval ranks retained inventory descriptions without sending query text to a hosted service. See [semantic search setup](docs/operations.md#optional-local-semantic-search) and its measured limitations.
+
 ## What it detects
 
 Findings distinguish relationships that a single provider label would hide:
