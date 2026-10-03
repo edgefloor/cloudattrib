@@ -87,6 +87,8 @@ The reviewed input is `sources_data.json` from `projectdiscovery/cdncheck` revis
 
 Preserve the top-level category, provider key, CIDR or suffix, source revision, file digest, and provenance group. Validate CIDRs and DNS suffixes before publication.
 
+CDN prefix association IDs use SHA-256 of the source ID, raw provider key, category, and masked prefix. Identical semantic records share one association and retain every source record reference. Revision, digest, and record references remain provenance and do not change that ID. Reloading the same data produces the same association order and IDs. Changing a provider, category, or canonical prefix changes the ID. This replaces the earlier load-order-based CDN IDs; stored reports keep their original IDs and content.
+
 A match in both this data and a mirrored cloud-range source is not independent corroboration unless the provenance groups differ.
 
 ## Normalized manifests

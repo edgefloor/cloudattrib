@@ -135,12 +135,12 @@ func LoadSources(ctx context.Context, directory, buildID string) (LoadedBundle, 
 		if parseErr != nil {
 			return 0, nil, parseErr
 		}
-		for index, record := range result.CIDRs {
+		for _, record := range result.CIDRs {
 			providerID := normalizedID(record.Provider)
 			associations = append(associations, model.Association{
-				ID: fmt.Sprintf("cdn:%s:%s:%d", providerID, record.Prefix, index), Prefix: record.Prefix, ProviderID: providerID,
+				ID: record.ID, Prefix: record.Prefix, ProviderID: providerID,
 				Service: record.Category, Lifecycle: "active", SourceID: record.SourceID, SourceRevision: record.Revision,
-				SourceDigest: record.Digest, RecordRef: record.RecordRef, RecordRefs: []string{record.RecordRef}, ProvenanceGroup: record.ProvenanceGroup,
+				SourceDigest: record.Digest, RecordRef: record.RecordRef, RecordRefs: record.RecordRefs, ProvenanceGroup: record.ProvenanceGroup,
 			})
 		}
 		loaded.Counts.CDNSuffixes = len(result.Suffixes)
