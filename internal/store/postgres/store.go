@@ -58,6 +58,26 @@ func Open(ctx context.Context, connectionString string, maximumTargets int) (*St
 	return openWithConfig(ctx, configuration, maximumTargets)
 }
 
+// OpenInventoryProjector opens a small pool after the primary store has migrated
+// the schema. Projection work cannot consume the primary pool's connections.
+func OpenInventoryProjector(ctx context.Context, connectionString string) (*Store, error) {
+	configuration, err := pgxpool.ParseConfig(connectionString)
+	if err != nil {
+		return nil, model.NewError(model.CodePersistenceUnavailable, "parse projector PostgreSQL configuration", err)
+	}
+	configuration.MaxConns = 2
+	configuration.MinConns = 0
+	pool, err := pgxpool.NewWithConfig(ctx, configuration)
+	if err != nil {
+		return nil, model.NewError(model.CodePersistenceUnavailable, "open projector PostgreSQL pool", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, model.NewError(model.CodePersistenceUnavailable, "ping projector PostgreSQL", err)
+	}
+	return &Store{pool: pool, now: time.Now}, nil
+}
+
 func openWithConfig(ctx context.Context, configuration *pgxpool.Config, maximumTargets int) (*Store, error) {
 	pool, err := pgxpool.NewWithConfig(ctx, configuration)
 	if err != nil {
@@ -573,7 +593,16 @@ func (s *Store) Complete(ctx context.Context, targetID, token string, report mod
 			return model.NewError(model.CodeIdempotencyConflict, "attempt completion conflicts with the committed result", nil)
 		}
 		if report.ID != "" {
-			if err := saveReport(ctx, tx, report); err != nil {
+			var assetID *string
+			var generation *int64
+			if err := tx.QueryRow(ctx, `SELECT inventory_asset_id,inventory_deletion_generation FROM job_targets WHERE id=$1`, targetID).Scan(&assetID, &generation); err != nil {
+				return persistence("load frozen inventory selection", err)
+			}
+			var selection *jobs.InventorySelection
+			if assetID != nil && generation != nil {
+				selection = &jobs.InventorySelection{AssetID: *assetID, DeletionGeneration: *generation}
+			}
+			if err := saveReport(ctx, tx, report, selection); err != nil {
 				return err
 			}
 		}
@@ -844,7 +873,7 @@ func (s *Store) SaveReport(ctx context.Context, report model.Report) error {
 		return persistence("begin report storage", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := saveReport(ctx, tx, report); err != nil {
+	if err := saveReport(ctx, tx, report, nil); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -1144,7 +1173,7 @@ func finalizeJob(ctx context.Context, tx pgx.Tx, jobID string) error {
 	return nil
 }
 
-func saveReport(ctx context.Context, tx pgx.Tx, report model.Report) error {
+func saveReport(ctx context.Context, tx pgx.Tx, report model.Report, selection *jobs.InventorySelection) error {
 	if report.ID == "" {
 		return model.NewError(model.CodeInvalidOptions, "report ID is required", nil)
 	}
@@ -1197,6 +1226,9 @@ func saveReport(ctx context.Context, tx pgx.Tx, report model.Report) error {
 				return persistence("link finding evidence", err)
 			}
 		}
+	}
+	if err := publishReportInventory(ctx, tx, report, selection); err != nil {
+		return err
 	}
 	return nil
 }

@@ -1,11 +1,14 @@
 package postgres
 
 import (
+	"cloudattrib/internal/jobs"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"sort"
 	"time"
 
@@ -235,4 +238,86 @@ func boundedInventorySourceID(source string) string {
 	}
 	digest := sha256.Sum256([]byte(source))
 	return "source-sha256:" + hex.EncodeToString(digest[:])
+}
+
+func publishReportInventory(ctx context.Context, tx pgx.Tx, report model.Report, selection *jobs.InventorySelection) error {
+	raw := ""
+	switch report.Target.Kind {
+	case model.TargetDomain:
+		raw = report.Target.Canonical
+	case model.TargetURL:
+		parsed, err := url.Parse(report.Target.Canonical)
+		if err != nil {
+			return model.NewError(model.CodeInvalidOptions, "report target URL is invalid", err)
+		}
+		raw = parsed.Hostname()
+	default:
+		return nil
+	}
+	hostname, version, err := inventory.Normalize(raw)
+	if err != nil {
+		return model.NewError(model.CodeInvalidOptions, "report target hostname is invalid", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared(174120260922)`); err != nil {
+		return persistence("lock report inventory scope publication", err)
+	}
+	if err := lockInventoryHostname(ctx, tx, hostname); err != nil {
+		return err
+	}
+	startedAt := report.StartedAt
+	var suppressed, stale bool
+	if err := tx.QueryRow(ctx, `SELECT COALESCE((SELECT suppressed FROM inventory_tombstones WHERE hostname=$1),false),
+		COALESCE((SELECT deleted_at >= $2 FROM inventory_tombstones WHERE hostname=$1),false)`, hostname, startedAt).Scan(&suppressed, &stale); err != nil {
+		return persistence("read report inventory deletion", err)
+	}
+	if suppressed || stale {
+		return nil
+	}
+	assetID := inventory.AssetID(hostname)
+	if selection != nil {
+		var generation int64
+		err := tx.QueryRow(ctx, `SELECT deletion_generation FROM inventory_assets WHERE asset_id=$1 AND hostname=$2 FOR UPDATE`, selection.AssetID, hostname).Scan(&generation)
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && generation != selection.DeletionGeneration {
+			return nil
+		}
+		if err != nil {
+			return persistence("validate selected inventory asset generation", err)
+		}
+		assetID = selection.AssetID
+	} else {
+		if _, err := tx.Exec(ctx, `INSERT INTO inventory_assets(asset_id,hostname,reversed_labels,normalization_version,deletion_generation)
+			VALUES($1,$2,$3,$4,COALESCE((SELECT deletion_generation FROM inventory_tombstones WHERE hostname=$2),0))
+			ON CONFLICT (hostname) DO NOTHING`, assetID, hostname, inventory.ReverseLabels(hostname), version); err != nil {
+			return persistence("insert report inventory asset", err)
+		}
+	}
+	sighting := inventory.Sighting{AssetID: assetID, Hostname: hostname, SourceID: boundedInventorySourceID(report.ID)}
+	for _, observation := range report.Observations {
+		if observation.Subject != hostname || observation.ObservedAt.IsZero() {
+			continue
+		}
+		observed := observation.ObservedAt
+		if sighting.FirstObservedAt == nil || observed.Before(*sighting.FirstObservedAt) {
+			sighting.FirstObservedAt = &observed
+		}
+		if sighting.LastObservedAt == nil || observed.After(*sighting.LastObservedAt) {
+			sighting.LastObservedAt = &observed
+		}
+	}
+	verification := "attempted"
+	if sighting.LastObservedAt != nil {
+		verification = "collected"
+	}
+	if err := upsertInventorySighting(ctx, tx, sighting, "report", "report", verification, "", "", "", ""); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO inventory_projection_tasks(report_id,projector_version,deletion_generation)
+		SELECT $1,$2,deletion_generation FROM inventory_assets WHERE asset_id=$3
+		ON CONFLICT (report_id,projector_version) DO UPDATE SET status='pending',attempts=0,
+			lease_token=NULL,lease_expires_at=NULL,next_attempt_at=NULL,last_error='',updated_at=clock_timestamp()
+		WHERE inventory_projection_tasks.status='failed' AND inventory_projection_tasks.attempts>=5`,
+		report.ID, inventory.DescriptionFormatVersion, assetID); err != nil {
+		return persistence("queue inventory report projection", err)
+	}
+	return nil
 }

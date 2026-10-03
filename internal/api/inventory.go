@@ -19,6 +19,9 @@ type InventoryService interface {
 	Read(context.Context, string) (inventory.Asset, error)
 	Archive(context.Context, string, bool) (inventory.Asset, error)
 	Delete(context.Context, string, bool) (int64, error)
+	SearchEvidence(context.Context, inventory.EvidenceQuery) (inventory.EvidencePage, error)
+	ReadEvidence(context.Context, string, string) (inventory.EvidenceResult, error)
+	ProjectionStatus(context.Context) (inventory.ProjectionStatus, error)
 }
 
 // InventoryValidator submits frozen asset selections through existing target jobs.
@@ -48,6 +51,34 @@ func (s *server) inventoryRoute(writer http.ResponseWriter, request *http.Reques
 			return
 		}
 		writeJSON(writer, http.StatusAccepted, job)
+	case request.Method == http.MethodGet && request.URL.Path == "/v1/inventory/projection-status":
+		status, err := s.inventory.ProjectionStatus(request.Context())
+		if err != nil {
+			writeApplicationError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, status)
+	case request.Method == http.MethodGet && request.URL.Path == "/v1/inventory/evidence":
+		values := request.URL.Query()
+		if err := rejectUnknownInventoryQuery(values, "text", "context", "scope", "limit"); err != nil {
+			writeApplicationError(writer, err)
+			return
+		}
+		limit := 0
+		if raw := values.Get("limit"); raw != "" {
+			var err error
+			limit, err = strconv.Atoi(raw)
+			if err != nil {
+				writeApplicationError(writer, model.NewError(model.CodeInvalidOptions, "invalid evidence search limit", err))
+				return
+			}
+		}
+		page, err := s.inventory.SearchEvidence(request.Context(), inventory.EvidenceQuery{Text: values.Get("text"), ScopeRoot: values.Get("scope"), ContextID: values.Get("context"), Limit: limit})
+		if err != nil {
+			writeApplicationError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, page)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/inventory/import":
 		var input inventory.ImportRequest
 		if err := decodeJSONBody(writer, request, s.maxBytes, &input); err != nil {
@@ -117,6 +148,10 @@ func (s *server) inventoryRoute(writer http.ResponseWriter, request *http.Reques
 
 func (s *server) inventoryAssetRoute(writer http.ResponseWriter, request *http.Request) {
 	name := strings.TrimPrefix(request.URL.Path, "/v1/inventory/")
+	evidence := strings.HasSuffix(name, "/evidence")
+	if evidence {
+		name = strings.TrimSuffix(name, "/evidence")
+	}
 	archive := strings.HasSuffix(name, "/archive")
 	if archive {
 		name = strings.TrimSuffix(name, "/archive")
@@ -126,6 +161,17 @@ func (s *server) inventoryAssetRoute(writer http.ResponseWriter, request *http.R
 		return
 	}
 	switch {
+	case request.Method == http.MethodGet && evidence:
+		if err := rejectUnknownInventoryQuery(request.URL.Query(), "context"); err != nil {
+			writeApplicationError(writer, err)
+			return
+		}
+		item, err := s.inventory.ReadEvidence(request.Context(), name, request.URL.Query().Get("context"))
+		if err != nil {
+			writeApplicationError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, item)
 	case request.Method == http.MethodGet && !archive:
 		asset, err := s.inventory.Read(request.Context(), name)
 		if err != nil {

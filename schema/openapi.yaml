@@ -233,6 +233,41 @@ paths:
           $ref: "#/components/responses/IdempotencyConflict"
         "429":
           $ref: "#/components/responses/CapacityExceeded"
+  /v1/inventory/evidence:
+    get:
+      summary: Search retained evidence descriptions without collecting targets.
+      parameters:
+        - name: text
+          in: query
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 256}
+        - name: scope
+          in: query
+          schema: {type: string}
+        - name: context
+          in: query
+          description: Defaults to the configured resolver and destination-policy context. Use unknown for historical reports without context provenance.
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+      responses:
+        "200":
+          description: Ranked bounded window; truncated does not imply a total relevant-match count.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryEvidencePage"
+  /v1/inventory/projection-status:
+    get:
+      summary: Read pending, running, and failed report-projection counts.
+      responses:
+        "200":
+          description: Durable indexing backlog.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryProjectionStatus"
   /v1/inventory:
     get:
       summary: Browse or search known hostnames without making target requests.
@@ -326,6 +361,25 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InventoryAsset"
+  /v1/inventory/{hostname}/evidence:
+    parameters:
+      - name: hostname
+        in: path
+        required: true
+        schema: {type: string}
+    get:
+      summary: Read one asset's projected state or pending status in a resolver context.
+      parameters:
+        - name: context
+          in: query
+          schema: {type: string}
+      responses:
+        "200":
+          description: Evidence description and state, or pending projection state.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryEvidenceResult"
   /v1/providers:
     get:
       summary: Search the canonical provider catalog.
@@ -488,6 +542,67 @@ components:
           type: object
           description: Bounded inventory search request; excludes archived assets and is frozen at admission.
         scope_root: {type: string}
+    InventoryProjectionStatus:
+      type: object
+      required: [pending, running, failed, oldest_pending_age_seconds, protected_reports, protected_document_bytes]
+      properties:
+        pending: {type: integer, format: int64}
+        running: {type: integer, format: int64}
+        failed: {type: integer, format: int64}
+        oldest_pending_age_seconds: {type: integer, format: int64}
+        protected_reports: {type: integer, format: int64}
+        protected_document_bytes: {type: integer, format: int64}
+    InventoryEvidenceResult:
+      type: object
+      required: [asset_id, hostname, context_id, description, description_revision, description_hash, description_report_id, evidence_ids, observation_ids, coverage, latest_coverage, omitted, matched_terms, rank, projection_status]
+      properties:
+        asset_id: {type: string}
+        hostname: {type: string}
+        context_id: {type: string}
+        description: {type: string}
+        description_revision: {type: integer, format: int64}
+        description_hash: {type: string}
+        description_report_id: {type: string}
+        evidence_ids: {type: array, items: {type: string}}
+        observation_ids: {type: array, items: {type: string}}
+        coverage: {type: array, items: {type: string}}
+        latest_coverage: {type: array, items: {type: string}}
+        latest_http_status: {type: integer}
+        latest_http_at: {type: string, format: date-time}
+        last_http_response_status: {type: integer}
+        last_http_response_at: {type: string, format: date-time}
+        last_http_response_report_id: {type: string}
+        omitted: {type: integer}
+        latest_attempt_at: {type: string, format: date-time}
+        latest_attempt_report_id: {type: string}
+        last_positive_at: {type: string, format: date-time}
+        last_positive_report_id: {type: string}
+        matched_terms: {type: array, items: {type: string}}
+        rank: {type: number}
+        projection_status: {type: string, enum: [ready, pending]}
+        dns_questions:
+          type: array
+          items:
+            type: object
+            required: [question_name, rrtype, latest_observed_at, latest_outcome, latest_report_id]
+            properties:
+              question_name: {type: string}
+              rrtype: {type: string}
+              latest_observed_at: {type: string, format: date-time}
+              latest_outcome: {type: string}
+              latest_report_id: {type: string}
+              last_positive_at: {type: string, format: date-time}
+              last_positive_report_id: {type: string}
+    InventoryEvidencePage:
+      type: object
+      required: [items, truncated]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/InventoryEvidenceResult"
+        truncated: {type: boolean}
     InventoryImport:
       type: object
       additionalProperties: false
@@ -533,7 +648,7 @@ components:
       type: object
       required: [kind, id, provenance, verification, first_received_at, last_received_at]
       properties:
-        kind: {type: string, enum: [hostname_import, ct]}
+        kind: {type: string, enum: [hostname_import, ct, report]}
         id: {type: string}
         provenance: {type: string}
         verification: {type: string}

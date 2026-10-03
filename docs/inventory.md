@@ -75,3 +75,19 @@ CLOUDATTRIB_INVENTORY_QUALIFY=1 CLOUDATTRIB_POSTGRES_TEST_DSN='...' go test ./in
 ```
 
 Run only against a disposable database: the qualification truncates inventory tables.
+
+## Search retained evidence
+
+Saved domain and URL reports queue durable projection work in the same transaction as report persistence. A background worker builds bounded descriptions from typed DNS outcomes, HTTP status codes, technology labels, supported findings, and coverage. It records the report, observation, and evidence IDs behind each description. Search reads these stored descriptions and makes no target requests. Raw TXT values, headers, cookies, URL queries, scripts, and page bodies are excluded. Reports do not retain page titles, so descriptions do not include them.
+
+```sh
+cloudattrib inventory search-evidence --query portal --scope example.com
+cloudattrib inventory evidence --hostname api.example.com
+cloudattrib inventory projection-status
+```
+
+Use `GET /v1/inventory/evidence?text=portal&scope=example.com`, `GET /v1/inventory/api.example.com/evidence`, and `GET /v1/inventory/projection-status` for the same operations. Lexical search returns a ranked window of up to 100 matches and a `truncated` flag. It does not claim a total number of relevant assets. The asset read route remains available while projection is pending.
+
+State is separate for each observation context derived from the configured resolver and destination policy. Queries default to the service's current context. Pass `--context unknown` or `?context=unknown` to inspect older reports without enough provenance to identify a resolver. A failed latest attempt does not erase the last positive DNS observation or last HTTP response. A 403 or 500 response counts as a response; it is not labeled unreachable. Coverage and timestamps remain visible beside the description. Reclassification may update findings for old evidence, but it does not advance collection time.
+
+To index stored reports from before this feature, run `cloudattrib inventory backfill-reports --limit 1000` in pages until complete, then `cloudattrib inventory project` or leave the service projector running. Backfill and projection read retained reports only. `projection-status` shows pending, running, and failed tasks, plus the number and document bytes of distinct protected reports. The service runs one projector with a separate pool capped at two PostgreSQL connections, so indexing cannot consume the ordinary job and search pool. The projector retries failures with bounded leases; an exhausted task remains visible as failed. Repeat the relevant report backfill page to requeue exhausted failures. Pending tasks and current support references prevent their source reports from being purged. Inventory deletion removes projected state and support references, and a stale projector cannot recreate the deleted asset.

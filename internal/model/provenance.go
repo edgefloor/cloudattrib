@@ -86,9 +86,10 @@ func (b BuildProvenance) CompatibilityID() string {
 // observations. FingerprintDigest identifies the embedded data used to create
 // retained passive-technology observations.
 type CollectionProvenance struct {
-	Build             BuildProvenance `json:"build"`
-	PolicyRevision    ProvenanceValue `json:"policy_revision"`
-	FingerprintDigest ProvenanceValue `json:"fingerprint_digest"`
+	Build              BuildProvenance  `json:"build"`
+	PolicyRevision     ProvenanceValue  `json:"policy_revision"`
+	FingerprintDigest  ProvenanceValue  `json:"fingerprint_digest"`
+	ObservationContext *ProvenanceValue `json:"observation_context,omitempty"`
 }
 
 // ClassificationProvenance identifies the code and rule artifact that
@@ -125,9 +126,11 @@ func ExplicitReportProvenance(build BuildProvenance, policyRevision, fingerprint
 // UnknownCollectionProvenance returns explicit unknowns for a historical
 // report that predates structured provenance.
 func UnknownCollectionProvenance() CollectionProvenance {
+	unknownContext := UnknownProvenance()
 	return CollectionProvenance{
-		Build:             (BuildProvenance{}).Explicit(),
-		PolicyRevision:    UnknownProvenance(),
-		FingerprintDigest: UnknownProvenance(),
+		Build:              (BuildProvenance{}).Explicit(),
+		PolicyRevision:     UnknownProvenance(),
+		FingerprintDigest:  UnknownProvenance(),
+		ObservationContext: &unknownContext,
 	}
 }

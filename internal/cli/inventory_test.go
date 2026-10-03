@@ -38,3 +38,26 @@ func TestInventoryCLIImportAndNDJSONSearch(t *testing.T) {
 		t.Fatalf("search exit=%d stdout=%q stderr=%q", exit, out.String(), errOut.String())
 	}
 }
+
+func TestInventoryCLIEvidenceSearchAndProjectionStatus(t *testing.T) {
+	t.Parallel()
+	var out, errOut bytes.Buffer
+	dependencies := Dependencies{Stdout: &out, Stderr: &errOut,
+		InventoryEvidenceSearch: func(_ context.Context, query inventory.EvidenceQuery) (inventory.EvidencePage, error) {
+			if query.Text != "portal" || query.ContextID != "unknown" {
+				t.Fatalf("query = %#v", query)
+			}
+			return inventory.EvidencePage{Items: []inventory.EvidenceResult{{Hostname: "api.example.com"}}}, nil
+		},
+		InventoryProjectionStatus: func(context.Context) (inventory.ProjectionStatus, error) {
+			return inventory.ProjectionStatus{Pending: 2}, nil
+		},
+	}
+	if exit := Run(t.Context(), []string{"inventory", "search-evidence", "--query", "portal", "--context", "unknown"}, dependencies); exit != 0 || !strings.Contains(out.String(), "api.example.com") {
+		t.Fatalf("search exit=%d out=%q err=%q", exit, out.String(), errOut.String())
+	}
+	out.Reset()
+	if exit := Run(t.Context(), []string{"inventory", "projection-status"}, dependencies); exit != 0 || !strings.Contains(out.String(), `"pending":2`) {
+		t.Fatalf("status exit=%d out=%q err=%q", exit, out.String(), errOut.String())
+	}
+}
