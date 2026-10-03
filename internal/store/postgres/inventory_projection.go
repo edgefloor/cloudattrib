@@ -15,6 +15,7 @@ import (
 	"cloudattrib/internal/model"
 )
 
+// InventoryProjectionStatus reports durable projection lag and protected report storage.
 func (s *Store) InventoryProjectionStatus(ctx context.Context) (inventory.ProjectionStatus, error) {
 	var status inventory.ProjectionStatus
 	err := s.pool.QueryRow(ctx, `SELECT count(*) FILTER (WHERE status='pending'),count(*) FILTER (WHERE status='running'),
