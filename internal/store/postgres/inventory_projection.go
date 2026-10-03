@@ -285,6 +285,7 @@ func (s *Store) updateInventoryContext(ctx context.Context, tx pgx.Tx, assetID, 
 	if replaceDescription {
 		revision++
 		descriptionAt, descriptionClassifiedAt, descriptionReport = &description.ObservedAt, &report.ClassifiedAt, report.ID
+		previousHash := currentHash
 		currentHash = description.ContentHash
 		if _, err := tx.Exec(ctx, `UPDATE inventory_asset_contexts SET description=$3,description_hash=$4,description_revision=$5,
 			description_format_version=$6,description_observed_at=$7,description_classified_at=$8,description_report_id=$9,
@@ -294,7 +295,23 @@ func (s *Store) updateInventoryContext(ctx context.Context, tx pgx.Tx, assetID, 
 			description.ObservationIDs, description.EvidenceIDs, description.Coverage, description.Omitted); err != nil {
 			return persistence("publish inventory description", err)
 		}
-
+		if currentHash != previousHash {
+			if _, err := tx.Exec(ctx, `INSERT INTO inventory_embedding_tasks(asset_id,context_id,generation_id,description_revision,description_hash,deletion_generation)
+				SELECT $1,$2,generation_id,$3,$4,$5 FROM inventory_embedding_generations WHERE status IN ('building','active')
+				ON CONFLICT (asset_id,context_id,generation_id) DO UPDATE SET
+				description_revision=EXCLUDED.description_revision,description_hash=EXCLUDED.description_hash,
+				deletion_generation=EXCLUDED.deletion_generation,status='pending',attempts=0,
+				lease_token=NULL,lease_expires_at=NULL,next_attempt_at=NULL,last_error='',updated_at=clock_timestamp()`,
+				assetID, contextID, revision, currentHash, assetGeneration); err != nil {
+				return persistence("queue inventory embedding work", err)
+			}
+		} else {
+			if _, err := tx.Exec(ctx, `UPDATE inventory_embedding_tasks SET description_revision=$3,updated_at=clock_timestamp()
+				WHERE asset_id=$1 AND context_id=$2 AND description_hash=$4 AND deletion_generation=$5`,
+				assetID, contextID, revision, currentHash, assetGeneration); err != nil {
+				return persistence("advance unchanged inventory embedding work", err)
+			}
+		}
 	}
 	if !replay {
 		if err := publishInventoryDNSState(ctx, tx, assetID, contextID, hostname, report); err != nil {

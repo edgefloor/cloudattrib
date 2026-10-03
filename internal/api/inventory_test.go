@@ -15,10 +15,11 @@ import (
 )
 
 type inventoryFixture struct {
-	imported      inventory.ImportRequest
-	searched      inventory.SearchRequest
-	evidenceQuery inventory.EvidenceQuery
-	validated     inventory.ValidationRequest
+	imported       inventory.ImportRequest
+	searched       inventory.SearchRequest
+	evidenceQuery  inventory.EvidenceQuery
+	retrievalQuery inventory.RetrievalRequest
+	validated      inventory.ValidationRequest
 }
 
 func (fixture *inventoryFixture) Import(_ context.Context, request inventory.ImportRequest) (inventory.ImportReceipt, error) {
@@ -39,6 +40,10 @@ func (*inventoryFixture) Delete(context.Context, string, bool) (int64, error) { 
 func (fixture *inventoryFixture) SearchEvidence(_ context.Context, query inventory.EvidenceQuery) (inventory.EvidencePage, error) {
 	fixture.evidenceQuery = query
 	return inventory.EvidencePage{Items: []inventory.EvidenceResult{{Hostname: "api.example.com"}}}, nil
+}
+func (fixture *inventoryFixture) Retrieve(_ context.Context, query inventory.RetrievalRequest) (inventory.RetrievalPage, error) {
+	fixture.retrievalQuery = query
+	return inventory.RetrievalPage{Items: []inventory.RetrievalResult{{EvidenceResult: inventory.EvidenceResult{Hostname: "api.example.com"}}}}, nil
 }
 func (*inventoryFixture) ReadEvidence(context.Context, string, string) (inventory.EvidenceResult, error) {
 	return inventory.EvidenceResult{Hostname: "api.example.com", ProjectionStatus: "ready"}, nil
@@ -95,46 +100,39 @@ func TestInventoryHTTPRoutes(t *testing.T) {
 	}
 }
 
-func TestInventoryHTTPValidationSchedulesExplicitJob(t *testing.T) {
+func TestInventoryEvidenceAndValidationHTTPRoutes(t *testing.T) {
 	t.Parallel()
 	fixture := &inventoryFixture{}
 	handler, err := NewHandler(Config{Inventory: fixture, InventoryValidator: fixture})
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/v1/inventory/validate", strings.NewReader(`{"idempotency_key":"check-1","mode":"dns","asset_ids":["asset-1"]}`))
-	request.RemoteAddr = "127.0.0.1:1000"
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusAccepted || fixture.validated.IdempotencyKey != "check-1" || len(fixture.validated.AssetIDs) != 1 {
-		t.Fatalf("validation = %d %s %#v", response.Code, response.Body.String(), fixture.validated)
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		input := httptest.NewRequest(method, path, strings.NewReader(body))
+		input.RemoteAddr = "127.0.0.1:1000"
+		output := httptest.NewRecorder()
+		handler.ServeHTTP(output, input)
+		return output
 	}
-}
-
-func TestInventoryHTTPEvidenceRoutes(t *testing.T) {
-	t.Parallel()
-	fixture := &inventoryFixture{}
-	handler, err := NewHandler(Config{Inventory: fixture})
-	if err != nil {
-		t.Fatal(err)
+	search := request(http.MethodGet, "/v1/inventory/evidence?text=portal&scope=example.com&context=unknown&limit=10", "")
+	if search.Code != http.StatusOK || fixture.evidenceQuery.Text != "portal" || fixture.evidenceQuery.ContextID != "unknown" || fixture.evidenceQuery.Limit != 10 {
+		t.Fatalf("evidence search = %d %s %#v", search.Code, search.Body.String(), fixture.evidenceQuery)
 	}
-	for _, step := range []struct {
-		path string
-		want string
-	}{
-		{"/v1/inventory/evidence?text=portal&context=unknown", "api.example.com"},
-		{"/v1/inventory/api.example.com/evidence?context=unknown", "projection_status"},
-		{"/v1/inventory/projection-status", "pending"},
-	} {
-		request := httptest.NewRequest(http.MethodGet, step.path, nil)
-		request.RemoteAddr = "127.0.0.1:1000"
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, request)
-		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), step.want) {
-			t.Fatalf("%s = %d %s", step.path, response.Code, response.Body.String())
-		}
+	retrieval := request(http.MethodPost, "/v1/inventory/retrieve", `{"text":"customer sign in","mode":"hybrid","scope_root":"example.com","context_id":"unknown","limit":10}`)
+	if retrieval.Code != http.StatusOK || fixture.retrievalQuery.Text != "customer sign in" || fixture.retrievalQuery.Mode != inventory.RetrievalHybrid || fixture.retrievalQuery.ContextID != "unknown" || !strings.Contains(retrieval.Body.String(), "api.example.com") {
+		t.Fatalf("retrieval = %d %s %#v", retrieval.Code, retrieval.Body.String(), fixture.retrievalQuery)
 	}
-	if fixture.evidenceQuery.Text != "portal" || fixture.evidenceQuery.ContextID != "unknown" {
-		t.Fatalf("evidence query = %#v", fixture.evidenceQuery)
+	read := request(http.MethodGet, "/v1/inventory/api.example.com/evidence?context=unknown", "")
+	if read.Code != http.StatusOK || !strings.Contains(read.Body.String(), `"projection_status":"ready"`) {
+		t.Fatalf("evidence read = %d %s", read.Code, read.Body.String())
+	}
+	status := request(http.MethodGet, "/v1/inventory/projection-status", "")
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"pending":0`) {
+		t.Fatalf("projection status = %d %s", status.Code, status.Body.String())
+	}
+	validation := request(http.MethodPost, "/v1/inventory/validate", `{"idempotency_key":"validation-1","mode":"dns","asset_ids":["asset-1"]}`)
+	if validation.Code != http.StatusAccepted || fixture.validated.IdempotencyKey != "validation-1" || len(fixture.validated.AssetIDs) != 1 {
+		t.Fatalf("validation = %d %s %#v", validation.Code, validation.Body.String(), fixture.validated)
 	}
 }

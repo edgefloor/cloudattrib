@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"net"
+	"path/filepath"
 	"time"
 
 	"cloudattrib/internal/policy"
@@ -11,12 +12,13 @@ import (
 
 // Config is the complete local application configuration.
 type Config struct {
-	API      API      `json:"api" yaml:"api"`
-	Resolver Resolver `json:"resolver" yaml:"resolver"`
-	Data     Data     `json:"data" yaml:"data"`
-	Limits   Limits   `json:"limits" yaml:"limits"`
-	CT       CT       `json:"ct" yaml:"ct"`
-	Storage  Storage  `json:"storage" yaml:"storage"`
+	API       API       `json:"api" yaml:"api"`
+	Resolver  Resolver  `json:"resolver" yaml:"resolver"`
+	Data      Data      `json:"data" yaml:"data"`
+	Limits    Limits    `json:"limits" yaml:"limits"`
+	CT        CT        `json:"ct" yaml:"ct"`
+	Storage   Storage   `json:"storage" yaml:"storage"`
+	Embedding Embedding `json:"embedding" yaml:"embedding"`
 }
 
 // API configures the local HTTP listener and trusted-operator identity mode.
@@ -71,6 +73,12 @@ type Storage struct {
 	LeaseDuration   time.Duration `json:"lease_duration" yaml:"lease_duration"`
 	MaximumAttempts int           `json:"maximum_attempts" yaml:"maximum_attempts"`
 	ReportRetention time.Duration `json:"report_retention" yaml:"report_retention"`
+}
+
+// Embedding configures the optional private local inference workers.
+type Embedding struct {
+	Enabled         bool   `json:"enabled" yaml:"enabled"`
+	SocketDirectory string `json:"socket_directory,omitempty" yaml:"socket_directory,omitempty"`
 }
 
 // Default returns the bounded loopback configuration without credentials.
@@ -129,6 +137,9 @@ func (c Config) Validate() error {
 	}
 	if c.Storage.LeaseDuration <= 0 || c.Storage.MaximumAttempts <= 0 || c.Storage.ReportRetention <= 0 {
 		return fmt.Errorf("storage lease, attempt, and report retention settings must be positive")
+	}
+	if c.Embedding.Enabled && !filepath.IsAbs(c.Embedding.SocketDirectory) {
+		return fmt.Errorf("enabled embedding requires an absolute private socket directory")
 	}
 	return nil
 }

@@ -22,6 +22,7 @@ import (
 	"cloudattrib/internal/config"
 	"cloudattrib/internal/datasets"
 	"cloudattrib/internal/detect/webtech"
+	"cloudattrib/internal/embedding"
 	"cloudattrib/internal/inventory"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
@@ -204,9 +205,18 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	if err != nil {
 		return err
 	}
+	inventoryService := inventory.NewService(store).WithDefaultContext(observationContextID(configuration.Resolver, policy.PublicDestinationPolicyRevision))
+	var embeddingProvider *embedding.Provider
+	if configuration.Embedding.Enabled {
+		embeddingProvider, err = embedding.NewProvider(configuration.Embedding.SocketDirectory)
+		if err != nil {
+			return fmt.Errorf("configure local embedding provider: %w", err)
+		}
+		inventoryService.WithEmbeddingProvider(embeddingProvider)
+	}
 	handler, err := api.NewHandler(api.Config{
 		Analyzer: analyzerFactory, Jobs: store, Results: store, Findings: store, Authentication: authentication,
-		Inventory: inventory.NewService(store).WithDefaultContext(observationContextID(configuration.Resolver, policy.PublicDestinationPolicyRevision)), InventoryValidator: inventory.NewValidator(inventory.NewService(store), store, store),
+		Inventory: inventoryService, InventoryValidator: inventory.NewValidator(inventory.NewService(store), store, store),
 		Readiness:                   serviceReadiness{store: store, analyzers: analyzerFactory},
 		Metrics:                     serviceMetricsProvider{durable: store, analyzers: analyzerFactory},
 		MaximumRequestBytes:         configuration.Limits.MaximumRequestBytes,
@@ -247,6 +257,16 @@ func Serve(ctx context.Context, configuration config.Config) error {
 		defer close(projectionDone)
 		runInventoryProjector(workerCtx, projectionStore, func(projectionErr error) { log.Printf("cloudattrib inventory projection: %v", projectionErr) })
 	}()
+	embeddingDone := make(chan struct{})
+	if embeddingProvider != nil {
+		go func() {
+			defer close(embeddingDone)
+			runInventoryEmbeddings(workerCtx, projectionStore, embeddingProvider,
+				func(embeddingErr error) { log.Printf("cloudattrib inventory embedding: %v", embeddingErr) })
+		}()
+	} else {
+		close(embeddingDone)
+	}
 	workerErr := make(chan error, 1)
 	go func() { workerErr <- supervisor.Run(workerCtx) }()
 
@@ -290,6 +310,7 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	}
 	<-reloadDone
 	<-projectionDone
+	<-embeddingDone
 	if !serverStopped {
 		if err := <-serverErr; !errors.Is(err, http.ErrServerClosed) && runErr == nil {
 			runErr = fmt.Errorf("serve API: %w", err)

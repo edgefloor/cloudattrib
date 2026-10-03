@@ -113,6 +113,20 @@ func main() {
 		return localruntime.BackfillCTInventory(ctx, configuration, cursor, limit)
 	}, InventoryEvidenceSearch: func(ctx context.Context, request inventory.EvidenceQuery) (inventory.EvidencePage, error) {
 		return localruntime.SearchInventoryEvidence(ctx, configuration, request)
+	}, InventoryRetrieve: func(ctx context.Context, request inventory.RetrievalRequest) (inventory.RetrievalPage, error) {
+		return localruntime.RetrieveInventory(ctx, configuration, request)
+	}, InventoryVectorsEnable: func(ctx context.Context) error {
+		return localruntime.EnableInventoryVectors(ctx, configuration)
+	}, InventoryEmbeddingBegin: func(ctx context.Context, generation inventory.EmbeddingGeneration) (int64, error) {
+		return localruntime.BeginInventoryEmbeddingGeneration(ctx, configuration, generation)
+	}, InventoryEmbeddingStatus: func(ctx context.Context, generationID string) (inventory.EmbeddingCoverage, error) {
+		return localruntime.InventoryEmbeddingCoverage(ctx, configuration, generationID)
+	}, InventoryEmbeddingActivate: func(ctx context.Context, generationID string) (inventory.EmbeddingCoverage, error) {
+		return localruntime.ActivateInventoryEmbeddingGeneration(ctx, configuration, generationID)
+	}, InventoryEmbeddingRollback: func(ctx context.Context, generationID string) (inventory.EmbeddingCoverage, error) {
+		return localruntime.RollbackInventoryEmbeddingGeneration(ctx, configuration, generationID)
+	}, InventoryEmbeddingPrune: func(ctx context.Context, generationID string) error {
+		return localruntime.PruneInventoryEmbeddingGeneration(ctx, configuration, generationID)
 	}, InventoryEvidenceRead: func(ctx context.Context, hostname, contextID string) (inventory.EvidenceResult, error) {
 		return localruntime.ReadInventoryEvidence(ctx, configuration, hostname, contextID)
 	}, InventoryProjectionStatus: func(ctx context.Context) (inventory.ProjectionStatus, error) {
