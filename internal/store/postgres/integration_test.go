@@ -148,6 +148,104 @@ func TestPostgresAPIJobPollingIsConstantAndSkipsReportDocuments(t *testing.T) {
 	}
 }
 
+func TestPostgresObservationEndpointReadsBoundedProjectionPages(t *testing.T) {
+	dsn := os.Getenv("CLOUDATTRIB_POSTGRES_TEST_DSN")
+	if dsn == "" {
+		t.Skip("CLOUDATTRIB_POSTGRES_TEST_DSN is not set")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	configuration, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracer := &queryRecorder{}
+	configuration.ConnConfig.Tracer = tracer
+	store, err := openWithConfig(ctx, configuration, 2000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(store.Close)
+	if _, err := store.pool.Exec(ctx, `TRUNCATE ct_records,ct_checkpoints,finding_evidence,findings,evidence,observations,job_targets,reports,bundle_pins,jobs,dataset_bundles RESTART IDENTITY CASCADE`); err != nil {
+		t.Fatal(err)
+	}
+	timestamp := time.Date(2026, 1, 2, 3, 4, 5, 123456789, time.UTC)
+	report := model.Report{SchemaVersion: model.SchemaVersion, ID: "projection-observations", Target: model.Target{Original: "example.com", Canonical: "example.com", Kind: model.TargetDomain}, Status: model.StatusComplete, ClassifiedAt: timestamp}
+	for index := range 1000 {
+		report.Observations = append(report.Observations, model.Observation{ID: fmt.Sprintf("obs-%04d", index), Type: "fixture", Subject: "example.com", ObservedAt: timestamp, Status: "answered", Payload: model.JSONValue(`{"value":1}`)})
+	}
+	if err := store.SaveReport(ctx, report); err != nil {
+		t.Fatal(err)
+	}
+	handler, err := api.NewHandler(api.Config{Results: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cursor := ""
+	seen := make(map[string]bool)
+	for len(seen) < len(report.Observations) {
+		path := "/v1/results/" + report.ID + "/observations?limit=7"
+		if cursor != "" {
+			path += "&cursor=" + cursor
+		}
+		tracer.Start()
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequestWithContext(ctx, http.MethodGet, path, nil)
+		request.RemoteAddr = "127.0.0.1:1000"
+		handler.ServeHTTP(recorder, request)
+		statements := tracer.Stop()
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("observation status=%d body=%s", recorder.Code, recorder.Body.String())
+		}
+		if len(statements) != 1 || !strings.Contains(strings.ToLower(statements[0]), "from observations") || strings.Contains(strings.ToLower(statements[0]), "r.document") {
+			t.Fatalf("page queries = %#v", statements)
+		}
+		var page struct {
+			Items      []model.Observation `json:"items"`
+			NextCursor string              `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range page.Items {
+			var payload map[string]int
+			if err := json.Unmarshal(item.Payload, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if seen[item.ID] || !item.ObservedAt.Equal(timestamp) || payload["value"] != 1 {
+				t.Fatalf("duplicate or changed observation = %#v", item)
+			}
+			seen[item.ID] = true
+		}
+		if page.NextCursor == "" && len(seen) < len(report.Observations) {
+			t.Fatalf("pagination stopped after %d observations", len(seen))
+		}
+		cursor = page.NextCursor
+	}
+	if len(seen) != len(report.Observations) {
+		t.Fatalf("seen %d observations", len(seen))
+	}
+	missing, err := store.ObservationPage(ctx, app.ObservationPageQuery{ReportID: "missing-report", Limit: 7})
+	if model.ErrorCodeOf(err) != model.CodeInvalidTarget || len(missing.Items) != 0 {
+		t.Fatalf("missing report page = %#v, %v", missing, err)
+	}
+	emptyReport := report
+	emptyReport.ID = "empty-observation-report"
+	emptyReport.Observations = nil
+	if err := store.SaveReport(ctx, emptyReport); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := store.ObservationPage(ctx, app.ObservationPageQuery{ReportID: "empty-observation-report", Limit: 7})
+	if err != nil || len(empty.Items) != 0 || empty.HasMore {
+		t.Fatalf("empty report page = %#v, %v", empty, err)
+	}
+	cancelled, cancelPage := context.WithCancel(ctx)
+	cancelPage()
+	if _, err := store.ObservationPage(cancelled, app.ObservationPageQuery{ReportID: report.ID, Limit: 7}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled observation page error = %v, want context cancellation", err)
+	}
+}
+
 func TestPostgresAPIAndWorkerShareTargetAdmissionAcrossBundles(t *testing.T) {
 	for _, scenario := range []struct {
 		name, activeBundle, workerBundle string

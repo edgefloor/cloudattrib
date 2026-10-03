@@ -666,6 +666,61 @@ func (s *Store) LoadReport(ctx context.Context, id string) (model.Report, error)
 	return report, nil
 }
 
+// ObservationPage reads one keyset page from the observation projection.
+func (s *Store) ObservationPage(ctx context.Context, query app.ObservationPageQuery) (app.ObservationPage, error) {
+	if query.ReportID == "" || query.Limit < 1 || query.Limit > 500 || (query.AfterAt == nil) != (query.AfterID == "") {
+		return app.ObservationPage{}, model.NewError(model.CodeInvalidOptions, "observation page query is invalid", nil)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT r.id,o.observed_at,o.observation_id,o.document
+		FROM reports r
+		LEFT JOIN LATERAL (
+			SELECT observed_at,observation_id,document FROM observations
+			WHERE report_id=r.id AND ($2::timestamptz IS NULL OR (observed_at,observation_id)>($2,$3))
+			ORDER BY observed_at,observation_id LIMIT $4
+		) o ON true
+		WHERE r.id=$1`, query.ReportID, query.AfterAt, query.AfterID, query.Limit+1)
+	if err != nil {
+		return app.ObservationPage{}, persistence("read observation page", err)
+	}
+	defer rows.Close()
+	page := app.ObservationPage{Items: make([]model.Observation, 0, query.Limit)}
+	found := false
+	for rows.Next() {
+		found = true
+		var reportID string
+		var observedAt *time.Time
+		var observationID *string
+		var document []byte
+		if err := rows.Scan(&reportID, &observedAt, &observationID, &document); err != nil {
+			return app.ObservationPage{}, persistence("scan observation page", err)
+		}
+		if observationID == nil {
+			continue
+		}
+		if len(page.Items) == query.Limit {
+			page.HasMore = true
+			break
+		}
+		var observation model.Observation
+		if err := json.Unmarshal(document, &observation); err != nil {
+			return app.ObservationPage{}, persistence("decode observation page", err)
+		}
+		page.Items = append(page.Items, observation)
+		page.LastAt, page.LastID = *observedAt, *observationID
+	}
+	if err := rows.Err(); err != nil {
+		return app.ObservationPage{}, persistence("iterate observation page", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return app.ObservationPage{}, err
+	}
+	if !found {
+		return app.ObservationPage{}, model.NewError(model.CodeInvalidTarget, "report was not found", nil)
+	}
+	return page, nil
+}
+
 type findingCursor struct {
 	ClassifiedAt time.Time `json:"classified_at"`
 	ReportID     string    `json:"report_id"`

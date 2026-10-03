@@ -2,12 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -340,6 +342,9 @@ func TestStoredResultAndObservationPagination(t *testing.T) {
 	}
 	if second.Code != http.StatusOK || len(page.Items) != 1 || page.Items[0].ID != "later" || page.NextCursor != "" {
 		t.Fatalf("second page = %d %#v", second.Code, page)
+	}
+	if results.loadCalls != 1 || results.pageCalls != 2 {
+		t.Fatalf("full report loads=%d, projection pages=%d", results.loadCalls, results.pageCalls)
 	}
 }
 
@@ -674,7 +679,9 @@ func (a *fixtureAnalyzer) Reclassify(_ context.Context, request model.Reclassify
 }
 
 type fixtureResultStore struct {
-	reports map[string]model.Report
+	reports   map[string]model.Report
+	loadCalls int
+	pageCalls int
 }
 
 type fixtureFindingStore struct {
@@ -698,6 +705,7 @@ func (s *fixtureResultStore) SaveReport(_ context.Context, report model.Report) 
 }
 
 func (s *fixtureResultStore) LoadReport(_ context.Context, id string) (model.Report, error) {
+	s.loadCalls++
 	report, ok := s.reports[id]
 	if !ok {
 		return model.Report{}, model.NewError(model.CodeInvalidTarget, "report was not found", nil)
@@ -762,4 +770,82 @@ func decodeError(t *testing.T, recorder *httptest.ResponseRecorder) errorEnvelop
 		t.Fatalf("decode error envelope: %v", err)
 	}
 	return envelope.Error
+}
+
+func TestObservationPagingValidatesCursorBeforeStoreWork(t *testing.T) {
+	results := newFixtureResultStore()
+	handler := mustHandler(t, Config{Results: results})
+	for _, raw := range []string{
+		"not-base64!",
+		base64.RawURLEncoding.EncodeToString([]byte("-1")),
+		base64.RawURLEncoding.EncodeToString([]byte("2")),
+		encodeObservationCursor("other-report", time.Now(), "obs-1"),
+		base64.RawURLEncoding.EncodeToString([]byte(`{"v":2,"report_id":"report-1","observed_at":"2026-01-01T00:00:00Z","observation_id":"obs-1"}`)),
+	} {
+		response := serve(handler, http.MethodGet, "/v1/results/report-1/observations?cursor="+raw, "", "127.0.0.1:1000", nil)
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("cursor %q status = %d: %s", raw, response.Code, response.Body.String())
+		}
+	}
+	for _, limit := range []string{"0", "-1", "501", "invalid"} {
+		response := serve(handler, http.MethodGet, "/v1/results/report-1/observations?limit="+limit, "", "127.0.0.1:1000", nil)
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("limit %q status = %d", limit, response.Code)
+		}
+	}
+	if results.loadCalls != 0 || results.pageCalls != 0 {
+		t.Fatalf("invalid requests reached store: loads=%d pages=%d", results.loadCalls, results.pageCalls)
+	}
+}
+
+func TestObservationPagingDistinguishesMissingReportFromEmptyPage(t *testing.T) {
+	results := newFixtureResultStore()
+	empty := fixtureReport(model.StatusComplete)
+	empty.Observations = nil
+	if err := results.SaveReport(t.Context(), empty); err != nil {
+		t.Fatal(err)
+	}
+	handler := mustHandler(t, Config{Results: results})
+	missing := serve(handler, http.MethodGet, "/v1/results/missing/observations", "", "127.0.0.1:1000", nil)
+	emptyPage := serve(handler, http.MethodGet, "/v1/results/"+empty.ID+"/observations", "", "127.0.0.1:1000", nil)
+	if missing.Code == http.StatusOK || emptyPage.Code != http.StatusOK || results.loadCalls != 0 {
+		t.Fatalf("missing=%d empty=%d full loads=%d", missing.Code, emptyPage.Code, results.loadCalls)
+	}
+	var page struct {
+		Items []model.Observation `json:"items"`
+	}
+	if err := json.Unmarshal(emptyPage.Body.Bytes(), &page); err != nil || len(page.Items) != 0 {
+		t.Fatalf("empty page = %#v, error=%v", page, err)
+	}
+}
+
+func (s *fixtureResultStore) ObservationPage(ctx context.Context, query app.ObservationPageQuery) (app.ObservationPage, error) {
+	s.pageCalls++
+	if err := ctx.Err(); err != nil {
+		return app.ObservationPage{}, err
+	}
+	report, ok := s.reports[query.ReportID]
+	if !ok {
+		return app.ObservationPage{}, model.NewError(model.CodeInvalidTarget, "report was not found", nil)
+	}
+	ordered := slices.Clone(report.Observations)
+	slices.SortFunc(ordered, func(a, b model.Observation) int {
+		if cmp := a.ObservedAt.Compare(b.ObservedAt); cmp != 0 {
+			return cmp
+		}
+		return strings.Compare(a.ID, b.ID)
+	})
+	page := app.ObservationPage{Items: make([]model.Observation, 0, query.Limit)}
+	for _, item := range ordered {
+		if query.AfterAt != nil && (item.ObservedAt.Before(*query.AfterAt) || item.ObservedAt.Equal(*query.AfterAt) && item.ID <= query.AfterID) {
+			continue
+		}
+		if len(page.Items) == query.Limit {
+			page.HasMore = true
+			break
+		}
+		page.Items = append(page.Items, item)
+		page.LastAt, page.LastID = item.ObservedAt, item.ID
+	}
+	return page, nil
 }

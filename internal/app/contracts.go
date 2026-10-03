@@ -77,6 +77,27 @@ type ResultStore interface {
 	LoadReport(context.Context, string) (model.Report, error)
 }
 
+// ObservationPageQuery selects a bounded page within one immutable report.
+type ObservationPageQuery struct {
+	ReportID string
+	AfterAt  *time.Time
+	AfterID  string
+	Limit    int
+}
+
+// ObservationPage contains one ordered page and whether a later row exists.
+type ObservationPage struct {
+	Items   []model.Observation
+	HasMore bool
+	LastAt  time.Time
+	LastID  string
+}
+
+// ObservationPageReader reads stored observation projections without loading a report.
+type ObservationPageReader interface {
+	ObservationPage(context.Context, ObservationPageQuery) (ObservationPage, error)
+}
+
 // FindingQuery selects a bounded deterministic page of stored findings.
 type FindingQuery struct {
 	Domain       string

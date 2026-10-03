@@ -51,3 +51,9 @@ func TestActivationGenerationMigrationContainsDurableOperationIdentity(t *testin
 		}
 	}
 }
+
+func TestObservationPageMigrationIndexesKeysetOrder(t *testing.T) {
+	if !strings.Contains(observationPageMigration, "ON observations(report_id, observed_at, observation_id)") {
+		t.Fatal("observation page migration lacks report-scoped keyset index")
+	}
+}
