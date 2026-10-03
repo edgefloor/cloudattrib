@@ -115,6 +115,36 @@ func NewController(limits Limits, concurrentTargets, concurrentDNS, concurrentHT
 
 type executionKey struct{}
 
+type synchronousAdmissionKey struct{}
+
+type synchronousAdmission struct {
+	executionParent context.Context
+	onAdmitted      func()
+}
+
+// WithSynchronousAdmission bounds pre-execution work while preserving the
+// original request context for the target deadline after admission.
+func WithSynchronousAdmission(waitContext, executionParent context.Context, onAdmitted func()) context.Context {
+	return context.WithValue(waitContext, synchronousAdmissionKey{}, synchronousAdmission{executionParent: executionParent, onAdmitted: onAdmitted})
+}
+
+// PromoteSynchronousAdmission ends API admission when no controller is used.
+func PromoteSynchronousAdmission(ctx context.Context) (context.Context, error) {
+	if admission, ok := ctx.Value(synchronousAdmissionKey{}).(synchronousAdmission); ok {
+		if err := ctx.Err(); err != nil {
+			return nil, model.NewError(model.CodeCancelled, "request cancelled before admission", err)
+		}
+		if err := admission.executionParent.Err(); err != nil {
+			return nil, model.NewError(model.CodeCancelled, "request cancelled before admission", err)
+		}
+		if admission.onAdmitted != nil {
+			admission.onAdmitted()
+		}
+		return admission.executionParent, nil
+	}
+	return ctx, nil
+}
+
 type execution struct {
 	controller *Controller
 	mu         sync.Mutex
@@ -131,13 +161,35 @@ type execution struct {
 // function is idempotent.
 func (c *Controller) Begin(ctx context.Context) (context.Context, func(), error) {
 	if c == nil {
-		return ctx, func() {}, nil
+		executionCtx, err := PromoteSynchronousAdmission(ctx)
+		return executionCtx, func() {}, err
 	}
+	admission, synchronous := ctx.Value(synchronousAdmissionKey{}).(synchronousAdmission)
 	c.targetWaiters.Add(1)
 	err := acquirePermit(ctx, c.targets)
 	c.targetWaiters.Add(-1)
 	if err != nil {
+		if synchronous && ctx.Err() == context.DeadlineExceeded && admission.executionParent.Err() == nil {
+			return nil, nil, model.NewError(model.CodeQueueCapacityExceeded, "synchronous admission deadline exceeded", err)
+		}
 		return nil, nil, model.NewError(model.CodeCancelled, "wait for target admission", err)
+	}
+	if err := ctx.Err(); err != nil {
+		releasePermit(c.targets)
+		if synchronous && err == context.DeadlineExceeded && admission.executionParent.Err() == nil {
+			return nil, nil, model.NewError(model.CodeQueueCapacityExceeded, "synchronous admission deadline exceeded", err)
+		}
+		return nil, nil, model.NewError(model.CodeCancelled, "wait for target admission", err)
+	}
+	if synchronous {
+		if err := admission.executionParent.Err(); err != nil {
+			releasePermit(c.targets)
+			return nil, nil, model.NewError(model.CodeCancelled, "request cancelled before admission", err)
+		}
+		if admission.onAdmitted != nil {
+			admission.onAdmitted()
+		}
+		ctx = admission.executionParent
 	}
 	executionCtx, cancel := context.WithTimeout(ctx, c.limits.TargetDeadline)
 	state := &execution{

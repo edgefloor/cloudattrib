@@ -26,18 +26,22 @@ import (
 const maximumRequestBytes int64 = 1 << 20
 const maximumBatchTargets = 1000
 const maximumPageSize = 500
+const defaultSynchronousWaiters = 32
+const defaultSynchronousAdmissionTimeout = 5 * time.Second
 
 // Config supplies the application operations and HTTP boundary settings.
 type Config struct {
-	Analyzer            app.Analyzer
-	Jobs                jobs.Store
-	Results             app.ResultStore
-	Observations        app.ObservationPageReader
-	Findings            app.FindingStore
-	Readiness           ReadinessProvider
-	Metrics             observability.Provider
-	Authentication      Authentication
-	MaximumRequestBytes int64
+	Analyzer                    app.Analyzer
+	Jobs                        jobs.Store
+	Results                     app.ResultStore
+	Observations                app.ObservationPageReader
+	Findings                    app.FindingStore
+	Readiness                   ReadinessProvider
+	Metrics                     observability.Provider
+	Authentication              Authentication
+	MaximumRequestBytes         int64
+	SynchronousWaiters          int
+	SynchronousAdmissionTimeout time.Duration
 }
 
 // ReadinessState describes whether an enabled operation can execute.
@@ -78,6 +82,18 @@ func NewHandler(config Config) (http.Handler, error) {
 	if maxBytes < 1 || maxBytes > maximumRequestBytes {
 		return nil, fmt.Errorf("maximum request bytes must be between 1 and %d", maximumRequestBytes)
 	}
+	waiters := config.SynchronousWaiters
+	if waiters == 0 {
+		waiters = defaultSynchronousWaiters
+	}
+	admissionTimeout := config.SynchronousAdmissionTimeout
+	if admissionTimeout == 0 {
+		admissionTimeout = defaultSynchronousAdmissionTimeout
+	}
+	gate, err := newSynchronousGate(waiters, admissionTimeout)
+	if err != nil {
+		return nil, err
+	}
 	authenticator, err := newAuthenticator(config.Authentication)
 	if err != nil {
 		return nil, fmt.Errorf("configure authentication: %w", err)
@@ -93,34 +109,37 @@ func NewHandler(config Config) (http.Handler, error) {
 		observationReader, _ = config.Results.(app.ObservationPageReader)
 	}
 	return &server{
-		analyzer:     config.Analyzer,
-		jobs:         config.Jobs,
-		results:      config.Results,
-		observations: observationReader,
-		findings:     config.Findings,
-		readiness:    config.Readiness,
-		metrics:      config.Metrics,
-		authenticate: authenticator,
-		maxBytes:     maxBytes,
-		providers:    providers,
-		products:     products,
+		analyzer:             config.Analyzer,
+		jobs:                 config.Jobs,
+		results:              config.Results,
+		observations:         observationReader,
+		findings:             config.Findings,
+		readiness:            config.Readiness,
+		metrics:              config.Metrics,
+		authenticate:         authenticator,
+		maxBytes:             maxBytes,
+		synchronousAdmission: gate,
+		providers:            providers,
+		products:             products,
 	}, nil
 }
 
 type server struct {
-	analyzer            app.Analyzer
-	jobs                jobs.Store
-	results             app.ResultStore
-	observations        app.ObservationPageReader
-	findings            app.FindingStore
-	readiness           ReadinessProvider
-	metrics             observability.Provider
-	authenticate        func(*http.Request) (string, bool)
-	maxBytes            int64
-	providers           []rules.Provider
-	products            []rules.Product
-	requests            atomic.Uint64
-	admissionRejections atomic.Uint64
+	analyzer                       app.Analyzer
+	jobs                           jobs.Store
+	results                        app.ResultStore
+	observations                   app.ObservationPageReader
+	findings                       app.FindingStore
+	readiness                      ReadinessProvider
+	metrics                        observability.Provider
+	authenticate                   func(*http.Request) (string, bool)
+	maxBytes                       int64
+	synchronousAdmission           *synchronousGate
+	providers                      []rules.Provider
+	products                       []rules.Product
+	requests                       atomic.Uint64
+	admissionRejections            atomic.Uint64
+	synchronousAdmissionRejections atomic.Uint64
 }
 
 func (s *server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -280,8 +299,17 @@ func (s *server) analyze(writer http.ResponseWriter, request *http.Request) {
 		writeApplicationError(writer, model.NewError(model.CodePersistenceUnavailable, "synchronous analysis persistence is unavailable", nil))
 		return
 	}
-	report, err := s.analyzer.Analyze(request.Context(), input)
+	admission, err := s.synchronousAdmission.begin(request.Context())
 	if err != nil {
+		s.recordSynchronousAdmissionError(err)
+		writeApplicationError(writer, err)
+		return
+	}
+	defer admission.finish()
+	report, err := s.analyzer.Analyze(admission.ctx, input)
+	err = admission.error(err)
+	if err != nil {
+		s.recordSynchronousAdmissionError(err)
 		writeApplicationError(writer, err)
 		return
 	}
@@ -592,13 +620,22 @@ func (s *server) lookupIP(writer http.ResponseWriter, request *http.Request) {
 		writeApplicationError(writer, model.NewError(model.CodeCapabilityUnavailable, "local IP lookup is unavailable", nil))
 		return
 	}
-	result, err := s.analyzer.LookupIP(request.Context(), model.IPLookupRequest{
+	admission, err := s.synchronousAdmission.begin(request.Context())
+	if err != nil {
+		s.recordSynchronousAdmissionError(err)
+		writeApplicationError(writer, err)
+		return
+	}
+	defer admission.finish()
+	result, err := s.analyzer.LookupIP(admission.ctx, model.IPLookupRequest{
 		Address:        address.Unmap(),
 		Match:          input.Match,
 		IncludeRetired: input.IncludeRetired,
 		Categories:     input.Categories,
 	})
+	err = admission.error(err)
 	if err != nil {
+		s.recordSynchronousAdmissionError(err)
 		writeApplicationError(writer, err)
 		return
 	}
@@ -623,10 +660,19 @@ func (s *server) recordAdmissionRejection(err error) {
 	}
 }
 
+func (s *server) recordSynchronousAdmissionError(err error) {
+	if model.ErrorCodeOf(err) == model.CodeQueueCapacityExceeded {
+		s.admissionRejections.Add(1)
+		s.synchronousAdmissionRejections.Add(1)
+	}
+}
+
 func (s *server) writeMetrics(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_http_requests_total counter\ncloudattrib_http_requests_total %d\n", s.requests.Load())
 	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_admission_rejections_total counter\ncloudattrib_admission_rejections_total %d\n", s.admissionRejections.Load())
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_synchronous_admission_rejections_total counter\ncloudattrib_synchronous_admission_rejections_total %d\n", s.synchronousAdmissionRejections.Load())
+	_, _ = fmt.Fprintf(writer, "# TYPE cloudattrib_synchronous_admission_waiting gauge\ncloudattrib_synchronous_admission_waiting %d\n", s.synchronousAdmission.waiting.Load())
 	if s.metrics == nil {
 		return
 	}

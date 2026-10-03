@@ -204,6 +204,8 @@ The `limits.target` settings apply to one admitted target execution except `http
 
 The `concurrent_targets`, `concurrent_http`, and `concurrent_dns` settings apply to the service process. Per-target HTTP and DNS concurrency remains bounded at 4 and 8. `maximum_backlog_targets` is a separate database-wide bound for all nonterminal reservations, including retries.
 
+Synchronous analysis and IP lookup allow at most `limits.synchronous_waiters` requests to wait for the shared target permit (default 32). Waiting longer than `limits.synchronous_admission_timeout` (default `5s`) or exceeding that waiter count returns HTTP 429 with `queue_capacity_exceeded`; collection does not start for a rejected request. The target deadline starts after the permit is acquired. The HTTP server bounds response writes with an overall write deadline equal to admission timeout plus target deadline plus `limits.response_write_grace` (default `10s`). `/metrics` exposes `cloudattrib_synchronous_admission_waiting` and `cloudattrib_synchronous_admission_rejections_total`.
+
 ### Control bundle residency
 
 Set `limits.maximum_resident_generations` to the maximum number of active, captured, or unused bundle analyzers that the service can retain. The default is 4. The minimum is 2 because activation loads a replacement before it releases last-known-good protection.
