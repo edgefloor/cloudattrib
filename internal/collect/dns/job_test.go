@@ -93,17 +93,17 @@ func TestJobExpiresPositiveAndNegativeAnswers(t *testing.T) {
 	job := collector.NewJob()
 	for _, questionType := range []uint16{typeCNAME, typeMX} {
 		question := model.DNSQuestion{Name: "EXAMPLE.COM.", Type: questionType}
-		first, _, firstAt, cached := job.query(t.Context(), question)
+		first, firstAt, cached, _ := job.query(t.Context(), question)
 		if cached || first.Question.Name != "example.com" {
 			t.Fatalf("first query = %#v, cached=%t", first, cached)
 		}
 		clock = clock.Add(29 * time.Second)
-		_, _, cachedAt, cached := job.query(t.Context(), question)
+		_, cachedAt, cached, _ := job.query(t.Context(), question)
 		if !cached || !cachedAt.Equal(firstAt) {
 			t.Fatalf("answer was not reused within TTL: cached=%t at=%v first=%v", cached, cachedAt, firstAt)
 		}
 		clock = clock.Add(2 * time.Second)
-		_, _, refreshedAt, cached := job.query(t.Context(), question)
+		_, refreshedAt, cached, _ := job.query(t.Context(), question)
 		if cached || !refreshedAt.After(firstAt) {
 			t.Fatalf("expired answer was reused: cached=%t at=%v first=%v", cached, refreshedAt, firstAt)
 		}

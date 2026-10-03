@@ -96,7 +96,7 @@ func (c *Collector) collectOccurrence(ctx context.Context, job *Job, hostname st
 		queryOccurrence := occurrence
 		queryOccurrence.RequestIndex = requestIndex
 		wg.Go(func() {
-			result, err, observedAt, fromCache := job.query(ctx, question)
+			result, observedAt, fromCache, err := job.query(ctx, question)
 			if result.Attempt > 0 {
 				queryOccurrence.Attempt = result.Attempt
 			}

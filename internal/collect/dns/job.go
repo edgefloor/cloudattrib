@@ -36,12 +36,12 @@ func (c *Collector) NewJob() *Job {
 	return &Job{collector: c, queries: make(map[model.DNSQuestion]*cachedQuery), limit: limit}
 }
 
-func (j *Job) query(ctx context.Context, question model.DNSQuestion) (model.DNSResult, error, time.Time, bool) {
+func (j *Job) query(ctx context.Context, question model.DNSQuestion) (model.DNSResult, time.Time, bool, error) {
 	if normalized := normalizedGraphName(question.Name); normalized != "" {
 		question.Name = normalized
 	}
 	if err := ctx.Err(); err != nil {
-		return model.DNSResult{Question: question, Outcome: outcomeForError(err)}, err, j.collector.now(), false
+		return model.DNSResult{Question: question, Outcome: outcomeForError(err)}, j.collector.now(), false, err
 	}
 	var entry *cachedQuery
 	for {
@@ -57,21 +57,21 @@ func (j *Job) query(ctx context.Context, question model.DNSQuestion) (model.DNSR
 				}
 				result, err, observedAt := entry.result, entry.err, entry.observedAt
 				j.mu.Unlock()
-				return result, err, observedAt, true
+				return result, observedAt, true, err
 			default:
 			}
 			j.mu.Unlock()
 			select {
 			case <-ctx.Done():
-				return model.DNSResult{Question: question, Outcome: outcomeForError(ctx.Err())}, ctx.Err(), j.collector.now(), true
+				return model.DNSResult{Question: question, Outcome: outcomeForError(ctx.Err())}, j.collector.now(), true, ctx.Err()
 			case <-entry.ready:
-				return entry.result, entry.err, entry.observedAt, true
+				return entry.result, entry.observedAt, true, entry.err
 			}
 		}
 		if j.used >= j.limit {
 			j.mu.Unlock()
 			err := model.NewError(model.CodeBudgetExceeded, "DNS question budget exhausted", nil)
-			return model.DNSResult{Question: question, Outcome: model.DNSOutcomeBudgetExhausted}, err, j.collector.now(), false
+			return model.DNSResult{Question: question, Outcome: model.DNSOutcomeBudgetExhausted}, j.collector.now(), false, err
 		}
 		entry = &cachedQuery{ready: make(chan struct{})}
 		j.queries[question] = entry
@@ -93,7 +93,7 @@ func (j *Job) query(ctx context.Context, question model.DNSQuestion) (model.DNSR
 	entry.result, entry.err, entry.observedAt, entry.expiresAt = result, err, observedAt, expiresAt
 	close(entry.ready)
 	j.mu.Unlock()
-	return result, err, observedAt, false
+	return result, observedAt, false, err
 }
 
 func cacheTTL(result model.DNSResult, err error) uint32 {
@@ -130,12 +130,12 @@ func (j *Job) CollectOccurrence(ctx context.Context, hostname string, port uint1
 
 // Query reuses a DNS question within this analysis job while its TTL remains valid.
 func (j *Job) Query(ctx context.Context, question model.DNSQuestion) (model.DNSResult, error) {
-	result, err, _, _ := j.query(ctx, question)
+	result, _, _, err := j.query(ctx, question)
 	return result, err
 }
 
 // QueryWithObservedAt returns the original collection time on cache hits.
 func (j *Job) QueryWithObservedAt(ctx context.Context, question model.DNSQuestion) (model.DNSResult, time.Time, error) {
-	result, err, observedAt, _ := j.query(ctx, question)
+	result, observedAt, _, err := j.query(ctx, question)
 	return result, observedAt, err
 }

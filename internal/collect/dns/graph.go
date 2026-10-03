@@ -76,7 +76,7 @@ func (c *Collector) followCNAMEGraph(ctx context.Context, job *Job, seed string,
 		}
 		seen[item.name] = struct{}{}
 		query := model.DNSQuestion{Name: item.name, Type: typeCNAME}
-		result, err, observedAt, fromCache := job.query(ctx, query)
+		result, observedAt, fromCache, err := job.query(ctx, query)
 		linkOccurrence := occurrence
 		linkOccurrence.RequestIndex = requestIndex
 		linkOccurrence.Hop = item.depth
@@ -104,7 +104,7 @@ func (c *Collector) followCNAMEGraph(ctx context.Context, job *Job, seed string,
 		}
 		for _, questionType := range []uint16{typeA, typeAAAA} {
 			query := model.DNSQuestion{Name: item.name, Type: questionType}
-			result, err, observedAt, fromCache := job.query(ctx, query)
+			result, observedAt, fromCache, err := job.query(ctx, query)
 			addressOccurrence := occurrence
 			addressOccurrence.RequestIndex = requestIndex
 			addressOccurrence.Hop = item.depth
@@ -180,14 +180,14 @@ func (c *Collector) followInheritedZone(ctx context.Context, job *Job, seed stri
 			return requestIndex
 		}
 		question := model.DNSQuestion{Name: candidate, Type: typeSOA}
-		result, err, observedAt, fromCache := job.query(ctx, question)
+		result, observedAt, fromCache, err := job.query(ctx, question)
 		itemOccurrence := occurrence
 		itemOccurrence.RequestIndex = requestIndex
 		requestIndex++
 		c.appendGraphQuery(ctx, collected, seed, port, model.ScopeInheritedZone, itemOccurrence, result, err, observedAt, fromCache, nil, nil)
 		if err == nil && hasSOARecord(result, candidate) {
 			question := model.DNSQuestion{Name: candidate, Type: typeNS}
-			result, err, observedAt, fromCache := job.query(ctx, question)
+			result, observedAt, fromCache, err := job.query(ctx, question)
 			itemOccurrence := occurrence
 			itemOccurrence.RequestIndex = requestIndex
 			requestIndex++
@@ -288,7 +288,7 @@ func (c *Collector) followDependencies(ctx context.Context, job *Job, seed strin
 				return
 			}
 			query := model.DNSQuestion{Name: dependency.name, Type: questionType}
-			result, err, observedAt, fromCache := job.query(ctx, query)
+			result, observedAt, fromCache, err := job.query(ctx, query)
 			itemOccurrence := occurrence
 			itemOccurrence.RequestIndex = requestIndex
 			requestIndex++
