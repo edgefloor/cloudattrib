@@ -18,6 +18,7 @@ import (
 	"cloudattrib/internal/config"
 	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/datasets"
+	"cloudattrib/internal/detect/cdnsuffix"
 	"cloudattrib/internal/detect/dnsrules"
 	"cloudattrib/internal/detect/webtech"
 	"cloudattrib/internal/model"
@@ -133,9 +134,11 @@ func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.C
 		{Name: "webtech", Status: model.CoverageComplete},
 		{Name: "prefix", Status: model.CoverageUnavailable, Reason: "no active local bundle"},
 		{Name: "asn", Status: model.CoverageUnavailable, Reason: "no active local bundle"},
+		{Name: "cdn_suffix", Status: model.CoverageUnavailable, Reason: "no active local bundle"},
 	}
 	var prefixReader app.PrefixReader
 	var asnReader app.ASNReader
+	var suffixDetector app.Detector = cdnsuffix.New(nil)
 	sourceDirectory := configuration.Data.SourceDirectory
 	repository, err := datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
 	if err != nil {
@@ -161,6 +164,7 @@ func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.C
 		if loaded.ASN != nil {
 			asnReader = loaded.ASN
 		}
+		suffixDetector = loaded.Suffixes
 		manifest, err = json.Marshal(loaded.Candidate.Manifest)
 		if err != nil {
 			return nil, "", nil, lookupAvailability{}, fmt.Errorf("encode local bundle manifest: %w", err)
@@ -190,7 +194,7 @@ func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.C
 	return app.NewService(app.Dependencies{
 		DNS:               collectdns.New(dnsClient.Query, destinationPolicy),
 		HTTP:              collecthttp.New(dial, destinationPolicy, configuration.Limits.Target.HTTPDocumentBytes, collecthttp.WithRedirectResolver(resolver), collecthttp.WithLimits(configuration.Limits.Target)),
-		Detectors:         []app.Detector{dnsrules.NewDefault()},
+		Detectors:         []app.Detector{dnsrules.NewDefault(), suffixDetector},
 		WebDetector:       webDetector,
 		Prefixes:          prefixReader,
 		ASN:               asnReader,

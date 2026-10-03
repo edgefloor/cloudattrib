@@ -137,3 +137,24 @@ func TestParseCIDRIdentityChangesOnlyForChangedRelationship(t *testing.T) {
 		})
 	}
 }
+func TestParseSuffixIdentityAndDuplicateProvenance(t *testing.T) {
+	first, err := Parse([]byte(`{"cdn":{"edge":["EDGE.EXAMPLE.","edge.example"]},"waf":{"edge":["edge.example"]}}`), Metadata{Revision: "one", Digest: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Parse([]byte(`{"waf":{"edge":["edge.example"]},"cdn":{"edge":["edge.example"]}}`), Metadata{Revision: "two", Digest: "two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Suffixes) != 2 || len(second.Suffixes) != 2 {
+		t.Fatalf("suffixes = %#v and %#v", first.Suffixes, second.Suffixes)
+	}
+	for i := range first.Suffixes {
+		if first.Suffixes[i].ID != second.Suffixes[i].ID {
+			t.Fatalf("semantic identity changed: %#v vs %#v", first.Suffixes[i], second.Suffixes[i])
+		}
+		if first.Suffixes[i].Category == "cdn" && len(first.Suffixes[i].RecordRefs) != 2 {
+			t.Fatalf("duplicate provenance lost: %#v", first.Suffixes[i])
+		}
+	}
+}

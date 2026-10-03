@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"cloudattrib/internal/detect/cdnsuffix"
 	"cloudattrib/internal/enrich/asn"
 	"cloudattrib/internal/enrich/prefix"
 	"cloudattrib/internal/ingest/aws"
@@ -48,6 +49,7 @@ type LoadedBundle struct {
 	Candidate Candidate
 	Prefixes  *prefix.Index
 	ASN       *asn.Index
+	Suffixes  *cdnsuffix.Detector
 	Counts    Counts
 	Warnings  []string
 }
@@ -71,6 +73,8 @@ func LoadSources(ctx context.Context, directory, buildID string) (LoadedBundle, 
 	loaded := LoadedBundle{}
 	var associations []model.Association
 	var intervals []iptoasn.Interval
+	var suffixRecords []cdnsuffix.Record
+	cdnCIDRCount := 0
 	var sources []Source
 	var artifacts []Artifact
 	loadedAny := false
@@ -143,6 +147,14 @@ func LoadSources(ctx context.Context, directory, buildID string) (LoadedBundle, 
 				SourceDigest: record.Digest, RecordRef: record.RecordRef, RecordRefs: record.RecordRefs, ProvenanceGroup: record.ProvenanceGroup,
 			})
 		}
+		cdnCIDRCount = len(result.CIDRs)
+		for _, record := range result.Suffixes {
+			suffixRecords = append(suffixRecords, cdnsuffix.Record{
+				ID: record.ID, Suffix: record.Suffix, Category: record.Category, ProviderID: normalizedID(record.Provider),
+				SourceID: record.SourceID, Revision: record.Revision, Digest: record.Digest,
+				RecordRef: record.RecordRef, RecordRefs: record.RecordRefs, ProvenanceGroup: record.ProvenanceGroup,
+			})
+		}
 		loaded.Counts.CDNSuffixes = len(result.Suffixes)
 		return len(result.CIDRs) + len(result.Suffixes), nil, nil
 	}); err != nil {
@@ -192,6 +204,16 @@ func LoadSources(ctx context.Context, directory, buildID string) (LoadedBundle, 
 		return LoadedBundle{}, err
 	}
 	capabilities := sourceCapabilities(sources)
+	if cdnCIDRCount == 0 {
+		for i := range capabilities {
+			if capabilities[i].Name == "prefix_source/cdncheck-data" && capabilities[i].Status == model.CoverageComplete {
+				capabilities[i].Status = model.CoverageUnavailable
+				capabilities[i].Reason = "source contains no CIDR records"
+			}
+		}
+	}
+	loaded.Suffixes = cdnsuffix.New(suffixRecords)
+	capabilities = append(capabilities, loaded.Suffixes.Capability())
 	if len(associations) > 0 {
 		loaded.Prefixes = prefix.New(associations)
 		capabilities = append(capabilities, aggregateCapability("prefix", capabilities, "prefix_source/", "no usable prefix source"))
