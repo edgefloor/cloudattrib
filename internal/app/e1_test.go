@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"net"
@@ -1201,4 +1202,47 @@ func (partialResponseTechnologyDetector) Detect(_ context.Context, headers http.
 		return nil, coverage
 	}
 	return []model.TechnologyDetection{{Name: "React", DetectorID: "partial-response-fixture-v1", ExplanationGranularity: model.ExplanationGranularityDetectorResult}}, coverage
+}
+
+func TestE1HTTPSAnalysisRetainsVerifiedCertificateEvidence(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	roots := x509.NewCertPool()
+	roots.AddCert(server.Certificate())
+	dialer := &fixtureDialer{fixtureAddress: server.Listener.Addr().String(), started: make(chan struct{})}
+	service := app.NewService(app.Dependencies{
+		DNS:        collectdns.New(fixtureDNSClient{failedAAAA: true}.Query, policy.PublicDestinationPolicy()),
+		HTTP:       collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20, collecthttp.WithTLSRootCAs(roots)),
+		View:       model.NewAttributionView("tls-fixture-bundle", "public-v1", nil, nil),
+		HTTPScheme: "https", Now: time.Now,
+	})
+	includeWWW := false
+	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull, IncludeWWW: &includeWWW})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasCoverage(report.Coverage, "tls_certificate", model.CoverageComplete) {
+		t.Fatalf("TLS coverage = %#v", report.Coverage)
+	}
+	var certificate *model.Observation
+	for index := range report.Observations {
+		if report.Observations[index].Type == "tls_certificate" {
+			certificate = &report.Observations[index]
+		}
+	}
+	if certificate == nil {
+		t.Fatal("analysis omitted TLS certificate observation")
+	}
+	var payload model.TLSCertificatePayload
+	if err := json.Unmarshal(certificate.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !payload.Verified || payload.FingerprintSHA256 == "" || payload.PeerAddress != netip.MustParseAddr("93.184.216.34") {
+		t.Fatalf("TLS payload = %#v", payload)
+	}
+	if err := report.ValidateReferences(); err != nil {
+		t.Fatalf("report references: %v", err)
+	}
 }

@@ -7,7 +7,7 @@ import (
 	"cloudattrib/internal/model"
 )
 
-func TestTLSCertificateCoverageDisclosesUnsupportedAndInapplicablePaths(t *testing.T) {
+func TestTLSCertificateCoverageDisclosesMissingEvidenceAndInapplicablePaths(t *testing.T) {
 	t.Parallel()
 
 	httpsPayload, err := json.Marshal(model.HTTPPayload{URL: "https://redirect.example/"})
@@ -49,6 +49,42 @@ func TestTLSCertificateCoverageDisclosesUnsupportedAndInapplicablePaths(t *testi
 			coverage := tlsCertificateCoverage(tt.request, tt.observations, tt.fallback, tt.tlsAttempted)
 			if coverage.Status != tt.status || coverage.Reason == "" {
 				t.Fatalf("coverage = %#v, want %q with reason", coverage, tt.status)
+			}
+		})
+	}
+}
+
+func TestTLSCertificateCoverageUsesRetainedHandshakeOutcomes(t *testing.T) {
+	t.Parallel()
+	verified, err := json.Marshal(model.TLSCertificatePayload{Verified: true, FingerprintSHA256: "sha256:fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	truncated, err := json.Marshal(model.TLSCertificatePayload{Verified: true, FingerprintSHA256: "sha256:fixture", NamesOmitted: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := json.Marshal(model.TLSCertificatePayload{Verified: false, Failure: "hostname_mismatch"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name         string
+		observations []model.Observation
+		want         model.CoverageStatus
+		completed    int
+		omitted      int
+	}{
+		{"verified", []model.Observation{{Type: "tls_certificate", Status: "verified", Payload: verified}}, model.CoverageComplete, 1, 0},
+		{"truncated", []model.Observation{{Type: "tls_certificate", Status: "verified", Payload: truncated}}, model.CoveragePartial, 1, 3},
+		{"failed", []model.Observation{{Type: "tls_certificate", Status: "unverified", Payload: failed}}, model.CoveragePartial, 0, 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			coverage := tlsObservationCoverage("tls_certificate", test.observations, true)
+			if coverage.Status != test.want || coverage.Completed != test.completed || coverage.Omitted != test.omitted {
+				t.Fatalf("coverage = %#v", coverage)
 			}
 		})
 	}

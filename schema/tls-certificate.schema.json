@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloudattrib.local/schema/tls-certificate.schema.json",
+  "title": "TLS certificate observation payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["url", "hostname", "peer_address", "collection_run_id", "attempt", "hop", "verified"],
+  "properties": {
+    "url": {"type": "string", "maxLength": 512},
+    "hostname": {"type": "string", "minLength": 1, "maxLength": 253},
+    "peer_address": {"type": "string"},
+    "collection_run_id": {"type": "string", "minLength": 1},
+    "attempt": {"type": "integer", "minimum": 1},
+    "hop": {"type": "integer", "minimum": 0},
+    "verified": {"type": "boolean"},
+    "failure": {"type": "string"},
+    "fingerprint_sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "subject_common_name": {"type": "string", "maxLength": 255},
+    "dns_names": {"type": "array", "maxItems": 64, "items": {"type": "string", "maxLength": 255}},
+    "ip_addresses": {"type": "array", "maxItems": 64, "items": {"type": "string"}},
+    "names_omitted": {"type": "integer", "minimum": 0},
+    "fields_truncated": {"type": "integer", "minimum": 0},
+    "issuer_common_name": {"type": "string", "maxLength": 255},
+    "issuer_organization": {"type": "array", "maxItems": 4, "items": {"type": "string", "maxLength": 255}},
+    "not_before": {"type": "string", "format": "date-time"},
+    "not_after": {"type": "string", "format": "date-time"},
+    "tls_version": {"type": "string"},
+    "alpn": {"type": "string", "maxLength": 255}
+  }
+}

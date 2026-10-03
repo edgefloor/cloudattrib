@@ -889,13 +889,10 @@ func serviceReadinessSnapshot(persistenceReady bool, lookup lookupAvailability) 
 
 func serviceReadinessSnapshotAt(persistenceReady bool, lookup lookupAvailability, now time.Time) api.ReadinessSnapshot {
 	analyze := runtimeOperationReadiness("analyze", persistenceReady, "writable PostgreSQL storage is unavailable")
-	analyze.Capabilities = append([]model.CapabilityState{{Name: "tls_certificate", Status: model.CoverageUnavailable, Reason: "TLS certificate evidence collection is unsupported"}}, localLookupCapabilitiesAt(lookup, now)...)
+	analyze.Capabilities = append([]model.CapabilityState{{Name: "tls_certificate", Status: model.CoverageComplete}}, localLookupCapabilitiesAt(lookup, now)...)
 	if persistenceReady && !lookup.complete() {
 		analyze.State = api.ReadinessDegraded
-		analyze.Reason = "TLS certificate evidence and some local attribution data are unavailable"
-	} else if persistenceReady {
-		analyze.State = api.ReadinessDegraded
-		analyze.Reason = "TLS certificate evidence collection is unsupported"
+		analyze.Reason = "some local attribution data is unavailable"
 	}
 	lookupOperation := api.OperationReadiness{Name: "lookup_ip", Capabilities: localLookupCapabilitiesAt(lookup, now)}
 	switch {

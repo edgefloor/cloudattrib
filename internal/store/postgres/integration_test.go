@@ -10,8 +10,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	goruntime "runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1189,4 +1191,37 @@ func assertLifecycleCounts(t *testing.T, ctx context.Context, store *Store, rese
 func manifestDigestForTest(manifest []byte) string {
 	digest := sha256.Sum256(manifest)
 	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func TestPostgresTLSObservationRoundTrip(t *testing.T) {
+	store, ctx := openPostgresTest(t, 10)
+	observedAt := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	payload, err := json.Marshal(model.TLSCertificatePayload{
+		URL: "https://example.com", Hostname: "example.com", PeerAddress: netip.MustParseAddr("93.184.216.34"),
+		CollectionRunID: "run-1", Attempt: 1, Verified: true, FingerprintSHA256: "sha256:" + strings.Repeat("a", 64),
+		DNSNames: []string{"example.com"}, TLSVersion: "TLS 1.3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := model.Report{
+		SchemaVersion: model.SchemaVersion, ID: "tls-round-trip", Target: model.Target{Original: "example.com", Canonical: "example.com", Kind: model.TargetDomain},
+		Status: model.StatusComplete, ClassifiedAt: observedAt,
+		Observations: []model.Observation{{ID: "tls-observation", Type: "tls_certificate", Subject: "example.com", ObservedAt: observedAt, Status: "verified", Payload: payload}},
+	}
+	if err := store.SaveReport(ctx, report); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := store.LoadReport(ctx, report.ID)
+	if err != nil || len(loaded.Observations) != 1 || loaded.Observations[0].ID != "tls-observation" || !loaded.Observations[0].ObservedAt.Equal(observedAt) {
+		t.Fatalf("loaded TLS report = %#v, %v", loaded.Observations, err)
+	}
+	var loadedPayload model.TLSCertificatePayload
+	if err := json.Unmarshal(loaded.Observations[0].Payload, &loadedPayload); err != nil || !loadedPayload.Verified || loadedPayload.FingerprintSHA256 != "sha256:"+strings.Repeat("a", 64) || loadedPayload.PeerAddress != netip.MustParseAddr("93.184.216.34") || !slices.Equal(loadedPayload.DNSNames, []string{"example.com"}) {
+		t.Fatalf("loaded TLS payload = %#v, %v", loadedPayload, err)
+	}
+	page, err := store.ObservationPage(ctx, app.ObservationPageQuery{ReportID: report.ID, Limit: 10})
+	if err != nil || len(page.Items) != 1 || page.Items[0].ID != "tls-observation" {
+		t.Fatalf("TLS observation page = %#v, %v", page, err)
+	}
 }

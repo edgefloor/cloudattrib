@@ -580,6 +580,7 @@ func (s *Service) Reclassify(ctx context.Context, request model.ReclassifyReques
 		coverage = append(coverage, originalCoverage)
 	}
 	coverage = append(coverage, replayScriptSignalCoverage(observations)...)
+	coverage = append(coverage, replayTLSCertificateCoverage(original, observations))
 	for _, detector := range s.detectors {
 		detected, detectorCoverage := detector.Detect(ctx, observations, s.view)
 		for index := range detected {
@@ -1101,9 +1102,73 @@ func tlsCertificateCoverage(request model.NormalizedRequest, observations []mode
 		coverage.Reason = "plain HTTP has no TLS session"
 		return coverage
 	}
-	coverage.Status = model.CoverageUnavailable
-	coverage.Reason = "TLS certificate evidence collection is unsupported"
+	return tlsObservationCoverage("tls_certificate", observations, tlsAttempted)
+}
+
+func tlsObservationCoverage(capability string, observations []model.Observation, attempted bool) model.Coverage {
+	coverage := model.Coverage{Capability: capability, Status: model.CoverageComplete}
+	for _, observation := range observations {
+		if observation.Type != "tls_certificate" {
+			continue
+		}
+		coverage.Attempted++
+		var payload model.TLSCertificatePayload
+		if json.Unmarshal(observation.Payload, &payload) != nil || observation.Status != "verified" || !payload.Verified || payload.FingerprintSHA256 == "" {
+			coverage.Status = model.CoveragePartial
+			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeCollectionFailed)
+			continue
+		}
+		coverage.Completed++
+		if payload.NamesOmitted > 0 || payload.FieldsTruncated > 0 {
+			coverage.Status = model.CoveragePartial
+			coverage.Omitted += payload.NamesOmitted + payload.FieldsTruncated
+			coverage.Truncated++
+		}
+	}
+	if coverage.Attempted == 0 {
+		coverage.Status = model.CoverageUnavailable
+		coverage.Reason = "no retained TLS handshake evidence"
+		if attempted {
+			coverage.Attempted = 1
+		}
+	} else if coverage.Status == model.CoveragePartial {
+		coverage.Reason = "one or more TLS handshakes failed or certificate fields were omitted"
+	}
 	return coverage
+}
+
+func replayTLSCertificateCoverage(original model.Report, observations []model.Observation) model.Coverage {
+	for _, item := range original.Coverage {
+		if item.Capability == "tls_certificate" && item.Status == model.CoverageSkipped {
+			return model.Coverage{Capability: "replay_tls_certificate", Status: model.CoverageSkipped, Reason: item.Reason}
+		}
+	}
+	if original.Mode == model.ModeDNS {
+		return model.Coverage{Capability: "replay_tls_certificate", Status: model.CoverageSkipped, Reason: "DNS-only mode"}
+	}
+	if original.Target.Kind == model.TargetURL && strings.HasPrefix(original.Target.Canonical, "http://") {
+		applicable := false
+		for _, item := range original.Coverage {
+			applicable = applicable || item.Capability == "tls_certificate" && item.Status != model.CoverageSkipped
+		}
+		for _, observation := range observations {
+			if observation.Type == "tls_certificate" {
+				applicable = true
+				break
+			}
+			if observation.Type == "http_response" {
+				var payload model.HTTPPayload
+				if json.Unmarshal(observation.Payload, &payload) == nil && strings.HasPrefix(payload.URL, "https://") {
+					applicable = true
+					break
+				}
+			}
+		}
+		if !applicable {
+			return model.Coverage{Capability: "replay_tls_certificate", Status: model.CoverageSkipped, Reason: "plain HTTP had no retained TLS session"}
+		}
+	}
+	return tlsObservationCoverage("replay_tls_certificate", observations, false)
 }
 
 func seedPort(request model.NormalizedRequest, hostname, fallbackScheme string) uint16 {

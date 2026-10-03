@@ -24,7 +24,7 @@ Preserve section numbers and the R01 through R23 identifiers when editing this c
 
 ## 1. Purpose and complete scope
 
-Build a self-hosted Go application that checks a domain, hostname, URL, or IP address and reports the cloud and SaaS matches produced by its DNS, HTTP, and IP data. HTTPS transport verifies certificates, but this release does not retain certificate evidence.
+Build a self-hosted Go application that checks a domain, hostname, URL, or IP address and reports the cloud and SaaS matches produced by its DNS, HTTP, and IP data. HTTPS transport verifies certificates and retains bounded evidence from the connection used for the HTTP request.
 
 Keep usable results when one collector or local source fails. Record the failed work in `coverage`.
 
@@ -42,7 +42,7 @@ Findings name the relationship supported by the input. An AWS endpoint can produ
 | R02 | No proprietary enrichment APIs | No commercial lookup service, vendor account, enrichment API key, or telemetry is required. |
 | R03 | Target normalization and scope | Support domains, hostnames, HTTP/HTTPS URLs, IPs, and bounded batches with explicit scope. |
 | R04 | DNS collection | Collect A, AAAA, CNAME, MX, NS, and TXT with record ownership, TTLs, chain relationships, and per-query outcomes. |
-| R05 | HTTP and HTTPS collection | Make bounded website requests, verify HTTPS certificates, and record headers, redirects, selected HTML signals, and peer IPs. Report TLS certificate evidence as unavailable until the collector retains it. |
+| R05 | HTTP and HTTPS collection | Make bounded website requests, verify HTTPS certificates, and record headers, redirects, selected HTML signals, peer IPs, and bounded TLS certificate evidence. |
 | R06 | Web-technology detection | Run `wappalyzergo` locally against collected headers and bodies. |
 | R07 | Upstream cloud dataset | Import `disposable/cloud-ip-ranges` with provenance, overlaps, and retirement handling. |
 | R08 | Service/region enrichment | Import official AWS, GCP, and Azure range metadata without claiming that every range identifies a customer product. |
@@ -231,7 +231,7 @@ Inject the same resolver policy into DNS collection and HTTP dialing. Do not use
 
 Use a shared, explicitly configured `http.Transport`. For a domain seed, request `https://<hostname>/`. HTTP fallback is off by default. When explicitly enabled, allow it only after a connection failure, not after a certificate-validation failure or an HTTP error response.
 
-Follow at most five redirects and retain every hop. Record URL with redacted query values, status, selected headers, cookie names, content type, body length/hash, and connected peer IP. Keep HTTPS certificate verification enabled. Certificate evidence collection is unsupported in this release, so HTTPS analysis reports `tls_certificate` coverage as `unavailable`; plain HTTP and DNS-only analysis report it as `skipped`. A successful verified handshake does not claim that certificate hashes, SANs, validity periods, or verification evidence were retained.
+Follow at most five redirects and retain every hop. Record URL with redacted query values, status, selected headers, cookie names, content type, body length/hash, and connected peer IP. Keep HTTPS certificate verification enabled. Retain a typed TLS observation from each attempted HTTPS handshake with its requested hostname, concrete peer, attempt and redirect hop, verification outcome, leaf SHA-256 fingerprint, bounded SAN and issuer fields, validity dates, TLS version, and ALPN. Retain completed handshakes even when later HTTP collection fails. Limit names and field lengths, disclose omissions, and never use issuer or SAN data as hosting attribution. Plain HTTP and DNS-only analysis report `tls_certificate` as `skipped`; a failed or absent handshake cannot claim verified certificate evidence.
 
 Fetch one document per seed plus its redirect chain. Do not download referenced scripts, styles, images, favicons, or linked pages. Static script URLs and HTML attributes can still be fingerprint signals. Do not execute JavaScript.
 

@@ -41,6 +41,8 @@ The DNS client retries transport failures and `servfail` responses within the co
 
 Collectors and classifiers return useful results with per-capability coverage. An unavailable source never becomes an empty successful search.
 
+The HTTP collector records `tls_certificate` observations from its existing verified HTTPS connections. Each observation identifies the hostname, concrete peer, collection attempt, and redirect hop. It retains bounded leaf-certificate and negotiated-protocol fields with an explicit verification outcome. HTTP response or body failure cannot erase a completed handshake. Reclassification carries these observations and their original collection times forward without opening a connection; historical reports without TLS inputs show unavailable TLS replay coverage.
+
 | Available work | Result | HTTP | CLI |
 | --- | --- | --- | --- |
 | All requested applicable work completed | Complete report, including complete no-match | 200 | 0 |

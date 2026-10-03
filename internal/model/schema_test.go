@@ -240,3 +240,42 @@ func checkLocalOpenAPIRefs(t *testing.T, value any) {
 		}
 	}
 }
+
+func TestTLSObservationSchemaKeepsHistoricalObservationsReadable(t *testing.T) {
+	t.Parallel()
+	schema := compileJSONSchema(t, "observation.schema.json")
+	when := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	valid := Observation{
+		ID: "tls-1", Type: "tls_certificate", Subject: "example.com", ObservedAt: when, Status: "verified",
+		Payload: JSONValue(`{"url":"https://example.com","hostname":"example.com","peer_address":"93.184.216.34","collection_run_id":"run-1","attempt":1,"hop":0,"verified":true,"fingerprint_sha256":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`),
+	}
+	for _, observation := range []Observation{
+		valid,
+		{ID: "old-http", Type: "http_response", Subject: "example.com", ObservedAt: when, Status: "responded", Payload: JSONValue(`{"url":"https://example.com/"}`)},
+	} {
+		encoded, err := json.Marshal(observation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var document any
+		if err := json.Unmarshal(encoded, &document); err != nil {
+			t.Fatal(err)
+		}
+		if err := schema.Validate(document); err != nil {
+			t.Fatalf("valid observation %q rejected: %v", observation.Type, err)
+		}
+	}
+	invalid := valid
+	invalid.Payload = JSONValue(`{"url":"https://example.com","hostname":"example.com","peer_address":"93.184.216.34","collection_run_id":"run-1","attempt":1,"hop":0,"verified":true,"dns_names":["example.com"],"unexpected":"secret"}`)
+	encoded, err := json.Marshal(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema.Validate(document); err == nil {
+		t.Fatal("TLS observation schema accepted an unknown field")
+	}
+}
