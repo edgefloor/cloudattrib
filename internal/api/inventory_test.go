@@ -15,9 +15,10 @@ import (
 )
 
 type inventoryFixture struct {
-	imported  inventory.ImportRequest
-	searched  inventory.SearchRequest
-	validated inventory.ValidationRequest
+	imported      inventory.ImportRequest
+	searched      inventory.SearchRequest
+	evidenceQuery inventory.EvidenceQuery
+	validated     inventory.ValidationRequest
 }
 
 func (fixture *inventoryFixture) Import(_ context.Context, request inventory.ImportRequest) (inventory.ImportReceipt, error) {
@@ -35,6 +36,16 @@ func (*inventoryFixture) Archive(_ context.Context, name string, _ bool) (invent
 	return inventory.Asset{Hostname: name}, nil
 }
 func (*inventoryFixture) Delete(context.Context, string, bool) (int64, error) { return 2, nil }
+func (fixture *inventoryFixture) SearchEvidence(_ context.Context, query inventory.EvidenceQuery) (inventory.EvidencePage, error) {
+	fixture.evidenceQuery = query
+	return inventory.EvidencePage{Items: []inventory.EvidenceResult{{Hostname: "api.example.com"}}}, nil
+}
+func (*inventoryFixture) ReadEvidence(context.Context, string, string) (inventory.EvidenceResult, error) {
+	return inventory.EvidenceResult{Hostname: "api.example.com", ProjectionStatus: "ready"}, nil
+}
+func (*inventoryFixture) ProjectionStatus(context.Context) (inventory.ProjectionStatus, error) {
+	return inventory.ProjectionStatus{}, nil
+}
 func (fixture *inventoryFixture) Validate(_ context.Context, operatorID string, request inventory.ValidationRequest) (jobs.Job, error) {
 	fixture.validated = request
 	if operatorID == "" {
@@ -97,5 +108,33 @@ func TestInventoryHTTPValidationSchedulesExplicitJob(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusAccepted || fixture.validated.IdempotencyKey != "check-1" || len(fixture.validated.AssetIDs) != 1 {
 		t.Fatalf("validation = %d %s %#v", response.Code, response.Body.String(), fixture.validated)
+	}
+}
+
+func TestInventoryHTTPEvidenceRoutes(t *testing.T) {
+	t.Parallel()
+	fixture := &inventoryFixture{}
+	handler, err := NewHandler(Config{Inventory: fixture})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		path string
+		want string
+	}{
+		{"/v1/inventory/evidence?text=portal&context=unknown", "api.example.com"},
+		{"/v1/inventory/api.example.com/evidence?context=unknown", "projection_status"},
+		{"/v1/inventory/projection-status", "pending"},
+	} {
+		request := httptest.NewRequest(http.MethodGet, step.path, nil)
+		request.RemoteAddr = "127.0.0.1:1000"
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), step.want) {
+			t.Fatalf("%s = %d %s", step.path, response.Code, response.Body.String())
+		}
+	}
+	if fixture.evidenceQuery.Text != "portal" || fixture.evidenceQuery.ContextID != "unknown" {
+		t.Fatalf("evidence query = %#v", fixture.evidenceQuery)
 	}
 }

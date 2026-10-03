@@ -25,48 +25,50 @@ import (
 
 // Dependencies contains the settled E1 application seams.
 type Dependencies struct {
-	DNS               *collectdns.Collector
-	HTTP              *collecthttp.Collector
-	Detectors         []Detector
-	WebDetector       WebDetector
-	Prefixes          PrefixReader
-	ASN               ASNReader
-	Store             ResultStore
-	CT                ctlog.Reader
-	CTEnabled         bool
-	CTMaximumSeed     int
-	View              model.AttributionView
-	BuildProvenance   model.BuildProvenance
-	RulesDigest       model.ProvenanceValue
-	FingerprintDigest model.ProvenanceValue
-	HTTPScheme        string
-	Now               func() time.Time
-	TargetTimeout     time.Duration
-	Controller        *policy.Controller
-	Limits            policy.Limits
+	DNS                  *collectdns.Collector
+	HTTP                 *collecthttp.Collector
+	Detectors            []Detector
+	WebDetector          WebDetector
+	Prefixes             PrefixReader
+	ASN                  ASNReader
+	Store                ResultStore
+	CT                   ctlog.Reader
+	CTEnabled            bool
+	CTMaximumSeed        int
+	View                 model.AttributionView
+	BuildProvenance      model.BuildProvenance
+	RulesDigest          model.ProvenanceValue
+	FingerprintDigest    model.ProvenanceValue
+	ObservationContextID string
+	HTTPScheme           string
+	Now                  func() time.Time
+	TargetTimeout        time.Duration
+	Controller           *policy.Controller
+	Limits               policy.Limits
 }
 
 // Service coordinates one immutable view through collection and classification.
 type Service struct {
-	dns               *collectdns.Collector
-	http              *collecthttp.Collector
-	detectors         []Detector
-	webDetector       WebDetector
-	prefixes          PrefixReader
-	asn               ASNReader
-	store             ResultStore
-	ct                ctlog.Reader
-	ctEnabled         bool
-	ctMaximumSeed     int
-	view              model.AttributionView
-	buildProvenance   model.BuildProvenance
-	rulesDigest       model.ProvenanceValue
-	fingerprintDigest model.ProvenanceValue
-	httpScheme        string
-	now               func() time.Time
-	targetTimeout     time.Duration
-	controller        *policy.Controller
-	limits            policy.Limits
+	dns                  *collectdns.Collector
+	http                 *collecthttp.Collector
+	detectors            []Detector
+	webDetector          WebDetector
+	prefixes             PrefixReader
+	asn                  ASNReader
+	store                ResultStore
+	ct                   ctlog.Reader
+	ctEnabled            bool
+	ctMaximumSeed        int
+	view                 model.AttributionView
+	buildProvenance      model.BuildProvenance
+	rulesDigest          model.ProvenanceValue
+	fingerprintDigest    model.ProvenanceValue
+	observationContextID string
+	httpScheme           string
+	now                  func() time.Time
+	targetTimeout        time.Duration
+	controller           *policy.Controller
+	limits               policy.Limits
 }
 
 // NewService constructs the analyzer without starting background work.
@@ -80,25 +82,26 @@ func NewService(dependencies Dependencies) *Service {
 		scheme = "https"
 	}
 	return &Service{
-		dns:               dependencies.DNS,
-		http:              dependencies.HTTP,
-		detectors:         slices.Clone(dependencies.Detectors),
-		webDetector:       dependencies.WebDetector,
-		prefixes:          dependencies.Prefixes,
-		asn:               dependencies.ASN,
-		store:             dependencies.Store,
-		ct:                dependencies.CT,
-		ctEnabled:         dependencies.CTEnabled,
-		ctMaximumSeed:     dependencies.CTMaximumSeed,
-		view:              dependencies.View,
-		buildProvenance:   dependencies.BuildProvenance.Explicit(),
-		rulesDigest:       dependencies.RulesDigest.Explicit(),
-		fingerprintDigest: dependencies.FingerprintDigest.Explicit(),
-		httpScheme:        scheme,
-		now:               now,
-		targetTimeout:     dependencies.TargetTimeout,
-		controller:        dependencies.Controller,
-		limits:            dependencies.Limits,
+		dns:                  dependencies.DNS,
+		http:                 dependencies.HTTP,
+		detectors:            slices.Clone(dependencies.Detectors),
+		webDetector:          dependencies.WebDetector,
+		prefixes:             dependencies.Prefixes,
+		asn:                  dependencies.ASN,
+		store:                dependencies.Store,
+		ct:                   dependencies.CT,
+		ctEnabled:            dependencies.CTEnabled,
+		ctMaximumSeed:        dependencies.CTMaximumSeed,
+		view:                 dependencies.View,
+		buildProvenance:      dependencies.BuildProvenance.Explicit(),
+		rulesDigest:          dependencies.RulesDigest.Explicit(),
+		fingerprintDigest:    dependencies.FingerprintDigest.Explicit(),
+		observationContextID: dependencies.ObservationContextID,
+		httpScheme:           scheme,
+		now:                  now,
+		targetTimeout:        dependencies.TargetTimeout,
+		controller:           dependencies.Controller,
+		limits:               dependencies.Limits,
 	}
 }
 
@@ -668,6 +671,10 @@ func (s *Service) liveProvenance() *model.ReportProvenance {
 		s.fingerprintDigest,
 		s.rulesDigest,
 	)
+	if s.observationContextID != "" {
+		contextID := model.KnownProvenance(s.observationContextID)
+		provenance.Collection.ObservationContext = &contextID
+	}
 	return &provenance
 }
 

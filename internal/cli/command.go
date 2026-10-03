@@ -24,25 +24,30 @@ const maxJSONLRows = 1000
 
 // Dependencies supplies application behavior and testable command streams.
 type Dependencies struct {
-	Analyzer          app.Analyzer
-	Serve             func(context.Context, string) error
-	CTImport          func(context.Context, io.Reader, []string) (int, error)
-	CTCollect         func(context.Context, string) (ctlog.Metrics, error)
-	DatasetImport     func(context.Context, string, string) (datasets.ValidationReport, error)
-	DatasetValidate   func(context.Context, string, string) (datasets.ValidationReport, error)
-	DatasetActivate   func(context.Context, string, string, string, string) (datasets.Activation, error)
-	DatasetStatus     func(context.Context, string) (datasets.RepositoryStatus, error)
-	DatasetPrune      func(context.Context, string, string) (bool, error)
-	InventoryImport   func(context.Context, inventory.ImportRequest) (inventory.ImportReceipt, error)
-	InventorySearch   func(context.Context, inventory.SearchRequest) (inventory.Page, error)
-	InventoryRead     func(context.Context, string) (inventory.Asset, error)
-	InventoryArchive  func(context.Context, string, bool) (inventory.Asset, error)
-	InventoryDelete   func(context.Context, string, bool) (int64, error)
-	InventoryBackfill func(context.Context, string, int) (inventory.BackfillPage, error)
-	InventoryValidate func(context.Context, inventory.ValidationRequest) (jobs.Job, error)
-	Stdin             io.Reader
-	Stdout            io.Writer
-	Stderr            io.Writer
+	Analyzer                  app.Analyzer
+	Serve                     func(context.Context, string) error
+	CTImport                  func(context.Context, io.Reader, []string) (int, error)
+	CTCollect                 func(context.Context, string) (ctlog.Metrics, error)
+	DatasetImport             func(context.Context, string, string) (datasets.ValidationReport, error)
+	DatasetValidate           func(context.Context, string, string) (datasets.ValidationReport, error)
+	DatasetActivate           func(context.Context, string, string, string, string) (datasets.Activation, error)
+	DatasetStatus             func(context.Context, string) (datasets.RepositoryStatus, error)
+	DatasetPrune              func(context.Context, string, string) (bool, error)
+	InventoryImport           func(context.Context, inventory.ImportRequest) (inventory.ImportReceipt, error)
+	InventorySearch           func(context.Context, inventory.SearchRequest) (inventory.Page, error)
+	InventoryRead             func(context.Context, string) (inventory.Asset, error)
+	InventoryArchive          func(context.Context, string, bool) (inventory.Asset, error)
+	InventoryDelete           func(context.Context, string, bool) (int64, error)
+	InventoryBackfill         func(context.Context, string, int) (inventory.BackfillPage, error)
+	InventoryValidate         func(context.Context, inventory.ValidationRequest) (jobs.Job, error)
+	InventoryEvidenceSearch   func(context.Context, inventory.EvidenceQuery) (inventory.EvidencePage, error)
+	InventoryEvidenceRead     func(context.Context, string, string) (inventory.EvidenceResult, error)
+	InventoryProjectionStatus func(context.Context) (inventory.ProjectionStatus, error)
+	InventoryReportBackfill   func(context.Context, string, int) (inventory.BackfillPage, error)
+	InventoryProject          func(context.Context, int) (int, error)
+	Stdin                     io.Reader
+	Stdout                    io.Writer
+	Stderr                    io.Writer
 }
 
 // Run executes a command and returns its process exit status.

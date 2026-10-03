@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 
 	"cloudattrib/internal/buildinfo"
+	"cloudattrib/internal/config"
 	"cloudattrib/internal/detect/webtech"
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/rules"
@@ -53,4 +54,14 @@ func classifierBuildID(engineID, rulesDigest, fingerprintDigest, policyRevision 
 	})
 	sum := sha256.Sum256(encoded)
 	return "classifier-sha256-" + hex.EncodeToString(sum[:])
+}
+
+func observationContextID(resolver config.Resolver, policyRevision string) string {
+	encoded, _ := json.Marshal(struct {
+		ResolverNetwork string `json:"resolver_network"`
+		ResolverAddress string `json:"resolver_address"`
+		PolicyRevision  string `json:"policy_revision"`
+	}{resolver.Network, resolver.Address, policyRevision})
+	digest := sha256.Sum256(encoded)
+	return "context-sha256:" + hex.EncodeToString(digest[:])
 }

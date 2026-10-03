@@ -46,6 +46,65 @@ func runInventory(ctx context.Context, args []string, dependencies Dependencies,
 			return diagnostic(streams.stderr, err)
 		}
 		return writeCommandJSON(streams, job)
+	case "search-evidence":
+		flags := flag.NewFlagSet("inventory search-evidence", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		query := flags.String("query", "", "")
+		scope := flags.String("scope", "", "")
+		contextID := flags.String("context", "", "")
+		limit := flags.Int("limit", 50, "")
+		format := flags.String("format", "json", "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || (*format != "json" && *format != "ndjson") {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "invalid evidence search flags", err))
+		}
+		if dependencies.InventoryEvidenceSearch == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "evidence search is unavailable", nil))
+		}
+		page, err := dependencies.InventoryEvidenceSearch(ctx, inventory.EvidenceQuery{Text: *query, ScopeRoot: *scope, ContextID: *contextID, Limit: *limit})
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		if *format == "json" {
+			return writeCommandJSON(streams, page)
+		}
+		encoder := json.NewEncoder(streams.stdout)
+		for _, item := range page.Items {
+			if err := encoder.Encode(item); err != nil {
+				return diagnostic(streams.stderr, err)
+			}
+		}
+		if page.Truncated {
+			_, _ = fmt.Fprintln(streams.stderr, "results_truncated=true")
+		}
+		return 0
+	case "evidence":
+		flags := flag.NewFlagSet("inventory evidence", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		hostname := flags.String("hostname", "", "")
+		contextID := flags.String("context", "", "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || *hostname == "" {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "inventory evidence requires --hostname", err))
+		}
+		if dependencies.InventoryEvidenceRead == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "inventory evidence is unavailable", nil))
+		}
+		item, err := dependencies.InventoryEvidenceRead(ctx, *hostname, *contextID)
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		return writeCommandJSON(streams, item)
+	case "projection-status":
+		if len(args) != 1 {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "projection-status accepts no flags", nil))
+		}
+		if dependencies.InventoryProjectionStatus == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "inventory projection status is unavailable", nil))
+		}
+		status, err := dependencies.InventoryProjectionStatus(ctx)
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		return writeCommandJSON(streams, status)
 	case "import":
 		flags := flag.NewFlagSet("inventory import", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)
@@ -185,6 +244,39 @@ func runInventory(ctx context.Context, args []string, dependencies Dependencies,
 			return diagnostic(streams.stderr, err)
 		}
 		return writeCommandJSON(streams, page)
+	case "backfill-reports":
+		flags := flag.NewFlagSet("inventory backfill-reports", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		cursor := flags.String("cursor", "", "")
+		limit := flags.Int("limit", 100, "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "invalid inventory report backfill flags", err))
+		}
+		if dependencies.InventoryReportBackfill == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "inventory report backfill is unavailable", nil))
+		}
+		page, err := dependencies.InventoryReportBackfill(ctx, *cursor, *limit)
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		return writeCommandJSON(streams, page)
+	case "project":
+		flags := flag.NewFlagSet("inventory project", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		limit := flags.Int("limit", 100, "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "invalid inventory projection flags", err))
+		}
+		if dependencies.InventoryProject == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "inventory projection is unavailable", nil))
+		}
+		processed, err := dependencies.InventoryProject(ctx, *limit)
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		return writeCommandJSON(streams, struct {
+			Processed int `json:"processed"`
+		}{processed})
 	default:
 		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "unknown inventory operation", nil))
 	}

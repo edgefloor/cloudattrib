@@ -23,6 +23,16 @@ func (s *recordingStore) SearchInventory(context.Context, SearchRequest, string)
 	return s.searchPage, nil
 }
 func (*recordingStore) ReadInventory(context.Context, string) (Asset, error) { return Asset{}, nil }
+
+func (*recordingStore) SearchInventoryEvidence(context.Context, EvidenceQuery) (EvidencePage, error) {
+	return EvidencePage{}, nil
+}
+func (*recordingStore) ReadInventoryEvidence(context.Context, string, string) (EvidenceResult, error) {
+	return EvidenceResult{}, nil
+}
+func (*recordingStore) InventoryProjectionStatus(context.Context) (ProjectionStatus, error) {
+	return ProjectionStatus{}, nil
+}
 func (*recordingStore) ArchiveInventory(context.Context, string, bool) (Asset, error) {
 	return Asset{}, nil
 }

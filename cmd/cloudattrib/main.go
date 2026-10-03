@@ -110,6 +110,16 @@ func main() {
 		return localruntime.DeleteInventory(ctx, configuration, hostname, suppress)
 	}, InventoryBackfill: func(ctx context.Context, cursor string, limit int) (inventory.BackfillPage, error) {
 		return localruntime.BackfillCTInventory(ctx, configuration, cursor, limit)
+	}, InventoryEvidenceSearch: func(ctx context.Context, request inventory.EvidenceQuery) (inventory.EvidencePage, error) {
+		return localruntime.SearchInventoryEvidence(ctx, configuration, request)
+	}, InventoryEvidenceRead: func(ctx context.Context, hostname, contextID string) (inventory.EvidenceResult, error) {
+		return localruntime.ReadInventoryEvidence(ctx, configuration, hostname, contextID)
+	}, InventoryProjectionStatus: func(ctx context.Context) (inventory.ProjectionStatus, error) {
+		return localruntime.InventoryProjectionStatus(ctx, configuration)
+	}, InventoryReportBackfill: func(ctx context.Context, cursor string, limit int) (inventory.BackfillPage, error) {
+		return localruntime.BackfillInventoryReports(ctx, configuration, cursor, limit)
+	}, InventoryProject: func(ctx context.Context, limit int) (int, error) {
+		return localruntime.ProcessInventoryProjections(ctx, configuration, limit)
 	}, InventoryValidate: func(ctx context.Context, request inventory.ValidationRequest) (jobs.Job, error) {
 		operatorID := configuration.API.LocalOperatorID
 		if operatorID == "" {

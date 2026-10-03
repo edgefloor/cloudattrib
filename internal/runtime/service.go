@@ -159,6 +159,11 @@ func Serve(ctx context.Context, configuration config.Config) error {
 		return err
 	}
 	defer store.Close()
+	projectionStore, err := postgres.OpenInventoryProjector(ctx, dsn)
+	if err != nil {
+		return err
+	}
+	defer projectionStore.Close()
 	controller, err := policy.NewController(
 		configuration.Limits.Target,
 		configuration.Limits.ConcurrentTargets,
@@ -201,7 +206,7 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	}
 	handler, err := api.NewHandler(api.Config{
 		Analyzer: analyzerFactory, Jobs: store, Results: store, Findings: store, Authentication: authentication,
-		Inventory: inventory.NewService(store), InventoryValidator: inventory.NewValidator(inventory.NewService(store), store, store),
+		Inventory: inventory.NewService(store).WithDefaultContext(observationContextID(configuration.Resolver, policy.PublicDestinationPolicyRevision)), InventoryValidator: inventory.NewValidator(inventory.NewService(store), store, store),
 		Readiness:                   serviceReadiness{store: store, analyzers: analyzerFactory},
 		Metrics:                     serviceMetricsProvider{durable: store, analyzers: analyzerFactory},
 		MaximumRequestBytes:         configuration.Limits.MaximumRequestBytes,
@@ -236,6 +241,11 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	go func() {
 		defer close(reloadDone)
 		analyzerFactory.reloadLoop(workerCtx, time.Second, func(reloadErr error) { log.Printf("cloudattrib bundle reload: %v", reloadErr) })
+	}()
+	projectionDone := make(chan struct{})
+	go func() {
+		defer close(projectionDone)
+		runInventoryProjector(workerCtx, projectionStore, func(projectionErr error) { log.Printf("cloudattrib inventory projection: %v", projectionErr) })
 	}()
 	workerErr := make(chan error, 1)
 	go func() { workerErr <- supervisor.Run(workerCtx) }()
@@ -279,12 +289,35 @@ func Serve(ctx context.Context, configuration config.Config) error {
 		}
 	}
 	<-reloadDone
+	<-projectionDone
 	if !serverStopped {
 		if err := <-serverErr; !errors.Is(err, http.ErrServerClosed) && runErr == nil {
 			runErr = fmt.Errorf("serve API: %w", err)
 		}
 	}
 	return runErr
+}
+
+func runInventoryProjector(ctx context.Context, store *postgres.Store, onError func(error)) {
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return
+		}
+		processed, err := store.ProcessNextInventoryProjection(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
+			onError(err)
+		}
+		if err == nil && processed {
+			continue
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 func newServiceHTTPServer(handler http.Handler, configuration config.Config, baseContext context.Context) *http.Server {

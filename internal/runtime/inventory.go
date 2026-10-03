@@ -4,6 +4,8 @@ import (
 	"cloudattrib/internal/config"
 	"cloudattrib/internal/inventory"
 	"cloudattrib/internal/jobs"
+	"cloudattrib/internal/model"
+	"cloudattrib/internal/policy"
 	"context"
 )
 
@@ -75,4 +77,68 @@ func BackfillCTInventory(ctx context.Context, configuration config.Config, curso
 	}
 	defer store.Close()
 	return store.BackfillCTInventory(ctx, cursor, limit)
+}
+
+// SearchInventoryEvidence reads ranked retained descriptions in one resolver context.
+func SearchInventoryEvidence(ctx context.Context, configuration config.Config, request inventory.EvidenceQuery) (inventory.EvidencePage, error) {
+	store, err := openCTStore(ctx, configuration)
+	if err != nil {
+		return inventory.EvidencePage{}, err
+	}
+	defer store.Close()
+	return inventory.NewService(store).WithDefaultContext(observationContextID(configuration.Resolver, policy.PublicDestinationPolicyRevision)).SearchEvidence(ctx, request)
+}
+
+// ReadInventoryEvidence reads one asset's retained evidence state.
+func ReadInventoryEvidence(ctx context.Context, configuration config.Config, hostname, contextID string) (inventory.EvidenceResult, error) {
+	store, err := openCTStore(ctx, configuration)
+	if err != nil {
+		return inventory.EvidenceResult{}, err
+	}
+	defer store.Close()
+	return inventory.NewService(store).WithDefaultContext(observationContextID(configuration.Resolver, policy.PublicDestinationPolicyRevision)).ReadEvidence(ctx, hostname, contextID)
+}
+
+// InventoryProjectionStatus reads durable indexing lag.
+func InventoryProjectionStatus(ctx context.Context, configuration config.Config) (inventory.ProjectionStatus, error) {
+	store, err := openCTStore(ctx, configuration)
+	if err != nil {
+		return inventory.ProjectionStatus{}, err
+	}
+	defer store.Close()
+	return inventory.NewService(store).ProjectionStatus(ctx)
+}
+
+// BackfillInventoryReports queues retained historical reports without network collection.
+func BackfillInventoryReports(ctx context.Context, configuration config.Config, cursor string, limit int) (inventory.BackfillPage, error) {
+	store, err := openCTStore(ctx, configuration)
+	if err != nil {
+		return inventory.BackfillPage{}, err
+	}
+	defer store.Close()
+	return store.BackfillInventoryReports(ctx, cursor, limit)
+}
+
+// ProcessInventoryProjections runs at most limit durable indexing tasks.
+func ProcessInventoryProjections(ctx context.Context, configuration config.Config, limit int) (int, error) {
+	if limit < 1 || limit > 1000 {
+		return 0, model.NewError(model.CodeInvalidOptions, "projection limit must be between 1 and 1000", nil)
+	}
+	store, err := openCTStore(ctx, configuration)
+	if err != nil {
+		return 0, err
+	}
+	defer store.Close()
+	processed := 0
+	for processed < limit {
+		found, err := store.ProcessNextInventoryProjection(ctx)
+		if err != nil {
+			return processed, err
+		}
+		if !found {
+			break
+		}
+		processed++
+	}
+	return processed, nil
 }

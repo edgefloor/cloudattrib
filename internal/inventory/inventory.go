@@ -104,13 +104,15 @@ type Sighting struct {
 type Store interface {
 	ImportInventoryChunk(context.Context, ImportReceipt, string, []string, []Sighting, time.Time) (ImportReceipt, error)
 	SearchStore
+	EvidenceStore
 	ArchiveInventory(context.Context, string, bool) (Asset, error)
 	DeleteInventory(context.Context, string, bool) (int64, error)
 }
 
 // Service validates imports without contacting any target.
 type Service struct {
-	store Store
+	store          Store
+	defaultContext string
 }
 
 // NewService builds the inventory application service.
