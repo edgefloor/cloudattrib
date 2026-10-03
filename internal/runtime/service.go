@@ -812,10 +812,6 @@ func serviceReadinessSnapshotAt(persistenceReady bool, lookup lookupAvailability
 	return api.ReadinessSnapshot{State: state, Operations: operations}
 }
 
-func localLookupCapabilities(availability lookupAvailability) []model.CapabilityState {
-	return localLookupCapabilitiesAt(availability, time.Now())
-}
-
 func localLookupCapabilitiesAt(availability lookupAvailability, now time.Time) []model.CapabilityState {
 	if len(availability.data) > 0 {
 		capabilities := make([]model.CapabilityState, len(availability.data))
