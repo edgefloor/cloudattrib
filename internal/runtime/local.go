@@ -192,7 +192,7 @@ func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.C
 		ctReader, _ = store.(ctlog.Reader)
 	}
 	return app.NewService(app.Dependencies{
-		DNS:               collectdns.New(dnsClient.Query, destinationPolicy),
+		DNS:               collectdns.New(dnsClient.Query, destinationPolicy).WithLimits(configuration.Limits.Target),
 		HTTP:              collecthttp.New(dial, destinationPolicy, configuration.Limits.Target.HTTPDocumentBytes, collecthttp.WithRedirectResolver(resolver), collecthttp.WithLimits(configuration.Limits.Target)),
 		Detectors:         []app.Detector{dnsrules.NewDefault(), suffixDetector},
 		WebDetector:       webDetector,

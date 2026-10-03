@@ -181,13 +181,13 @@ func TestPostgresAPIAndWorkerShareTargetAdmissionAcrossBundles(t *testing.T) {
 				case <-ctx.Done():
 					return model.DNSResult{Question: question}, ctx.Err()
 				case <-releaseFirst:
-					return model.DNSResult{Question: question}, nil
+					return admissionDNSResult(question), nil
 				}
 			}, policy.PublicDestinationPolicy())
 			var workerQueries atomic.Int64
 			workerCollector := collectdns.New(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
 				workerQueries.Add(1)
-				return model.DNSResult{Question: question}, nil
+				return admissionDNSResult(question), nil
 			}, policy.PublicDestinationPolicy())
 			activeAnalyzer := app.NewService(app.Dependencies{
 				DNS: activeCollector, Controller: controller, Limits: limits,
@@ -267,11 +267,11 @@ func TestPostgresAPIAndWorkerShareTargetAdmissionAcrossBundles(t *testing.T) {
 			if err := awaitValue(t, runnerDone, "durable worker completion"); err != nil {
 				t.Fatalf("RunOnce() error = %v", err)
 			}
-			if got := activeQueries.Load(); got != 12 {
-				t.Fatalf("active analyzer DNS queries after release = %d, want 12", got)
+			if got := activeQueries.Load(); got != 16 {
+				t.Fatalf("active analyzer DNS queries after release = %d, want 16 including nameserver addresses", got)
 			}
-			if got := workerQueries.Load(); got != 6 {
-				t.Fatalf("worker analyzer DNS queries after release = %d, want 6", got)
+			if got := workerQueries.Load(); got != 8 {
+				t.Fatalf("worker analyzer DNS queries after release = %d, want 8 including nameserver addresses", got)
 			}
 			job, err := store.Job(ctx, submitted.ID)
 			if err != nil || job.Status != jobs.JobCompleted || len(job.Targets) != 1 || job.Targets[0].Status != jobs.TargetCompleted {
@@ -279,6 +279,15 @@ func TestPostgresAPIAndWorkerShareTargetAdmissionAcrossBundles(t *testing.T) {
 			}
 		})
 	}
+}
+
+func admissionDNSResult(question model.DNSQuestion) model.DNSResult {
+	result := model.DNSResult{Question: question}
+	if question.Type == 2 && !strings.HasPrefix(question.Name, "ns.") {
+		payload, _ := json.Marshal(model.DNSPayload{RRType: "NS", Owner: question.Name, Value: "ns." + question.Name, TTL: 300})
+		result.Records = []model.Observation{{Type: "dns_record", Subject: question.Name, Status: "answered", Payload: payload}}
+	}
+	return result
 }
 
 type admissionAcceptanceFactory struct {

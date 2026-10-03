@@ -2,6 +2,7 @@ package dns
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"sync/atomic"
@@ -258,5 +259,45 @@ func TestConvertClassifiesDNSProtocolOutcomes(t *testing.T) {
 				t.Fatalf("convert() = %#v", result)
 			}
 		})
+	}
+}
+
+func TestConvertKeepsNegativeCacheLifetimeFromAuthoritySOA(t *testing.T) {
+	client := &Client{now: time.Now, cnameChainDepth: 16}
+	response := new(mdns.Msg)
+	response.Rcode = mdns.RcodeNameError
+	response.Ns = []mdns.RR{&mdns.SOA{
+		Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeSOA, Ttl: 120},
+		Ns:  "ns.example.com.", Mbox: "hostmaster.example.com.", Minttl: 45,
+	}}
+	result, err := client.convert(model.DNSQuestion{Name: "missing.example.com", Type: mdns.TypeA}, response, "udp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Outcome != model.DNSOutcomeNXDomain || result.NegativeTTL != 45 {
+		t.Fatalf("negative result = %#v", result)
+	}
+}
+
+func TestConvertRetainsAnswerSOAForZoneDiscovery(t *testing.T) {
+	client := &Client{now: time.Now, cnameChainDepth: 16}
+	response := new(mdns.Msg)
+	response.Answer = []mdns.RR{&mdns.SOA{
+		Hdr: mdns.RR_Header{Name: "example.com.", Rrtype: mdns.TypeSOA, Ttl: 300},
+		Ns:  "ns.example.com.", Mbox: "hostmaster.example.com.", Minttl: 60,
+	}}
+	result, err := client.convert(model.DNSQuestion{Name: "example.com", Type: mdns.TypeSOA}, response, "udp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Records) != 1 {
+		t.Fatalf("SOA records = %#v", result.Records)
+	}
+	var payload model.DNSPayload
+	if err := json.Unmarshal(result.Records[0].Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.RRType != "SOA" || payload.Owner != "example.com" || payload.Value != "ns.example.com" || payload.TTL != 300 || payload.Section != "answer" {
+		t.Fatalf("SOA payload = %#v", payload)
 	}
 }

@@ -636,3 +636,146 @@ func TestImportedCDNSuffixReplayPreservesRetainedObservationScopes(t *testing.T)
 		t.Fatalf("replay references: %v", err)
 	}
 }
+
+func TestAnalyzePreservesDNSDependencyScope(t *testing.T) {
+	query := func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		result := model.DNSResult{Question: question, ResponseCode: 0}
+		if question.Type == 15 {
+			payload, err := json.Marshal(model.DNSPayload{RRType: "MX", Owner: question.Name, Value: "10 mx.example.net"})
+			if err != nil {
+				return result, err
+			}
+			result.Records = []model.Observation{{Type: "dns_record", Subject: "mx.example.net", Scope: model.ScopeMailDependency, Status: "answered", Payload: payload}}
+		}
+		return result, nil
+	}
+	service := app.NewService(app.Dependencies{DNS: collectdns.New(query, policy.PublicDestinationPolicy())})
+	includeWWW := false
+	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeDNS, IncludeWWW: &includeWWW})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, observation := range report.Observations {
+		if observation.Type == "dns_record" {
+			if observation.Scope != model.ScopeMailDependency {
+				t.Fatalf("dependency scope = %q", observation.Scope)
+			}
+			return
+		}
+	}
+	t.Fatal("missing dependency observation")
+}
+
+func TestAnalyzeAttributesInheritedNameserverAddressToDependency(t *testing.T) {
+	query := func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		result := model.DNSResult{Question: question, ResponseCode: 0}
+		value, rrtype := "", ""
+		switch {
+		case question.Name == "example.com" && question.Type == 6:
+			value, rrtype = "ns.example.com", "SOA"
+		case question.Name == "example.com" && question.Type == 2:
+			value, rrtype = "ns.example.com", "NS"
+		case question.Name == "ns.example.com" && question.Type == 1:
+			result.Addresses = []netip.Addr{netip.MustParseAddr("93.184.216.34")}
+		}
+		if rrtype != "" {
+			payload, err := json.Marshal(model.DNSPayload{RRType: rrtype, Owner: question.Name, Value: value})
+			if err != nil {
+				return result, err
+			}
+			result.Records = []model.Observation{{Type: "dns_record", Subject: question.Name, Status: "answered", Payload: payload}}
+		}
+		return result, nil
+	}
+	prefixes := prefix.New([]model.Association{{
+		ID: "dns-provider", Prefix: netip.MustParsePrefix("93.184.216.0/24"), ProviderID: "dns-provider",
+		SourceID: "fixture", SourceRevision: "1", SourceDigest: "digest", RecordRef: "#/0", Lifecycle: "active",
+	}})
+	service := app.NewService(app.Dependencies{
+		DNS: collectdns.New(query, policy.PublicDestinationPolicy()), Prefixes: prefixes,
+		View: model.NewAttributionView("bundle", "policy", nil, []model.CapabilityState{{Name: "prefix", Status: model.CoverageComplete}}),
+	})
+	includeWWW := false
+	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "www.example.com", Kind: model.TargetDomain, Mode: model.ModeDNS, IncludeWWW: &includeWWW})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inherited, dependency bool
+	for _, observation := range report.Observations {
+		if observation.Type == "dns_record" && observation.Subject == "example.com" && observation.Scope == model.ScopeInheritedZone {
+			inherited = true
+		}
+	}
+	for _, evidence := range report.Evidence {
+		if evidence.ProviderID == "dns-provider" && evidence.Subject == "ns.example.com" && evidence.Scope == model.ScopeDNSDependency {
+			dependency = true
+		}
+		if evidence.ProviderID == "dns-provider" && evidence.Scope == model.ScopeRoot {
+			t.Fatalf("nameserver address attributed to root: %#v", evidence)
+		}
+	}
+	if !inherited || !dependency {
+		t.Fatalf("inherited=%t dependency=%t report=%#v", inherited, dependency, report)
+	}
+	if err := report.ValidateReferences(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAnalyzeDoesNotDialMailOrDNSDependencies(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(server.Close)
+	seedAddress := netip.MustParseAddr("93.184.216.34")
+	dependencyAddress := netip.MustParseAddr("1.1.1.1")
+	dialer := &addressFallbackDialer{working: seedAddress, destination: server.Listener.Addr().String()}
+	query := func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		result := model.DNSResult{Question: question, ResponseCode: 0}
+		if question.Name == "example.com" && question.Type == 1 {
+			result.Addresses = []netip.Addr{seedAddress}
+		}
+		if question.Name == "mail.provider.test" && question.Type == 1 || question.Name == "ns.provider.test" && question.Type == 1 {
+			result.Addresses = []netip.Addr{dependencyAddress}
+		}
+		value, rrtype := "", ""
+		if question.Name == "example.com" && question.Type == 15 {
+			value, rrtype = "10 mail.provider.test", "MX"
+		}
+		if question.Name == "example.com" && question.Type == 2 {
+			value, rrtype = "ns.provider.test", "NS"
+		}
+		if rrtype != "" {
+			payload, err := json.Marshal(model.DNSPayload{RRType: rrtype, Owner: question.Name, Value: value})
+			if err != nil {
+				return result, err
+			}
+			result.Records = []model.Observation{{Type: "dns_record", Subject: question.Name, Status: "answered", Payload: payload}}
+		}
+		return result, nil
+	}
+	service := app.NewService(app.Dependencies{
+		DNS:  collectdns.New(query, policy.PublicDestinationPolicy()),
+		HTTP: collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20),
+		View: model.NewAttributionView("bundle", "policy", nil, nil), HTTPScheme: "http",
+	})
+	includeWWW := false
+	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull, IncludeWWW: &includeWWW})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dialer.Addresses(); !slices.Equal(got, []netip.Addr{seedAddress}) {
+		t.Fatalf("HTTP dialed dependency addresses: %v", got)
+	}
+	var mail, dns bool
+	for _, observation := range report.Observations {
+		if observation.Type != "dns_address" {
+			continue
+		}
+		mail = mail || observation.Scope == model.ScopeMailDependency
+		dns = dns || observation.Scope == model.ScopeDNSDependency
+	}
+	if !mail || !dns {
+		t.Fatalf("dependency address observations missing: mail=%t dns=%t", mail, dns)
+	}
+}
