@@ -32,6 +32,7 @@ type Config struct {
 	Analyzer            app.Analyzer
 	Jobs                jobs.Store
 	Results             app.ResultStore
+	Observations        app.ObservationPageReader
 	Findings            app.FindingStore
 	Readiness           ReadinessProvider
 	Metrics             observability.Provider
@@ -87,10 +88,15 @@ func NewHandler(config Config) (http.Handler, error) {
 	}
 	slices.SortFunc(providers, func(left, right rules.Provider) int { return strings.Compare(left.ID, right.ID) })
 	slices.SortFunc(products, func(left, right rules.Product) int { return strings.Compare(left.ID, right.ID) })
+	observationReader := config.Observations
+	if observationReader == nil {
+		observationReader, _ = config.Results.(app.ObservationPageReader)
+	}
 	return &server{
 		analyzer:     config.Analyzer,
 		jobs:         config.Jobs,
 		results:      config.Results,
+		observations: observationReader,
 		findings:     config.Findings,
 		readiness:    config.Readiness,
 		metrics:      config.Metrics,
@@ -105,6 +111,7 @@ type server struct {
 	analyzer            app.Analyzer
 	jobs                jobs.Store
 	results             app.ResultStore
+	observations        app.ObservationPageReader
 	findings            app.FindingStore
 	readiness           ReadinessProvider
 	metrics             observability.Provider
@@ -462,35 +469,33 @@ func (s *server) loadResult(writer http.ResponseWriter, request *http.Request, i
 }
 
 func (s *server) getObservations(writer http.ResponseWriter, request *http.Request, id string) {
-	report, ok := s.loadResult(writer, request, id)
-	if !ok {
-		return
-	}
-	limit, offset, err := pageParameters(request)
+	limit, err := pageLimit(request)
 	if err != nil {
 		writeApplicationError(writer, err)
 		return
 	}
-	observations := slices.Clone(report.Observations)
-	slices.SortStableFunc(observations, func(left, right model.Observation) int {
-		if order := left.ObservedAt.Compare(right.ObservedAt); order != 0 {
-			return order
-		}
-		return strings.Compare(left.ID, right.ID)
-	})
-	if offset > len(observations) {
-		writeApplicationError(writer, model.NewError(model.CodeInvalidOptions, "cursor is outside the result set", nil))
+	cursor, err := parseObservationCursor(request.URL.Query().Get("cursor"), id)
+	if err != nil {
+		writeApplicationError(writer, err)
 		return
 	}
-	end := min(offset+limit, len(observations))
+	if s.observations == nil {
+		writeApplicationError(writer, model.NewError(model.CodePersistenceUnavailable, "stored observation paging is unavailable", nil))
+		return
+	}
+	page, err := s.observations.ObservationPage(request.Context(), app.ObservationPageQuery{ReportID: id, AfterAt: cursor.ObservedAt, AfterID: cursor.ObservationID, Limit: limit})
+	if err != nil {
+		writeApplicationError(writer, err)
+		return
+	}
 	next := ""
-	if end < len(observations) {
-		next = base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(end)))
+	if page.HasMore {
+		next = encodeObservationCursor(id, page.LastAt, page.LastID)
 	}
 	writeJSON(writer, http.StatusOK, struct {
 		Items      []model.Observation `json:"items"`
 		NextCursor string              `json:"next_cursor,omitempty"`
-	}{Items: observations[offset:end], NextCursor: next})
+	}{Items: page.Items, NextCursor: next})
 }
 
 func pageParameters(request *http.Request) (int, int, error) {

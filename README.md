@@ -58,6 +58,8 @@ Reports contain collected observations, evidence from matching rules and dataset
 
 HTTP reports retain a validated response and a bounded body prefix when reading the body fails. The `http_script_signals` coverage entry reports omitted unique script URLs or an incomplete body scan separately from overall HTTP collection.
 
+The service's `/v1/results/{id}/observations` endpoint reads bounded pages in observation-time and ID order. Its `next_cursor` is an opaque, report-bound token. Older numeric offset cursors are rejected; restart pagination without a cursor after upgrading.
+
 This illustrative excerpt shows a CloudFront finding for a hostname with a matching CNAME. It is not live output from `example.com`. Other report fields are omitted:
 
 ```json
