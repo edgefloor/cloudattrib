@@ -70,6 +70,7 @@ type Storage struct {
 	PostgresDSNFile string        `json:"postgres_dsn_file,omitempty" yaml:"postgres_dsn_file,omitempty"`
 	LeaseDuration   time.Duration `json:"lease_duration" yaml:"lease_duration"`
 	MaximumAttempts int           `json:"maximum_attempts" yaml:"maximum_attempts"`
+	ReportRetention time.Duration `json:"report_retention" yaml:"report_retention"`
 }
 
 // Default returns the bounded loopback configuration without credentials.
@@ -92,7 +93,7 @@ func Default() Config {
 			ResponseWriteGrace:          10 * time.Second,
 		},
 		CT:      CT{Enabled: false, MaximumSeedNames: 20},
-		Storage: Storage{LeaseDuration: 30 * time.Second, MaximumAttempts: 3},
+		Storage: Storage{LeaseDuration: 30 * time.Second, MaximumAttempts: 3, ReportRetention: 30 * 24 * time.Hour},
 	}
 }
 
@@ -126,8 +127,8 @@ func (c Config) Validate() error {
 	if c.CT.MaximumSeedNames < 0 || c.CT.MaximumSeedNames > c.Limits.Target.SeedHostnames {
 		return fmt.Errorf("CT seed limit exceeds the target seed limit")
 	}
-	if c.Storage.LeaseDuration <= 0 || c.Storage.MaximumAttempts <= 0 {
-		return fmt.Errorf("storage lease settings must be positive")
+	if c.Storage.LeaseDuration <= 0 || c.Storage.MaximumAttempts <= 0 || c.Storage.ReportRetention <= 0 {
+		return fmt.Errorf("storage lease, attempt, and report retention settings must be positive")
 	}
 	return nil
 }

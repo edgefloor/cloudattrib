@@ -42,6 +42,7 @@ type transactionHooks struct {
 	afterActivationCommit  func() error
 	beforeInventoryCommit  func() error
 	beforeInventoryPublish func() error
+	afterReplaySourceLock  func(string)
 }
 
 type workRequest struct {
@@ -418,6 +419,16 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 			result.Targets[index] = jobs.Target{ID: targetID, Index: index, Request: targetRequest, Status: targetStatus, TerminalReason: reason}
 		}
 		for requestIndex, reclassifyRequest := range request.Reclassifications {
+			var sourceID string
+			if err := tx.QueryRow(ctx, `SELECT id FROM reports WHERE id=$1 FOR KEY SHARE`, reclassifyRequest.ReportID).Scan(&sourceID); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return model.NewError(model.CodeNotFound, "reclassification source report no longer exists", nil)
+				}
+				return persistence("protect reclassification source during admission", err)
+			}
+			if s.transactionHooks != nil && s.transactionHooks.afterReplaySourceLock != nil {
+				s.transactionHooks.afterReplaySourceLock(sourceID)
+			}
 			index := len(request.Targets) + requestIndex
 			targetID, idErr := newID("target")
 			if idErr != nil {
@@ -721,7 +732,7 @@ func (s *Store) LoadReport(ctx context.Context, id string) (model.Report, error)
 	var document []byte
 	if err := s.pool.QueryRow(ctx, `SELECT document FROM reports WHERE id=$1`, id).Scan(&document); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return model.Report{}, model.NewError(model.CodeInvalidTarget, "report was not found", nil)
+			return model.Report{}, model.NewError(model.CodeNotFound, "report was not found", nil)
 		}
 		return model.Report{}, persistence("load report", err)
 	}
@@ -782,7 +793,7 @@ func (s *Store) ObservationPage(ctx context.Context, query app.ObservationPageQu
 		return app.ObservationPage{}, err
 	}
 	if !found {
-		return app.ObservationPage{}, model.NewError(model.CodeInvalidTarget, "report was not found", nil)
+		return app.ObservationPage{}, model.NewError(model.CodeNotFound, "report was not found", nil)
 	}
 	return page, nil
 }

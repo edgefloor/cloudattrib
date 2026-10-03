@@ -228,7 +228,7 @@ func TestPostgresObservationEndpointReadsBoundedProjectionPages(t *testing.T) {
 		t.Fatalf("seen %d observations", len(seen))
 	}
 	missing, err := store.ObservationPage(ctx, app.ObservationPageQuery{ReportID: "missing-report", Limit: 7})
-	if model.ErrorCodeOf(err) != model.CodeInvalidTarget || len(missing.Items) != 0 {
+	if model.ErrorCodeOf(err) != model.CodeNotFound || len(missing.Items) != 0 {
 		t.Fatalf("missing report page = %#v, %v", missing, err)
 	}
 	emptyReport := report

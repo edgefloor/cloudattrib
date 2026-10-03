@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"strings"
+	"time"
 
 	"cloudattrib/internal/app"
 	"cloudattrib/internal/ctlog"
@@ -18,6 +19,7 @@ import (
 	"cloudattrib/internal/inventory"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/retention"
 )
 
 const maxJSONLRows = 1000
@@ -45,6 +47,7 @@ type Dependencies struct {
 	InventoryProjectionStatus func(context.Context) (inventory.ProjectionStatus, error)
 	InventoryReportBackfill   func(context.Context, string, int) (inventory.BackfillPage, error)
 	InventoryProject          func(context.Context, int) (int, error)
+	ReportRetention           func(context.Context, string, retention.Request) (retention.Page, error)
 	Stdin                     io.Reader
 	Stdout                    io.Writer
 	Stderr                    io.Writer
@@ -88,9 +91,42 @@ func Run(ctx context.Context, args []string, dependencies Dependencies) int {
 		return runDatasets(ctx, args[1:], dependencies, streams)
 	case "inventory":
 		return runInventory(ctx, args[1:], dependencies, streams)
+	case "retention":
+		return runRetention(ctx, args[1:], dependencies, streams)
 	default:
 		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, fmt.Sprintf("unknown subcommand %q", args[0]), nil))
 	}
+}
+
+func runRetention(ctx context.Context, args []string, dependencies Dependencies, streams commandStreams) int {
+	if len(args) == 0 || args[0] != "preview" && args[0] != "apply" {
+		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "retention requires preview or apply", nil))
+	}
+	flags := flag.NewFlagSet("retention "+args[0], flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	configuration := flags.String("config", "", "")
+	before := flags.String("before", "", "")
+	limit := flags.Int("limit", 100, "")
+	cursor := flags.String("cursor", "", "")
+	if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
+		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "invalid retention flags", err))
+	}
+	if dependencies.ReportRetention == nil {
+		return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "report retention is unavailable", nil))
+	}
+	request := retention.Request{Limit: *limit, Cursor: *cursor, Apply: args[0] == "apply"}
+	if *before != "" {
+		cutoff, err := time.Parse(time.RFC3339, *before)
+		if err != nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidOptions, "invalid report retention cutoff", err))
+		}
+		request.Cutoff = cutoff
+	}
+	page, err := dependencies.ReportRetention(ctx, *configuration, request)
+	if err != nil {
+		return diagnostic(streams.stderr, err)
+	}
+	return writeCommandJSON(streams, page)
 }
 
 func runDatasets(ctx context.Context, args []string, dependencies Dependencies, streams commandStreams) int {

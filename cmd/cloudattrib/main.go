@@ -17,6 +17,7 @@ import (
 	"cloudattrib/internal/inventory"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
+	"cloudattrib/internal/retention"
 	localruntime "cloudattrib/internal/runtime"
 )
 
@@ -126,6 +127,12 @@ func main() {
 			operatorID = "local-operator"
 		}
 		return localruntime.ValidateInventory(ctx, configuration, operatorID, request)
+	}, ReportRetention: func(ctx context.Context, configPath string, request retention.Request) (retention.Page, error) {
+		resolved, err := resolveConfiguration(configuration, configPath)
+		if err != nil {
+			return retention.Page{}, err
+		}
+		return localruntime.RunReportRetention(ctx, resolved, request)
 	}}))
 }
 
