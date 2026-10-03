@@ -101,6 +101,8 @@ See the [report schema](schema/report.schema.json) for all fields and the [resul
 
 Analyze DNS without fetching the website:
 
+DNS analysis follows bounded CNAME chains, collects MX and NS address dependencies, and identifies inherited zone nameservers. Dependency addresses are attributed separately from website endpoints. If the graph cannot be completed within the configured limits, the report records partial DNS coverage.
+
 ```sh
 ./bin/cloudattrib analyze example.com --mode dns
 ```

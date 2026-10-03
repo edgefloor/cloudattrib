@@ -19,6 +19,7 @@ const (
 	typeA     = 1
 	typeNS    = 2
 	typeCNAME = 5
+	typeSOA   = 6
 	typeMX    = 15
 	typeTXT   = 16
 	typeAAAA  = 28
@@ -48,11 +49,18 @@ type Collector struct {
 	query  QueryFunc
 	policy policy.DestinationPolicy
 	now    func() time.Time
+	limits policy.Limits
 }
 
 // New constructs a collector without starting background work.
 func New(query QueryFunc, destinationPolicy policy.DestinationPolicy) *Collector {
-	return &Collector{query: query, policy: destinationPolicy, now: time.Now}
+	return &Collector{query: query, policy: destinationPolicy, now: time.Now, limits: policy.DefaultLimits()}
+}
+
+// WithLimits configures graph depth and question budgets before collection starts.
+func (c *Collector) WithLimits(limits policy.Limits) *Collector {
+	c.limits = limits
+	return c
 }
 
 // Collect waits for every configured question. It calls onCandidate as soon as
@@ -70,10 +78,16 @@ func (c *Collector) Collect(ctx context.Context, hostname string, port uint16, o
 // CollectOccurrence waits for every configured question using caller-owned
 // collection occurrence context.
 func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port uint16, occurrence model.ObservationOccurrence, onCandidate func(Candidate)) Result {
+	return c.NewJob().CollectOccurrence(ctx, hostname, port, occurrence, onCandidate)
+}
+
+func (c *Collector) collectOccurrence(ctx context.Context, job *Job, hostname string, port uint16, occurrence model.ObservationOccurrence, onCandidate func(Candidate)) Result {
 	type queryResult struct {
 		result     model.DNSResult
 		occurrence model.ObservationOccurrence
 		err        error
+		observedAt time.Time
+		fromCache  bool
 	}
 	results := make(chan queryResult)
 	var wg sync.WaitGroup
@@ -82,11 +96,11 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 		queryOccurrence := occurrence
 		queryOccurrence.RequestIndex = requestIndex
 		wg.Go(func() {
-			result, err := c.query(ctx, question)
+			result, err, observedAt, fromCache := job.query(ctx, question)
 			if result.Attempt > 0 {
 				queryOccurrence.Attempt = result.Attempt
 			}
-			results <- queryResult{result: result, occurrence: queryOccurrence, err: err}
+			results <- queryResult{result: result, occurrence: queryOccurrence, err: err, observedAt: observedAt, fromCache: fromCache}
 		})
 	}
 	go func() {
@@ -96,8 +110,34 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 
 	collected := Result{Coverage: model.Coverage{Capability: "dns", Status: model.CoverageComplete}}
 	publishedAddresses := make(map[netip.Addr]struct{})
+	var publishMu sync.Mutex
+	allPublished := make(map[netip.Addr]struct{})
+	publish := onCandidate
+	if onCandidate != nil {
+		publish = func(candidate Candidate) {
+			publishMu.Lock()
+			defer publishMu.Unlock()
+			if _, exists := allPublished[candidate.Address]; exists {
+				return
+			}
+			allPublished[candidate.Address] = struct{}{}
+			onCandidate(candidate)
+		}
+	}
+	type graphResult struct {
+		result Result
+		next   int
+	}
+	graphTargets := make(chan cnameTarget, len(questionTypes))
+	graphDone := make(chan graphResult, 1)
+	go func() {
+		graph := Result{Coverage: model.Coverage{Capability: "dns", Status: model.CoverageComplete}}
+		next := c.followCNAMEGraph(ctx, job, hostname, port, occurrence, publish, &graph, make(map[netip.Addr]struct{}), graphTargets)
+		graphDone <- graphResult{result: graph, next: next}
+	}()
+	root := normalizedGraphName(hostname)
 	for item := range results {
-		if item.result.Attempt > 0 {
+		if !item.fromCache && item.result.Attempt > 0 {
 			collected.Coverage.Attempted += item.result.Attempt
 		}
 		outcome := normalizeOutcome(item.result, item.err)
@@ -112,7 +152,7 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 			if outcome == model.DNSOutcomeBudgetExhausted {
 				collected.Coverage.Omitted++
 			}
-			collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, outcome, item.result, item.err.Error(), item.occurrence))
+			collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, outcome, item.result, item.err.Error(), item.occurrence, item.observedAt))
 			continue
 		}
 		if dnsOutcomeCompleted(outcome) {
@@ -121,21 +161,31 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 			collected.Coverage.Status = model.CoveragePartial
 			collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, model.CodeCollectionFailed)
 		}
-		collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, outcome, item.result, "", item.occurrence))
+		collected.Observations = append(collected.Observations, c.queryObservation(hostname, item.result.Question, outcome, item.result, "", item.occurrence, item.observedAt))
 		if outcome != model.DNSOutcomeAnswered {
 			continue
 		}
 		for recordIndex, observation := range item.result.Records {
 			if observation.ObservedAt.IsZero() {
-				observation.ObservedAt = c.now()
+				observation.ObservedAt = item.observedAt
 			}
 			recordOccurrence := item.occurrence
 			recordOccurrence.ItemIndex = recordIndex
 			observation.ID = model.ObservationID("dns-record", recordOccurrence)
 			collected.Observations = append(collected.Observations, observation)
+			if target := cnameDestination(observation); target != "" {
+				select {
+				case graphTargets <- cnameTarget{name: target, depth: 1, path: []string{root}}:
+				case <-ctx.Done():
+					collected.Coverage.Status = model.CoveragePartial
+					collected.Coverage.Omitted++
+				}
+			}
 		}
 		for addressIndex, address := range item.result.Addresses {
 			address = address.Unmap()
+			details := addressRecord(item.result, addressIndex, hostname, item.observedAt)
+			owner := details.owner
 			if !policy.ReserveAddress(ctx) {
 				collected.Coverage.Status = model.CoveragePartial
 				collected.Coverage.Omitted++
@@ -150,26 +200,48 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 				collected.Coverage.Status = model.CoveragePartial
 				collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, model.CodePolicyBlocked)
 			}
-			payload := model.DNSPayload{RRType: typeName(item.result.Question.Type), Owner: hostname, Address: address, PolicyReason: string(decision.Reason)}
+			payload := model.DNSPayload{RRType: details.rrtype, Owner: owner, Address: address, TTL: details.ttl, Section: details.section, PolicyReason: string(decision.Reason)}
 			addressOccurrence := item.occurrence
 			addressOccurrence.ItemIndex = addressIndex
+			addressScope := model.ScopeRoot
+			if owner != hostname {
+				addressScope = model.ScopeCNAME
+			}
 			collected.Observations = append(collected.Observations, model.Observation{
 				ID:         model.ObservationID("dns-address", addressOccurrence),
 				Type:       "dns_address",
-				Subject:    hostname,
-				Scope:      model.ScopeRoot,
-				ObservedAt: c.now(),
+				Subject:    owner,
+				Scope:      addressScope,
+				ObservedAt: details.observedAt,
 				Status:     status,
 				Payload:    marshalPayload(payload),
 			})
 			if decision.Allowed && onCandidate != nil {
 				if _, published := publishedAddresses[address]; !published {
 					publishedAddresses[address] = struct{}{}
-					onCandidate(Candidate{Hostname: hostname, Address: address, Port: port})
+					publish(Candidate{Hostname: hostname, Address: address, Port: port})
 				}
 			}
 		}
 	}
+	close(graphTargets)
+	completedGraph := <-graphDone
+	collected.Observations = append(collected.Observations, completedGraph.result.Observations...)
+	collected.Addresses = append(collected.Addresses, completedGraph.result.Addresses...)
+	collected.Coverage.Attempted += completedGraph.result.Coverage.Attempted
+	collected.Coverage.Completed += completedGraph.result.Coverage.Completed
+	collected.Coverage.Omitted += completedGraph.result.Coverage.Omitted
+	collected.Coverage.Truncated += completedGraph.result.Coverage.Truncated
+	collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, completedGraph.result.Coverage.ErrorCodes...)
+	if completedGraph.result.Coverage.Status != model.CoverageComplete {
+		collected.Coverage.Status = model.CoveragePartial
+	}
+	if completedGraph.result.Coverage.Reason != "" {
+		collected.Coverage.Reason = completedGraph.result.Coverage.Reason
+	}
+	nextRequestIndex := completedGraph.next
+	nextRequestIndex = c.followInheritedZone(ctx, job, hostname, port, occurrence, nextRequestIndex, &collected)
+	c.followDependencies(ctx, job, hostname, port, occurrence, nextRequestIndex, &collected)
 	if ctx.Err() != nil {
 		collected.Coverage.Status = model.CoveragePartial
 		collected.Coverage.ErrorCodes = append(collected.Coverage.ErrorCodes, errorCode(ctx.Err()))
@@ -177,7 +249,7 @@ func (c *Collector) CollectOccurrence(ctx context.Context, hostname string, port
 	return collected
 }
 
-func (c *Collector) queryObservation(hostname string, question model.DNSQuestion, outcome model.DNSOutcome, result model.DNSResult, reason string, occurrence model.ObservationOccurrence) model.Observation {
+func (c *Collector) queryObservation(hostname string, question model.DNSQuestion, outcome model.DNSOutcome, result model.DNSResult, reason string, occurrence model.ObservationOccurrence, observedAt time.Time) model.Observation {
 	payload := model.DNSPayload{
 		RRType:       typeName(question.Type),
 		Owner:        hostname,
@@ -192,7 +264,7 @@ func (c *Collector) queryObservation(hostname string, question model.DNSQuestion
 		Type:       "dns_query",
 		Subject:    hostname,
 		Scope:      model.ScopeRoot,
-		ObservedAt: c.now(),
+		ObservedAt: observedAt,
 		Status:     string(outcome),
 		Payload:    marshalPayload(payload),
 	}
@@ -220,6 +292,41 @@ func normalizeOutcome(result model.DNSResult, err error) model.DNSOutcome {
 	default:
 		return model.DNSOutcomeFailed
 	}
+}
+
+type addressDetails struct {
+	owner      string
+	rrtype     string
+	ttl        uint32
+	section    string
+	observedAt time.Time
+}
+
+func addressRecord(result model.DNSResult, addressIndex int, fallback string, observedAt time.Time) addressDetails {
+	details := addressDetails{owner: fallback, rrtype: typeName(result.Question.Type), observedAt: observedAt}
+	index := 0
+	for _, record := range result.Records {
+		var payload model.DNSPayload
+		if json.Unmarshal(record.Payload, &payload) != nil || !payload.Address.IsValid() {
+			continue
+		}
+		if index == addressIndex {
+			if owner := normalizedGraphName(payload.Owner); owner != "" {
+				details.owner = owner
+			}
+			if payload.RRType == "A" || payload.RRType == "AAAA" {
+				details.rrtype = payload.RRType
+			}
+			details.ttl = payload.TTL
+			details.section = payload.Section
+			if !record.ObservedAt.IsZero() {
+				details.observedAt = record.ObservedAt
+			}
+			return details
+		}
+		index++
+	}
+	return details
 }
 
 func dnsOutcomeCompleted(outcome model.DNSOutcome) bool {
@@ -259,6 +366,8 @@ func typeName(value uint16) string {
 		return "AAAA"
 	case typeCNAME:
 		return "CNAME"
+	case typeSOA:
+		return "SOA"
 	case typeMX:
 		return "MX"
 	case typeNS:

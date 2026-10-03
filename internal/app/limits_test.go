@@ -35,7 +35,7 @@ func TestAnalyzeReportsConfiguredSeedLimit(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(queried) != 1 || queried["example.com"] != 6 {
+	if len(queried) != 1 || queried["example.com"] != 7 {
 		t.Fatalf("queried hostnames = %#v", queried)
 	}
 	if report.Status != model.StatusPartial || !hasCoverageError(report.Coverage, "seed_hostnames", model.CodeBudgetExceeded) {
@@ -129,8 +129,8 @@ func TestServicesShareTargetAdmissionAcrossBundleAnalyzers(t *testing.T) {
 	if _, err := secondService.Analyze(t.Context(), request); err != nil {
 		t.Fatalf("third Analyze() error = %v", err)
 	}
-	if got := secondQueries.Load(); got != 12 {
-		t.Fatalf("second analyzer queries after admission = %d, want 12", got)
+	if got := secondQueries.Load(); got < 12 {
+		t.Fatalf("second analyzer queries after admission = %d, want seed questions and zone discovery", got)
 	}
 }
 

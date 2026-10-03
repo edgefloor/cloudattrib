@@ -154,11 +154,12 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	}
 	dnsRuns := make([]dnsRun, 0, len(normalized.SeedHostnames))
 	httpRuns := make([]httpRun, 0, len(normalized.SeedHostnames))
+	dnsJob := s.dns.NewJob()
 	for seedIndex, seed := range normalized.SeedHostnames {
 		portForSeed := seedPort(normalized, seed, s.httpScheme)
 		occurrence := model.ObservationOccurrence{CollectionRunID: collectionRunID, Seed: seed, SeedIndex: seedIndex, Attempt: 1}
 		if !collectHTTP {
-			result := s.dns.CollectOccurrence(ctx, seed, portForSeed, occurrence, nil)
+			result := dnsJob.CollectOccurrence(ctx, seed, portForSeed, occurrence, nil)
 			dnsRuns = append(dnsRuns, dnsRun{hostname: seed, result: result})
 			continue
 		}
@@ -169,7 +170,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		dnsDone := make(chan collectdns.Result, 1)
 		go func() {
 			dropped := 0
-			result := s.dns.CollectOccurrence(ctx, seed, portForSeed, occurrence, func(candidate collectdns.Candidate) {
+			result := dnsJob.CollectOccurrence(ctx, seed, portForSeed, occurrence, func(candidate collectdns.Candidate) {
 				select {
 				case candidates <- candidate.Address:
 				default:
@@ -206,7 +207,9 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	for _, run := range dnsRuns {
 		scope := scopeForSeed(run.hostname, normalized.ScopeRoots)
 		for _, observation := range run.result.Observations {
-			observation.Scope = scope
+			if observation.Scope == "" || observation.Scope == model.ScopeRoot {
+				observation.Scope = scope
+			}
 			observations = append(observations, observation)
 		}
 		coverage = append(coverage, run.result.Coverage)

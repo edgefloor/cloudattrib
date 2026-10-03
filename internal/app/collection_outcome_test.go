@@ -19,7 +19,7 @@ func TestAnalyzeInterpretsDNSAbsenceAndProtocolFailure(t *testing.T) {
 		wantStatus model.ReportStatus
 		wantQuery  string
 	}{
-		{name: "nodata is completed absence", response: 0, wantStatus: model.StatusComplete, wantQuery: "nodata"},
+		{name: "nodata without an applicable zone is partial", response: 0, wantStatus: model.StatusPartial, wantQuery: "nodata"},
 		{name: "nxdomain is completed absence", response: 3, wantStatus: model.StatusComplete, wantQuery: "nxdomain"},
 		{name: "servfail cannot establish absence", response: 2, wantStatus: model.StatusFailed, wantQuery: "servfail"},
 		{name: "refused cannot establish absence", response: 5, wantStatus: model.StatusFailed, wantQuery: "refused"},

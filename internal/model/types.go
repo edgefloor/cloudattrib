@@ -109,6 +109,7 @@ const (
 	ScopeCNAME            Scope = "cname_target"
 	ScopeMailDependency   Scope = "mail_dependency"
 	ScopeDNSDependency    Scope = "dns_dependency"
+	ScopeInheritedZone    Scope = "inherited_zone"
 	ScopeExternalRedirect Scope = "external_redirect"
 )
 
@@ -179,6 +180,7 @@ type DNSResult struct {
 	Resolver     string        `json:"resolver"`
 	Records      []Observation `json:"records"`
 	Addresses    []netip.Addr  `json:"addresses"`
+	NegativeTTL  uint32        `json:"negative_ttl,omitempty"`
 	Omitted      int           `json:"omitted,omitempty"`
 }
 
@@ -190,6 +192,7 @@ type DNSPayload struct {
 	Value        string     `json:"value,omitempty"`
 	Address      netip.Addr `json:"address,omitempty"`
 	TTL          uint32     `json:"ttl,omitempty"`
+	Section      string     `json:"section,omitempty"`
 	ResponseCode int        `json:"response_code"`
 	Resolver     string     `json:"resolver,omitempty"`
 	Transport    string     `json:"transport,omitempty"`

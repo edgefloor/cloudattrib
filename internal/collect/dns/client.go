@@ -131,6 +131,14 @@ func (c *Client) convert(question model.DNSQuestion, response *mdns.Msg, transpo
 		Transport:    transport,
 		Resolver:     c.resolver,
 	}
+	if result.Outcome == model.DNSOutcomeNoData || result.Outcome == model.DNSOutcomeNXDomain {
+		for _, record := range response.Ns {
+			if soa, ok := record.(*mdns.SOA); ok {
+				result.NegativeTTL = min(soa.Hdr.Ttl, soa.Minttl)
+				break
+			}
+		}
+	}
 	cnameCount := 0
 	for _, record := range response.Answer {
 		if record.Header().Rrtype == mdns.TypeCNAME {
@@ -205,7 +213,7 @@ func outcomeForError(err error) model.DNSOutcome {
 
 func dnsPayload(record mdns.RR) (model.DNSPayload, netip.Addr, bool) {
 	header := record.Header()
-	payload := model.DNSPayload{RRType: mdns.TypeToString[header.Rrtype], Owner: strings.TrimSuffix(strings.ToLower(header.Name), "."), TTL: header.Ttl}
+	payload := model.DNSPayload{RRType: mdns.TypeToString[header.Rrtype], Owner: strings.TrimSuffix(strings.ToLower(header.Name), "."), TTL: header.Ttl, Section: "answer"}
 	switch value := record.(type) {
 	case *mdns.A:
 		address, ok := netip.AddrFromSlice(value.A)
@@ -228,6 +236,8 @@ func dnsPayload(record mdns.RR) (model.DNSPayload, netip.Addr, bool) {
 	case *mdns.MX:
 		payload.Value = fmt.Sprintf("%d %s", value.Preference, strings.TrimSuffix(strings.ToLower(value.Mx), "."))
 	case *mdns.NS:
+		payload.Value = strings.TrimSuffix(strings.ToLower(value.Ns), ".")
+	case *mdns.SOA:
 		payload.Value = strings.TrimSuffix(strings.ToLower(value.Ns), ".")
 	case *mdns.TXT:
 		payload.Value = strings.Join(value.Txt, "")
