@@ -14,6 +14,8 @@ import (
 	"cloudattrib/internal/config"
 	"cloudattrib/internal/ctlog"
 	"cloudattrib/internal/datasets"
+	"cloudattrib/internal/inventory"
+	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 	localruntime "cloudattrib/internal/runtime"
 )
@@ -95,6 +97,25 @@ func main() {
 			return false, err
 		}
 		return localruntime.PruneDataset(ctx, resolved, candidateID)
+
+	}, InventoryImport: func(ctx context.Context, request inventory.ImportRequest) (inventory.ImportReceipt, error) {
+		return localruntime.ImportInventory(ctx, configuration, request)
+	}, InventorySearch: func(ctx context.Context, request inventory.SearchRequest) (inventory.Page, error) {
+		return localruntime.SearchInventory(ctx, configuration, request)
+	}, InventoryRead: func(ctx context.Context, hostname string) (inventory.Asset, error) {
+		return localruntime.ReadInventory(ctx, configuration, hostname)
+	}, InventoryArchive: func(ctx context.Context, hostname string, archived bool) (inventory.Asset, error) {
+		return localruntime.ArchiveInventory(ctx, configuration, hostname, archived)
+	}, InventoryDelete: func(ctx context.Context, hostname string, suppress bool) (int64, error) {
+		return localruntime.DeleteInventory(ctx, configuration, hostname, suppress)
+	}, InventoryBackfill: func(ctx context.Context, cursor string, limit int) (inventory.BackfillPage, error) {
+		return localruntime.BackfillCTInventory(ctx, configuration, cursor, limit)
+	}, InventoryValidate: func(ctx context.Context, request inventory.ValidationRequest) (jobs.Job, error) {
+		operatorID := configuration.API.LocalOperatorID
+		if operatorID == "" {
+			operatorID = "local-operator"
+		}
+		return localruntime.ValidateInventory(ctx, configuration, operatorID, request)
 	}}))
 }
 

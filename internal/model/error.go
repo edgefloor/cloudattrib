@@ -13,6 +13,7 @@ const (
 	CodeInvalidSyntax          ErrorCode = "invalid_syntax"
 	CodeInvalidTarget          ErrorCode = "invalid_target"
 	CodeInvalidOptions         ErrorCode = "invalid_options"
+	CodeNotFound               ErrorCode = "not_found"
 	CodeInputTooLarge          ErrorCode = "input_too_large"
 	CodePolicyBlocked          ErrorCode = "policy_blocked"
 	CodeTimeout                ErrorCode = "timeout"
@@ -77,6 +78,8 @@ func HTTPStatus(err error) int {
 		return 400
 	case CodeInvalidTarget, CodeInvalidOptions:
 		return 422
+	case CodeNotFound:
+		return 404
 	case CodeInputTooLarge:
 		return 413
 	case CodeIdempotencyConflict:
@@ -96,7 +99,7 @@ func HTTPStatus(err error) int {
 // CLIExit maps an application error to the command exit contract.
 func CLIExit(err error) int {
 	switch ErrorCodeOf(err) {
-	case CodeInvalidSyntax, CodeInvalidTarget, CodeInvalidOptions, CodeInputTooLarge,
+	case CodeInvalidSyntax, CodeInvalidTarget, CodeInvalidOptions, CodeNotFound, CodeInputTooLarge,
 		CodeIdempotencyConflict, CodeQueueCapacityExceeded:
 		return 2
 	case CodeBudgetExceeded, CodeCollectionFailed, CodeCancelled:

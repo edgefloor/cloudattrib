@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -39,6 +40,8 @@ type transactionHooks struct {
 	afterLifecycleLock     func(string)
 	beforeActivationCommit func(pgx.Tx)
 	afterActivationCommit  func() error
+	beforeInventoryCommit  func() error
+	beforeInventoryPublish func() error
 }
 
 type workRequest struct {
@@ -279,6 +282,9 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 	if request.OperatorID == "" || request.IdempotencyKey == "" || request.WorkCount() == 0 {
 		return jobs.Job{}, model.NewError(model.CodeInvalidOptions, "operator, idempotency key, and targets are required", nil)
 	}
+	if len(request.InventorySelections) != 0 && len(request.InventorySelections) != len(request.Targets) {
+		return jobs.Job{}, model.NewError(model.CodeInvalidOptions, "inventory selections must match target count", nil)
+	}
 	if err := jobs.ValidatePersistentAnalyzeRequests(request.Targets); err != nil {
 		return jobs.Job{}, err
 	}
@@ -367,7 +373,26 @@ func (s *Store) Submit(ctx context.Context, request jobs.SubmitRequest) (jobs.Jo
 			if validationErrors[index] != nil {
 				targetStatus, reason = jobs.TargetFailed, jobs.ValidationReason(validationErrors[index])
 			}
-			if _, err := tx.Exec(ctx, `INSERT INTO job_targets(id,job_id,input_index,request,status,terminal_reason) VALUES($1,$2,$3,$4,$5,NULLIF($6,''))`, targetID, jobID, index, encoded, targetStatus, reason); err != nil {
+			var inventoryAssetID *string
+			var inventoryGeneration *int64
+			if len(request.InventorySelections) != 0 {
+				selection := request.InventorySelections[index]
+				var hostname string
+				var generation int64
+				if err := tx.QueryRow(ctx, `SELECT hostname,deletion_generation FROM inventory_assets WHERE asset_id=$1 FOR SHARE`, selection.AssetID).Scan(&hostname, &generation); err != nil {
+					if errors.Is(err, pgx.ErrNoRows) {
+						return model.NewError(model.CodeNotFound, "selected inventory asset no longer exists", nil)
+					}
+					return persistence("validate frozen inventory asset", err)
+				}
+				if hostname != targetRequest.Target || generation != selection.DeletionGeneration {
+					return model.NewError(model.CodeIdempotencyConflict, "selected inventory asset changed before admission", nil)
+				}
+				inventoryAssetID = &selection.AssetID
+				inventoryGeneration = &selection.DeletionGeneration
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO job_targets(id,job_id,input_index,request,status,terminal_reason,inventory_asset_id,inventory_deletion_generation)
+				VALUES($1,$2,$3,$4,$5,NULLIF($6,''),$7,$8)`, targetID, jobID, index, encoded, targetStatus, reason, inventoryAssetID, inventoryGeneration); err != nil {
 				return persistence("insert target", err)
 			}
 			result.Targets[index] = jobs.Target{ID: targetID, Index: index, Request: targetRequest, Status: targetStatus, TerminalReason: reason}
@@ -963,7 +988,11 @@ func (s *Store) Import(ctx context.Context, records []ctlog.Record) error {
 		return persistence("begin CT import", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := insertCTRecords(ctx, tx, records); err != nil {
+	var startedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&startedAt); err != nil {
+		return persistence("timestamp CT publication", err)
+	}
+	if err := insertCTRecords(ctx, tx, records, startedAt); err != nil {
 		return err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -998,7 +1027,11 @@ func (s *Store) CommitCollection(ctx context.Context, records []ctlog.Record, ch
 		return persistence("begin CT collection commit", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := insertCTRecords(ctx, tx, records); err != nil {
+	var startedAt time.Time
+	if err := tx.QueryRow(ctx, `SELECT clock_timestamp()`).Scan(&startedAt); err != nil {
+		return persistence("timestamp CT publication", err)
+	}
+	if err := insertCTRecords(ctx, tx, records, startedAt); err != nil {
 		return err
 	}
 	result, err := tx.Exec(ctx, `INSERT INTO ct_checkpoints(log_id,next_index,verified_tree_size,verified_root_hash,tree_timestamp,tree_identity,key_identity)
@@ -1065,7 +1098,9 @@ func (s *Store) Discover(ctx context.Context, root string, limit int) (ctlog.Que
 	return result, nil
 }
 
-func insertCTRecords(ctx context.Context, tx pgx.Tx, records []ctlog.Record) error {
+func insertCTRecords(ctx context.Context, tx pgx.Tx, records []ctlog.Record, startedAt time.Time) error {
+	records = append([]ctlog.Record(nil), records...)
+	slices.SortFunc(records, func(a, b ctlog.Record) int { return strings.Compare(a.Name, b.Name) })
 	for _, record := range records {
 		document, err := json.Marshal(record)
 		if err != nil {
@@ -1075,6 +1110,9 @@ func insertCTRecords(ctx context.Context, tx pgx.Tx, records []ctlog.Record) err
 			VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (name,certificate_hash,source_id) DO NOTHING`, record.Name, record.CertificateHash,
 			record.SourceID, record.Wildcard, record.LoggedAt, record.Provenance, document); err != nil {
 			return persistence("insert CT record", err)
+		}
+		if err := upsertCTInventory(ctx, tx, record, startedAt); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -1190,10 +1228,11 @@ func reportProjection(report model.Report) ([]string, []string, []string) {
 
 func payloadHash(request jobs.SubmitRequest) (string, error) {
 	encoded, err := json.Marshal(struct {
-		BundleID          string                    `json:"bundle_id"`
-		Targets           []model.AnalyzeRequest    `json:"targets"`
-		Reclassifications []model.ReclassifyRequest `json:"reclassifications"`
-	}{BundleID: request.BundleID, Targets: request.Targets, Reclassifications: request.Reclassifications})
+		BundleID            string                    `json:"bundle_id"`
+		Targets             []model.AnalyzeRequest    `json:"targets"`
+		Reclassifications   []model.ReclassifyRequest `json:"reclassifications"`
+		InventorySelections []jobs.InventorySelection `json:"inventory_selections,omitempty"`
+	}{BundleID: request.BundleID, Targets: request.Targets, Reclassifications: request.Reclassifications, InventorySelections: request.InventorySelections})
 	if err != nil {
 		return "", err
 	}

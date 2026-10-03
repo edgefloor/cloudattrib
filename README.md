@@ -8,6 +8,8 @@ Use it to inspect a domain's public infrastructure, process lists of domains, or
 
 Attribution runs locally and requires no commercial enrichment API or API key. Domain analysis contacts your configured DNS resolver and the target's public website. IP lookup and reclassification of saved reports require no target requests.
 
+For the persistent searchable hostname inventory, imports, CT backfill, and explicit validation jobs, see [Hostname inventory](docs/inventory.md).
+
 ## What it detects
 
 Findings distinguish relationships that a single provider label would hide:

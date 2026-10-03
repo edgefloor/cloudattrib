@@ -51,6 +51,9 @@ func ImportCT(ctx context.Context, configuration config.Config, reader io.Reader
 		return 0, err
 	}
 	defer store.Close()
+	if err := store.RegisterInventoryScopes(ctx, roots); err != nil {
+		return 0, err
+	}
 	return ctlog.ImportJSONL(ctx, reader, roots, store)
 }
 
@@ -123,6 +126,9 @@ func CollectCT(ctx context.Context, configuration config.Config, path string) (c
 		return ctlog.Metrics{}, err
 	}
 	defer store.Close()
+	if err := store.RegisterInventoryScopes(ctx, supplied.Roots); err != nil {
+		return ctlog.Metrics{}, err
+	}
 	collector, err := ctlog.NewCollector(collectorConfig, client, store)
 	if err != nil {
 		return ctlog.Metrics{}, model.NewError(model.CodeInvalidOptions, "create CT collector", err)

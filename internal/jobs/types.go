@@ -46,11 +46,18 @@ const (
 
 // SubmitRequest is atomically admitted or rejected as one batch.
 type SubmitRequest struct {
-	OperatorID        string                    `json:"operator_id"`
-	IdempotencyKey    string                    `json:"idempotency_key"`
-	BundleID          string                    `json:"bundle_id,omitempty"`
-	Targets           []model.AnalyzeRequest    `json:"targets"`
-	Reclassifications []model.ReclassifyRequest `json:"reclassifications,omitempty"`
+	OperatorID          string                    `json:"operator_id"`
+	IdempotencyKey      string                    `json:"idempotency_key"`
+	BundleID            string                    `json:"bundle_id,omitempty"`
+	Targets             []model.AnalyzeRequest    `json:"targets"`
+	Reclassifications   []model.ReclassifyRequest `json:"reclassifications,omitempty"`
+	InventorySelections []InventorySelection      `json:"-"`
+}
+
+// InventorySelection binds a queued target to the asset generation frozen at admission.
+type InventorySelection struct {
+	AssetID            string
+	DeletionGeneration int64
 }
 
 // WorkCount returns the number of capacity reservations in the batch.

@@ -23,6 +23,9 @@ var activationGenerationMigration string
 //go:embed migrations/005_observation_page.sql
 var observationPageMigration string
 
+//go:embed migrations/006_inventory.sql
+var inventoryMigration string
+
 // Migrate applies the idempotent initial schema under a database advisory lock.
 func Migrate(ctx context.Context, pool *pgxpool.Pool, maximumTargets int) error {
 	if maximumTargets <= 0 {
@@ -65,6 +68,12 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool, maximumTargets int) error 
 	}
 	if _, err := transaction.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES (5) ON CONFLICT DO NOTHING`); err != nil {
 		return fmt.Errorf("record observation page migration: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, inventoryMigration); err != nil {
+		return fmt.Errorf("apply inventory migration: %w", err)
+	}
+	if _, err := transaction.Exec(ctx, `INSERT INTO schema_migrations(version) VALUES (6) ON CONFLICT DO NOTHING`); err != nil {
+		return fmt.Errorf("record inventory migration: %w", err)
 	}
 	capacity, err := transaction.Exec(ctx, `INSERT INTO queue_capacity(singleton,reserved_targets,maximum_targets) VALUES (true,0,$1) ON CONFLICT (singleton) DO UPDATE SET maximum_targets=EXCLUDED.maximum_targets WHERE queue_capacity.reserved_targets <= EXCLUDED.maximum_targets`, maximumTargets)
 	if err != nil {
