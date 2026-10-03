@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 
@@ -37,17 +38,24 @@ func (s *Store) SearchInventorySemantic(ctx context.Context, request inventory.S
 	if err := inventory.ValidateEmbedding(request.Vector, len(request.Vector)); err != nil {
 		return inventory.EvidencePage{}, err
 	}
-	rows, err := s.pool.Query(ctx, `WITH ranked AS MATERIALIZED (
-		SELECT e.asset_id,e.context_id,a.hostname,(1-(e.embedding <=> $4::vector))::real AS rank
+	scopeJoin := ""
+	scopeWhere := "AND $3=''"
+	if request.ScopeRoot != "" {
+		scopeJoin = "JOIN inventory_memberships m ON m.asset_id=a.asset_id"
+		scopeWhere = "AND m.root=$3"
+	}
+	query := fmt.Sprintf(`WITH ranked AS MATERIALIZED (
+		SELECT e.asset_id,e.context_id,a.hostname,(1-(e.embedding <=> $4::halfvec))::real AS rank
 		FROM inventory_embeddings e
 		JOIN inventory_asset_contexts c ON c.asset_id=e.asset_id AND c.context_id=e.context_id
 		JOIN inventory_assets a ON a.asset_id=e.asset_id
+		%s
 		WHERE e.generation_id=$1 AND e.context_id=$2 AND a.archived_at IS NULL
 			AND e.description_revision=c.description_revision AND e.description_hash=c.description_hash
 			AND e.deletion_generation=c.deletion_generation
 			AND $1=(SELECT g.generation_id FROM inventory_embedding_generations g
 				WHERE g.generation_id=$1 AND g.status='active')
-			AND ($3='' OR EXISTS (SELECT 1 FROM inventory_memberships m WHERE m.asset_id=a.asset_id AND m.root=$3))
+			%s
 		ORDER BY rank DESC,a.hostname COLLATE "C" LIMIT $5
 	)
 	SELECT r.asset_id,r.hostname,r.context_id,c.description,c.description_revision,c.description_hash,
@@ -57,7 +65,8 @@ func (s *Store) SearchInventorySemantic(ctx context.Context, request inventory.S
 		c.latest_http_status,c.latest_http_at,c.last_http_response_status,c.last_http_response_at,
 		COALESCE(c.last_http_response_report_id,''),r.rank
 	FROM ranked r JOIN inventory_asset_contexts c ON c.asset_id=r.asset_id AND c.context_id=r.context_id
-	ORDER BY r.rank DESC,r.hostname COLLATE "C"`,
+	ORDER BY r.rank DESC,r.hostname COLLATE "C"`, scopeJoin, scopeWhere)
+	rows, err := s.pool.Query(ctx, query,
 		request.GenerationID, request.ContextID, request.ScopeRoot, pgVectorLiteral(request.Vector), request.Limit+1)
 	if err != nil {
 		return inventory.EvidencePage{}, persistence("search inventory embeddings", err)

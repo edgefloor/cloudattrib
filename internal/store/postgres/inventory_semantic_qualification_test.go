@@ -105,7 +105,7 @@ func TestInventorySemanticCapacityQualification(t *testing.T) {
 			description_revision,description_hash,deletion_generation,embedding)
 			SELECT c.asset_id,c.context_id,'capacity-fixture',c.description_revision,c.description_hash,c.deletion_generation,
 				(ARRAY[1.0::real,(substring(c.asset_id from 10)::integer%17)::real/17,
-				(substring(c.asset_id from 10)::integer%29)::real/29]||array_fill(0.0::real,ARRAY[381]))::vector
+				(substring(c.asset_id from 10)::integer%29)::real/29]||array_fill(0.0::real,ARRAY[381]))::halfvec
 			FROM inventory_asset_contexts c WHERE c.asset_id BETWEEN $1 AND $2`,
 				fmt.Sprintf("capacity-%06d", start), fmt.Sprintf("capacity-%06d", size)); err != nil {
 				t.Fatal(err)

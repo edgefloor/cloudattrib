@@ -20,6 +20,10 @@ func (s *retrievalTestStore) SearchInventoryEvidence(context.Context, EvidenceQu
 	return s.lexical, nil
 }
 
+func (s *retrievalTestStore) SearchInventoryRetrievalLexical(context.Context, EvidenceQuery) (EvidencePage, error) {
+	return s.lexical, nil
+}
+
 func (s *retrievalTestStore) ActiveEmbeddingGeneration(context.Context) (EmbeddingGeneration, error) {
 	return s.generation, nil
 }

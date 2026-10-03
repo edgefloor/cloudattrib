@@ -13,9 +13,12 @@ import (
 type RetrievalMode string
 
 const (
-	RetrievalLexical  RetrievalMode = "lexical"
+	// RetrievalLexical ranks retained description terms without local inference.
+	RetrievalLexical RetrievalMode = "lexical"
+	// RetrievalSemantic ranks local model vectors from the active generation.
 	RetrievalSemantic RetrievalMode = "semantic"
-	RetrievalHybrid   RetrievalMode = "hybrid"
+	// RetrievalHybrid fuses lexical and semantic candidates, with explicit fallback.
+	RetrievalHybrid RetrievalMode = "hybrid"
 )
 
 // RetrievalRequest is a bounded top-results query in one explicit context.
@@ -58,6 +61,12 @@ type SemanticQuery struct {
 type SemanticStore interface {
 	ActiveEmbeddingGeneration(context.Context) (EmbeddingGeneration, error)
 	SearchInventorySemantic(context.Context, SemanticQuery) (EvidencePage, error)
+}
+
+// RetrievalLexicalStore ranks any matching query term for natural-language
+// retrieval while the inventory evidence endpoint keeps its existing filter.
+type RetrievalLexicalStore interface {
+	SearchInventoryRetrievalLexical(context.Context, EvidenceQuery) (EvidencePage, error)
 }
 
 // EmbeddingProvider selects a local model for the active generation at query
@@ -133,18 +142,34 @@ func (s *Service) Retrieve(ctx context.Context, request RetrievalRequest) (Retri
 	candidateLimit := min(request.Limit*2, 100)
 	var lexical, semantic EvidencePage
 	var generationID string
-	var semanticErr error
-	if request.Mode != RetrievalSemantic {
-		var err error
-		lexical, err = s.store.SearchInventoryEvidence(ctx, EvidenceQuery{
+	var lexicalErr, semanticErr error
+	searchLexical := func() {
+		query := EvidenceQuery{
 			Text: request.Text, ScopeRoot: request.ScopeRoot, ContextID: request.ContextID, Limit: candidateLimit,
-		})
-		if err != nil {
-			return RetrievalPage{}, err
+		}
+		if retrievalStore, ok := s.store.(RetrievalLexicalStore); ok {
+			lexical, lexicalErr = retrievalStore.SearchInventoryRetrievalLexical(ctx, query)
+		} else {
+			lexical, lexicalErr = s.store.SearchInventoryEvidence(ctx, query)
 		}
 	}
-	if request.Mode != RetrievalLexical {
+	if request.Mode == RetrievalHybrid {
+		lexicalDone := make(chan struct{})
+		go func() {
+			defer close(lexicalDone)
+			searchLexical()
+		}()
 		semantic, generationID, semanticErr = s.searchSemantic(ctx, request, candidateLimit)
+		<-lexicalDone
+	} else if request.Mode == RetrievalLexical {
+		searchLexical()
+	} else {
+		semantic, generationID, semanticErr = s.searchSemantic(ctx, request, candidateLimit)
+	}
+	if lexicalErr != nil {
+		return RetrievalPage{}, lexicalErr
+	}
+	if request.Mode != RetrievalLexical {
 		if semanticErr != nil && request.Mode == RetrievalSemantic {
 			return RetrievalPage{}, semanticErr
 		}

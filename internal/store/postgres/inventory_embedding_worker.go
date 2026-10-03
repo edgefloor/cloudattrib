@@ -174,7 +174,7 @@ func (s *Store) publishInventoryEmbedding(ctx context.Context, claim inventoryEm
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO inventory_embeddings
 		(asset_id,context_id,generation_id,description_revision,description_hash,deletion_generation,embedding)
-		VALUES($1,$2,$3,$4,$5,$6,$7::vector)
+		VALUES($1,$2,$3,$4,$5,$6,$7::halfvec)
 		ON CONFLICT (asset_id,context_id,generation_id) DO UPDATE SET
 		description_revision=EXCLUDED.description_revision,description_hash=EXCLUDED.description_hash,
 		deletion_generation=EXCLUDED.deletion_generation,embedding=EXCLUDED.embedding,updated_at=clock_timestamp()`,

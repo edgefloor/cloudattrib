@@ -27,6 +27,10 @@ MODELS = {
     "BAAI/bge-small-en-v1.5": ("models--Qdrant--bge-small-en-v1.5-onnx-Q", "model_optimized.onnx"),
     "sentence-transformers/all-MiniLM-L6-v2": ("models--qdrant--all-MiniLM-L6-v2-onnx", "model.onnx"),
 }
+MODEL_TOKEN_LIMITS = {
+    "BAAI/bge-small-en-v1.5": 512,
+    "sentence-transformers/all-MiniLM-L6-v2": 256,
+}
 SAFE_ID = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
 MAXIMUM_BODY_BYTES = 16 * 1024
 
@@ -104,6 +108,8 @@ class Handler(BaseHTTPRequestHandler):
             text = payload["text"]
             if not isinstance(text, str) or not text or len(text.encode()) > 8192:
                 raise ValueError("invalid input text")
+            if len(self.server.untruncated_tokenizer.encode(text).ids) > MODEL_TOKEN_LIMITS[self.server.contract["model_id"]]:
+                raise ValueError("input exceeds the selected model token limit")
             vector = next(iter(self.server.model.embed([text]))).tolist()
             if len(vector) != self.server.contract["dimensions"] or not all(math.isfinite(value) for value in vector):
                 raise RuntimeError("invalid model output")
@@ -140,9 +146,12 @@ def main():
     contract = load_contract(args.contract)
     verify_artifact(args.cache_dir, contract)
     from fastembed import TextEmbedding
+    from tokenizers import Tokenizer
 
     model = TextEmbedding(model_name=contract["model_id"], cache_dir=args.cache_dir,
                           local_files_only=True, threads=4)
+    untruncated_tokenizer = Tokenizer.from_str(model.model.tokenizer.to_str())
+    untruncated_tokenizer.no_truncation()
     probe = next(iter(model.embed(["local model startup probe"])))
     if len(probe) != contract["dimensions"]:
         raise RuntimeError("model dimensions differ from generation contract")
@@ -176,6 +185,7 @@ def main():
         with Server(str(path), Handler) as server:
             server.contract = contract
             server.model = model
+            server.untruncated_tokenizer = untruncated_tokenizer
             os.chmod(path, 0o600)
             inode = path.stat().st_ino
 

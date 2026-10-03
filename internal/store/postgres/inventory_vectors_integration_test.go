@@ -67,6 +67,21 @@ func TestPostgresTargetCompletionWhileEmbeddingInferenceRuns(t *testing.T) {
 	if !projected {
 		t.Fatal("embedding fixture description was not projected")
 	}
+	lexical, err := store.SearchInventoryRetrievalLexical(ctx, inventory.EvidenceQuery{
+		Text: "Grafana absentterm", ScopeRoot: "example.com", ContextID: "unknown", Limit: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundLexical := false
+	for _, item := range lexical.Items {
+		if item.Hostname == hostname {
+			foundLexical = true
+		}
+	}
+	if !foundLexical {
+		t.Fatalf("natural-language lexical retrieval omitted %s: %#v", hostname, lexical.Items)
+	}
 	generation := inventory.EmbeddingGeneration{ID: fmt.Sprintf("completion-probe-%d", stamp), ModelID: "fixture",
 		ModelRevision: "v1", ArtifactSHA256: strings.Repeat("a", 64), License: "MIT", Dimensions: 3,
 		DocumentFormatVersion: inventory.DescriptionFormatVersion, Preprocessing: "fixture-v1", Metric: "cosine"}
@@ -271,6 +286,11 @@ func TestInventoryVectorSetupIsOptional(t *testing.T) {
 	if err := store.pool.QueryRow(ctx, `SELECT to_regclass('inventory_embeddings') IS NOT NULL`).Scan(&vectorTableExists); err != nil || !vectorTableExists {
 		t.Fatalf("vector table exists=%t error=%v", vectorTableExists, err)
 	}
+	var vectorType string
+	if err := store.pool.QueryRow(ctx, `SELECT a.atttypid::regtype::text FROM pg_attribute a
+		WHERE a.attrelid='inventory_embeddings'::regclass AND a.attname='embedding'`).Scan(&vectorType); err != nil || vectorType != "halfvec" {
+		t.Fatalf("embedding storage type=%q error=%v", vectorType, err)
+	}
 }
 
 func TestInventoryEmbeddingGenerationCapturesExistingAndFutureDescriptions(t *testing.T) {
@@ -358,7 +378,7 @@ func TestInventoryEmbeddingGenerationCapturesExistingAndFutureDescriptions(t *te
 		}
 	}
 	var distance float64
-	if err := store.pool.QueryRow(ctx, `SELECT embedding <=> '[1,0,0]'::vector FROM inventory_embeddings
+	if err := store.pool.QueryRow(ctx, `SELECT embedding <=> '[1,0,0]'::halfvec FROM inventory_embeddings
 		WHERE generation_id=$1 AND asset_id=$2`, generationID, inventory.AssetID(hostname)).Scan(&distance); err != nil || distance != 0 {
 		t.Fatalf("stored cosine distance=%v error=%v", distance, err)
 	}
@@ -463,7 +483,7 @@ func TestInventoryEmbeddingGenerationCapturesExistingAndFutureDescriptions(t *te
 	if err != nil || !processed {
 		t.Fatalf("retry current description = %t, %v", processed, err)
 	}
-	if err := store.pool.QueryRow(ctx, `SELECT embedding <=> '[0,1,0]'::vector FROM inventory_embeddings
+	if err := store.pool.QueryRow(ctx, `SELECT embedding <=> '[0,1,0]'::halfvec FROM inventory_embeddings
 		WHERE generation_id=$1 AND asset_id=$2`, generationID, inventory.AssetID(futureHostname)).Scan(&distance); err != nil || distance != 0 {
 		t.Fatalf("current cosine distance=%v error=%v", distance, err)
 	}

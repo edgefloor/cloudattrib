@@ -11,6 +11,7 @@ import importlib.metadata
 import json
 import math
 import platform
+import re
 import resource
 import time
 from pathlib import Path
@@ -33,6 +34,8 @@ def main():
     parser.add_argument("--download", action="store_true", help="Explicitly provision missing model artifacts")
     parser.add_argument("--output", required=True)
     parser.add_argument("--postgres-dsn", help="Disposable PostgreSQL database for the current lexical query")
+    parser.add_argument("--lexical-mode", choices=("all", "any"), default="all")
+    parser.add_argument("--vector-precision", choices=("full", "half"), default="full")
     args = parser.parse_args()
 
     from fastembed import TextEmbedding
@@ -54,7 +57,14 @@ def main():
                 cursor.execute("CREATE TEMP TABLE retrieval_eval(id text PRIMARY KEY, description text NOT NULL, search_vector tsvector GENERATED ALWAYS AS (to_tsvector('simple',description)) STORED)")
                 cursor.executemany("INSERT INTO retrieval_eval(id,description) VALUES(%s,%s)", list(zip(ids, descriptions)))
                 for query in queries:
-                    cursor.execute("SELECT id FROM retrieval_eval WHERE search_vector @@ plainto_tsquery('simple',%s) ORDER BY ts_rank_cd(search_vector,plainto_tsquery('simple',%s)) DESC,id", (query["text"], query["text"]))
+                    if args.lexical_mode == "any":
+                        terms = list(dict.fromkeys(re.findall(r"[^\W_]+", query["text"].lower())))
+                        if not terms or len(terms) > 32:
+                            raise ValueError("judged query exceeds the retrieval lexical term contract")
+                        expression = " | ".join(terms)
+                        cursor.execute("SELECT id FROM retrieval_eval WHERE search_vector @@ to_tsquery('simple',%s) ORDER BY ts_rank_cd(search_vector,to_tsquery('simple',%s)) DESC,id", (expression, expression))
+                    else:
+                        cursor.execute("SELECT id FROM retrieval_eval WHERE search_vector @@ plainto_tsquery('simple',%s) ORDER BY ts_rank_cd(search_vector,plainto_tsquery('simple',%s)) DESC,id", (query["text"], query["text"]))
                     lexical_rankings.append([row[0] for row in cursor.fetchall()])
     lexical_score = None
     if lexical_rankings:
@@ -83,6 +93,13 @@ def main():
         query_seconds = time.perf_counter() - started
         document_vectors /= np.linalg.norm(document_vectors, axis=1, keepdims=True)
         query_vectors /= np.linalg.norm(query_vectors, axis=1, keepdims=True)
+        if args.vector_precision == "half":
+            # pgvector halfvec rounds both stored and query coordinates before
+            # cosine distance. Normalize again to mirror cosine ranking.
+            document_vectors = document_vectors.astype(np.float16).astype(np.float32)
+            query_vectors = query_vectors.astype(np.float16).astype(np.float32)
+            document_vectors /= np.linalg.norm(document_vectors, axis=1, keepdims=True)
+            query_vectors /= np.linalg.norm(query_vectors, axis=1, keepdims=True)
         similarities = query_vectors @ document_vectors.T
         ndcg = []
         recall = []
@@ -128,6 +145,8 @@ def main():
         "corpus_version": corpus["version"],
         "document_count": len(documents),
         "query_count": len(queries),
+        "lexical_mode": args.lexical_mode,
+        "vector_precision": args.vector_precision,
         "runtime": {
             "platform": platform.platform(),
             "machine": platform.machine(),

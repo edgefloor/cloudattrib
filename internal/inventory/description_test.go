@@ -1,6 +1,7 @@
 package inventory
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,29 @@ func TestDescriptionKeepsTypedEvidenceAndExcludesRawSecrets(t *testing.T) {
 	}
 	if again := DescribeReport(report, "api.example.com"); again.ContentHash != description.ContentHash || again.Text != description.Text {
 		t.Fatalf("description changed across replay: %#v", again)
+	}
+}
+
+func TestDescriptionBoundsModelInputAndPreservesPriorityTerms(t *testing.T) {
+	t.Parallel()
+	hostname := "x7.example.com"
+	report := model.Report{ID: "long-description", Findings: []model.Finding{{Subject: hostname, Category: "identity"}}}
+	report.Observations = append(report.Observations, model.Observation{ID: "technology", Type: "technology", Subject: hostname,
+		Payload: model.JSONValue(`{"name":"Keycloak"}`)})
+	for index := range 300 {
+		report.Observations = append(report.Observations, model.Observation{
+			ID: fmt.Sprintf("dns-%03d", index), Type: "dns_query", Subject: hostname, Status: "answered",
+			Payload: model.JSONValue(fmt.Sprintf(`{"rrtype":"X%03d"}`, index)),
+		})
+	}
+	description := DescribeReport(report, hostname)
+	if len(description.Text) > maximumDescriptionBytes || len(strings.Fields(description.Text)) > maximumDescriptionWords ||
+		!strings.Contains(description.Text, "hostname "+hostname) || !strings.Contains(description.Text, "technology keycloak") ||
+		!strings.Contains(description.Text, "identity") || description.Omitted == 0 {
+		t.Fatalf("bounded description = %#v", description)
+	}
+	if again := DescribeReport(report, hostname); again.Text != description.Text || again.Omitted != description.Omitted {
+		t.Fatalf("description priority changed on repeat: %#v", again)
 	}
 }
 

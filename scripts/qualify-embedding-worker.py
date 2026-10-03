@@ -38,17 +38,32 @@ def embed(path, dimensions):
         client.close()
 
 
+def check_token_limit(path, limit):
+    client = UnixHTTP(path)
+    try:
+        body = json.dumps({"text": "word " * (limit + 10)}).encode()
+        client.request("POST", "/embed", body=body, headers={"Content-Type": "application/json"})
+        response = client.getresponse()
+        response.read()
+        if response.status != 422:
+            raise RuntimeError(f"over-limit input returned status {response.status}")
+    finally:
+        client.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--socket", required=True)
     parser.add_argument("--concurrency", type=int, default=10)
     parser.add_argument("--waves", type=int, default=5)
     parser.add_argument("--dimensions", type=int, default=384)
+    parser.add_argument("--token-limit", type=int, default=256)
     args = parser.parse_args()
-    if args.concurrency < 1 or args.waves < 1 or args.dimensions < 1:
-        parser.error("concurrency, waves, and dimensions must be positive")
+    if args.concurrency < 1 or args.waves < 1 or args.dimensions < 1 or args.token_limit < 1:
+        parser.error("concurrency, waves, dimensions, and token limit must be positive")
 
     embed(args.socket, args.dimensions)
+    check_token_limit(args.socket, args.token_limit)
     samples = []
     for _ in range(args.waves):
         start = threading.Barrier(args.concurrency)

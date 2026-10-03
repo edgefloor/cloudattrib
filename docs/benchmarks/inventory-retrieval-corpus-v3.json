@@ -1,0 +1,426 @@
+{
+  "version": "3",
+  "provenance": "Synthetic typed report facts rendered by inventory.DescribeReport; no live hosts or customer data.",
+  "documents": [
+    {
+      "id": "id01",
+      "hostname": "n001.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n001.example.com identity technology keycloak"
+    },
+    {
+      "id": "id02",
+      "hostname": "n002.example.com",
+      "description": "DNS a answered HTTP 403 response hostname n002.example.com identity technology auth0"
+    },
+    {
+      "id": "id03",
+      "hostname": "n003.example.com",
+      "description": "DNS cname answered HTTP 302 response hostname n003.example.com identity okta"
+    },
+    {
+      "id": "id04",
+      "hostname": "n004.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n004.example.com identity technology saml"
+    },
+    {
+      "id": "id05",
+      "hostname": "n005.example.com",
+      "description": "DNS a answered HTTP 401 response hostname n005.example.com identity technology openid"
+    },
+    {
+      "id": "id06",
+      "hostname": "n006.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n006.example.com identity"
+    },
+    {
+      "id": "mon01",
+      "hostname": "n007.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n007.example.com monitoring technology grafana"
+    },
+    {
+      "id": "mon02",
+      "hostname": "login-static.example.com",
+      "description": "DNS a answered HTTP 200 response hostname login-static.example.com monitoring technology prometheus"
+    },
+    {
+      "id": "mon03",
+      "hostname": "n009.example.com",
+      "description": "DNS a answered HTTP 503 response hostname n009.example.com monitoring technology kibana"
+    },
+    {
+      "id": "mon04",
+      "hostname": "n010.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n010.example.com monitoring"
+    },
+    {
+      "id": "mon05",
+      "hostname": "n011.example.com",
+      "description": "DNS a answered HTTP 403 response hostname n011.example.com monitoring technology datadog"
+    },
+    {
+      "id": "mon06",
+      "hostname": "n012.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n012.example.com status"
+    },
+    {
+      "id": "dev01",
+      "hostname": "n013.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n013.example.com staging"
+    },
+    {
+      "id": "dev02",
+      "hostname": "prod-gateway.example.com",
+      "description": "DNS a answered HTTP 200 response hostname prod-gateway.example.com preview"
+    },
+    {
+      "id": "dev03",
+      "hostname": "n015.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n015.example.com test"
+    },
+    {
+      "id": "dev04",
+      "hostname": "n016.example.com",
+      "description": "DNS a answered HTTP 403 response hostname n016.example.com staging"
+    },
+    {
+      "id": "dev05",
+      "hostname": "n017.example.com",
+      "description": "DNS cname answered HTTP 200 response hostname n017.example.com preview"
+    },
+    {
+      "id": "dev06",
+      "hostname": "n018.example.com",
+      "description": "DNS a timeout hostname n018.example.com test"
+    },
+    {
+      "id": "mail01",
+      "hostname": "n019.example.com",
+      "description": "DNS mx answered email hostname n019.example.com"
+    },
+    {
+      "id": "mail02",
+      "hostname": "n020.example.com",
+      "description": "DNS mx answered HTTP 200 response email hostname n020.example.com"
+    },
+    {
+      "id": "mail03",
+      "hostname": "n021.example.com",
+      "description": "DNS a answered email hostname n021.example.com technology postfix"
+    },
+    {
+      "id": "mail04",
+      "hostname": "n022.example.com",
+      "description": "DNS mx answered email hostname n022.example.com"
+    },
+    {
+      "id": "mail05",
+      "hostname": "n023.example.com",
+      "description": "DNS a answered HTTP 403 response email hostname n023.example.com"
+    },
+    {
+      "id": "mail06",
+      "hostname": "n024.example.com",
+      "description": "DNS txt answered hostname n024.example.com verification"
+    },
+    {
+      "id": "cdn01",
+      "hostname": "origin-api.example.com",
+      "description": "DNS cname answered HTTP 200 response cdn cloudfront hostname origin-api.example.com"
+    },
+    {
+      "id": "cdn02",
+      "hostname": "n026.example.com",
+      "description": "DNS cname answered HTTP 403 response cdn cloudflare hostname n026.example.com"
+    },
+    {
+      "id": "cdn03",
+      "hostname": "n027.example.com",
+      "description": "DNS a answered HTTP 200 response cdn fastly hostname n027.example.com"
+    },
+    {
+      "id": "cdn04",
+      "hostname": "n028.example.com",
+      "description": "DNS cname answered HTTP 200 response cdn hostname n028.example.com"
+    },
+    {
+      "id": "cdn05",
+      "hostname": "n029.example.com",
+      "description": "DNS a answered HTTP 200 response akamai cdn hostname n029.example.com"
+    },
+    {
+      "id": "cdn06",
+      "hostname": "n030.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n030.example.com web"
+    },
+    {
+      "id": "api01",
+      "hostname": "cdn-docs.example.com",
+      "description": "DNS a answered HTTP 200 response api hostname cdn-docs.example.com technology graphql"
+    },
+    {
+      "id": "api02",
+      "hostname": "n032.example.com",
+      "description": "DNS a answered HTTP 401 response api hostname n032.example.com"
+    },
+    {
+      "id": "api03",
+      "hostname": "n033.example.com",
+      "description": "DNS a answered HTTP 200 response api hostname n033.example.com rest"
+    },
+    {
+      "id": "api04",
+      "hostname": "n034.example.com",
+      "description": "DNS a answered HTTP 403 response api hostname n034.example.com"
+    },
+    {
+      "id": "api05",
+      "hostname": "n035.example.com",
+      "description": "DNS a answered HTTP 200 response documentation hostname n035.example.com"
+    },
+    {
+      "id": "api06",
+      "hostname": "n036.example.com",
+      "description": "DNS a answered HTTP 200 response documentation hostname n036.example.com openapi"
+    },
+    {
+      "id": "store01",
+      "hostname": "signin-files.example.com",
+      "description": "DNS cname answered HTTP 403 response aws hostname signin-files.example.com s3 storage"
+    },
+    {
+      "id": "store02",
+      "hostname": "n038.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n038.example.com storage"
+    },
+    {
+      "id": "store03",
+      "hostname": "n039.example.com",
+      "description": "DNS cname answered HTTP 200 response blob hostname n039.example.com storage"
+    },
+    {
+      "id": "store04",
+      "hostname": "n040.example.com",
+      "description": "DNS a answered HTTP 403 response hostname n040.example.com storage"
+    },
+    {
+      "id": "store05",
+      "hostname": "n041.example.com",
+      "description": "DNS cname answered HTTP 200 response hostname n041.example.com storage"
+    },
+    {
+      "id": "store06",
+      "hostname": "n042.example.com",
+      "description": "DNS a answered HTTP 200 response files hostname n042.example.com"
+    },
+    {
+      "id": "pay01",
+      "hostname": "n043.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n043.example.com payments stripe"
+    },
+    {
+      "id": "pay02",
+      "hostname": "n044.example.com",
+      "description": "DNS a answered HTTP 403 response hostname n044.example.com payments"
+    },
+    {
+      "id": "pay03",
+      "hostname": "n045.example.com",
+      "description": "DNS a answered HTTP 200 response checkout hostname n045.example.com payments"
+    },
+    {
+      "id": "pay04",
+      "hostname": "n046.example.com",
+      "description": "DNS a answered HTTP 200 response adyen hostname n046.example.com payments"
+    },
+    {
+      "id": "pay05",
+      "hostname": "n047.example.com",
+      "description": "DNS a answered HTTP 302 response hostname n047.example.com payments"
+    },
+    {
+      "id": "pay06",
+      "hostname": "n048.example.com",
+      "description": "DNS a answered HTTP 200 response commerce hostname n048.example.com"
+    },
+    {
+      "id": "misc01",
+      "hostname": "n049.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n049.example.com vpn"
+    },
+    {
+      "id": "misc02",
+      "hostname": "n050.example.com",
+      "description": "DNS a answered HTTP 200 response analytics hostname n050.example.com technology google analytics"
+    },
+    {
+      "id": "misc03",
+      "hostname": "n051.example.com",
+      "description": "DNS a answered HTTP 200 response hostname n051.example.com web"
+    },
+    {
+      "id": "misc04",
+      "hostname": "n052.example.com",
+      "description": "DNS a timeout hostname n052.example.com"
+    },
+    {
+      "id": "misc05",
+      "hostname": "n053.example.com",
+      "description": "DNS txt answered hostname n053.example.com verification"
+    },
+    {
+      "id": "misc06",
+      "hostname": "n054.example.com",
+      "description": "DNS a answered HTTP 302 response hostname n054.example.com redirect"
+    }
+  ],
+  "queries": [
+    {
+      "text": "employee single sign on gateway",
+      "relevant": [
+        "id01",
+        "id02",
+        "id03",
+        "id04",
+        "id05",
+        "id06"
+      ]
+    },
+    {
+      "text": "customer authentication portal",
+      "relevant": [
+        "id01",
+        "id02",
+        "id03",
+        "id04",
+        "id05",
+        "id06"
+      ]
+    },
+    {
+      "text": "dashboards for infrastructure metrics",
+      "relevant": [
+        "mon01",
+        "mon02",
+        "mon03",
+        "mon04",
+        "mon05"
+      ]
+    },
+    {
+      "text": "service health monitoring",
+      "relevant": [
+        "mon01",
+        "mon02",
+        "mon03",
+        "mon04",
+        "mon05",
+        "mon06"
+      ]
+    },
+    {
+      "text": "nonproduction preview deployments",
+      "relevant": [
+        "dev01",
+        "dev02",
+        "dev03",
+        "dev04",
+        "dev05",
+        "dev06"
+      ]
+    },
+    {
+      "text": "test environment before release",
+      "relevant": [
+        "dev01",
+        "dev02",
+        "dev03",
+        "dev04",
+        "dev05",
+        "dev06"
+      ]
+    },
+    {
+      "text": "outbound mail delivery hosts",
+      "relevant": [
+        "mail01",
+        "mail02",
+        "mail03",
+        "mail04",
+        "mail05"
+      ]
+    },
+    {
+      "text": "content delivery edge cache",
+      "relevant": [
+        "cdn01",
+        "cdn02",
+        "cdn03",
+        "cdn04",
+        "cdn05"
+      ]
+    },
+    {
+      "text": "public API backend endpoints",
+      "relevant": [
+        "api01",
+        "api02",
+        "api03",
+        "api04"
+      ]
+    },
+    {
+      "text": "developer API reference documentation",
+      "relevant": [
+        "api05",
+        "api06"
+      ]
+    },
+    {
+      "text": "object and file storage",
+      "relevant": [
+        "store01",
+        "store02",
+        "store03",
+        "store04",
+        "store05",
+        "store06"
+      ]
+    },
+    {
+      "text": "payment checkout processing",
+      "relevant": [
+        "pay01",
+        "pay02",
+        "pay03",
+        "pay04",
+        "pay05"
+      ]
+    },
+    {
+      "text": "remote access VPN service",
+      "relevant": [
+        "misc01"
+      ]
+    },
+    {
+      "text": "analytics tracking service",
+      "relevant": [
+        "misc02"
+      ]
+    },
+    {
+      "text": "retired or unreachable address",
+      "relevant": [
+        "dev06",
+        "misc04"
+      ]
+    },
+    {
+      "text": "DNS ownership verification token",
+      "relevant": [
+        "mail06",
+        "misc05"
+      ]
+    }
+  ]
+}

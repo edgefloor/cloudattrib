@@ -1,0 +1,551 @@
+{
+  "version": "3",
+  "facts": [
+    {
+      "id": "id01",
+      "hostname": "n001.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "technology": "Keycloak",
+      "category": "identity"
+    },
+    {
+      "id": "id02",
+      "hostname": "n002.example.com",
+      "dns": "A",
+      "http_status": 403,
+      "technology": "Auth0",
+      "category": "identity"
+    },
+    {
+      "id": "id03",
+      "hostname": "n003.example.com",
+      "dns": "CNAME",
+      "http_status": 302,
+      "product": "Okta",
+      "category": "identity"
+    },
+    {
+      "id": "id04",
+      "hostname": "n004.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "technology": "SAML",
+      "category": "identity"
+    },
+    {
+      "id": "id05",
+      "hostname": "n005.example.com",
+      "dns": "A",
+      "http_status": 401,
+      "technology": "OpenID",
+      "category": "identity"
+    },
+    {
+      "id": "id06",
+      "hostname": "n006.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "identity"
+    },
+    {
+      "id": "mon01",
+      "hostname": "n007.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "technology": "Grafana",
+      "category": "monitoring"
+    },
+    {
+      "id": "mon02",
+      "hostname": "login-static.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "technology": "Prometheus",
+      "category": "monitoring"
+    },
+    {
+      "id": "mon03",
+      "hostname": "n009.example.com",
+      "dns": "A",
+      "http_status": 503,
+      "technology": "Kibana",
+      "category": "monitoring"
+    },
+    {
+      "id": "mon04",
+      "hostname": "n010.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "monitoring"
+    },
+    {
+      "id": "mon05",
+      "hostname": "n011.example.com",
+      "dns": "A",
+      "http_status": 403,
+      "technology": "Datadog",
+      "category": "monitoring"
+    },
+    {
+      "id": "mon06",
+      "hostname": "n012.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "status"
+    },
+    {
+      "id": "dev01",
+      "hostname": "n013.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "staging"
+    },
+    {
+      "id": "dev02",
+      "hostname": "prod-gateway.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "preview"
+    },
+    {
+      "id": "dev03",
+      "hostname": "n015.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "test"
+    },
+    {
+      "id": "dev04",
+      "hostname": "n016.example.com",
+      "dns": "A",
+      "http_status": 403,
+      "category": "staging"
+    },
+    {
+      "id": "dev05",
+      "hostname": "n017.example.com",
+      "dns": "CNAME",
+      "http_status": 200,
+      "category": "preview"
+    },
+    {
+      "id": "dev06",
+      "hostname": "n018.example.com",
+      "dns": "A",
+      "dns_status": "timeout",
+      "category": "test"
+    },
+    {
+      "id": "mail01",
+      "hostname": "n019.example.com",
+      "dns": "MX",
+      "category": "email"
+    },
+    {
+      "id": "mail02",
+      "hostname": "n020.example.com",
+      "dns": "MX",
+      "http_status": 200,
+      "category": "email"
+    },
+    {
+      "id": "mail03",
+      "hostname": "n021.example.com",
+      "dns": "A",
+      "technology": "Postfix",
+      "category": "email"
+    },
+    {
+      "id": "mail04",
+      "hostname": "n022.example.com",
+      "dns": "MX",
+      "category": "email"
+    },
+    {
+      "id": "mail05",
+      "hostname": "n023.example.com",
+      "dns": "A",
+      "http_status": 403,
+      "category": "email"
+    },
+    {
+      "id": "mail06",
+      "hostname": "n024.example.com",
+      "dns": "TXT",
+      "category": "verification"
+    },
+    {
+      "id": "cdn01",
+      "hostname": "origin-api.example.com",
+      "dns": "CNAME",
+      "http_status": 200,
+      "provider": "CloudFront",
+      "category": "cdn"
+    },
+    {
+      "id": "cdn02",
+      "hostname": "n026.example.com",
+      "dns": "CNAME",
+      "http_status": 403,
+      "provider": "Cloudflare",
+      "category": "cdn"
+    },
+    {
+      "id": "cdn03",
+      "hostname": "n027.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "provider": "Fastly",
+      "category": "cdn"
+    },
+    {
+      "id": "cdn04",
+      "hostname": "n028.example.com",
+      "dns": "CNAME",
+      "http_status": 200,
+      "category": "cdn"
+    },
+    {
+      "id": "cdn05",
+      "hostname": "n029.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "provider": "Akamai",
+      "category": "cdn"
+    },
+    {
+      "id": "cdn06",
+      "hostname": "n030.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "web"
+    },
+    {
+      "id": "api01",
+      "hostname": "cdn-docs.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "technology": "GraphQL",
+      "category": "api"
+    },
+    {
+      "id": "api02",
+      "hostname": "n032.example.com",
+      "dns": "A",
+      "http_status": 401,
+      "category": "api"
+    },
+    {
+      "id": "api03",
+      "hostname": "n033.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "product": "REST",
+      "category": "api"
+    },
+    {
+      "id": "api04",
+      "hostname": "n034.example.com",
+      "dns": "A",
+      "http_status": 403,
+      "category": "api"
+    },
+    {
+      "id": "api05",
+      "hostname": "n035.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "documentation"
+    },
+    {
+      "id": "api06",
+      "hostname": "n036.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "product": "OpenAPI",
+      "category": "documentation"
+    },
+    {
+      "id": "store01",
+      "hostname": "signin-files.example.com",
+      "dns": "CNAME",
+      "http_status": 403,
+      "provider": "AWS",
+      "product": "S3",
+      "category": "storage"
+    },
+    {
+      "id": "store02",
+      "hostname": "n038.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "storage"
+    },
+    {
+      "id": "store03",
+      "hostname": "n039.example.com",
+      "dns": "CNAME",
+      "http_status": 200,
+      "product": "Blob",
+      "category": "storage"
+    },
+    {
+      "id": "store04",
+      "hostname": "n040.example.com",
+      "dns": "A",
+      "http_status": 403,
+      "category": "storage"
+    },
+    {
+      "id": "store05",
+      "hostname": "n041.example.com",
+      "dns": "CNAME",
+      "http_status": 200,
+      "category": "storage"
+    },
+    {
+      "id": "store06",
+      "hostname": "n042.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "files"
+    },
+    {
+      "id": "pay01",
+      "hostname": "n043.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "provider": "Stripe",
+      "category": "payments"
+    },
+    {
+      "id": "pay02",
+      "hostname": "n044.example.com",
+      "dns": "A",
+      "http_status": 403,
+      "category": "payments"
+    },
+    {
+      "id": "pay03",
+      "hostname": "n045.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "product": "Checkout",
+      "category": "payments"
+    },
+    {
+      "id": "pay04",
+      "hostname": "n046.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "provider": "Adyen",
+      "category": "payments"
+    },
+    {
+      "id": "pay05",
+      "hostname": "n047.example.com",
+      "dns": "A",
+      "http_status": 302,
+      "category": "payments"
+    },
+    {
+      "id": "pay06",
+      "hostname": "n048.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "commerce"
+    },
+    {
+      "id": "misc01",
+      "hostname": "n049.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "vpn"
+    },
+    {
+      "id": "misc02",
+      "hostname": "n050.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "technology": "Google Analytics",
+      "category": "analytics"
+    },
+    {
+      "id": "misc03",
+      "hostname": "n051.example.com",
+      "dns": "A",
+      "http_status": 200,
+      "category": "web"
+    },
+    {
+      "id": "misc04",
+      "hostname": "n052.example.com",
+      "dns": "A",
+      "dns_status": "timeout"
+    },
+    {
+      "id": "misc05",
+      "hostname": "n053.example.com",
+      "dns": "TXT",
+      "category": "verification"
+    },
+    {
+      "id": "misc06",
+      "hostname": "n054.example.com",
+      "dns": "A",
+      "http_status": 302,
+      "category": "redirect"
+    }
+  ],
+  "queries": [
+    {
+      "text": "employee single sign on gateway",
+      "relevant": [
+        "id01",
+        "id02",
+        "id03",
+        "id04",
+        "id05",
+        "id06"
+      ]
+    },
+    {
+      "text": "customer authentication portal",
+      "relevant": [
+        "id01",
+        "id02",
+        "id03",
+        "id04",
+        "id05",
+        "id06"
+      ]
+    },
+    {
+      "text": "dashboards for infrastructure metrics",
+      "relevant": [
+        "mon01",
+        "mon02",
+        "mon03",
+        "mon04",
+        "mon05"
+      ]
+    },
+    {
+      "text": "service health monitoring",
+      "relevant": [
+        "mon01",
+        "mon02",
+        "mon03",
+        "mon04",
+        "mon05",
+        "mon06"
+      ]
+    },
+    {
+      "text": "nonproduction preview deployments",
+      "relevant": [
+        "dev01",
+        "dev02",
+        "dev03",
+        "dev04",
+        "dev05",
+        "dev06"
+      ]
+    },
+    {
+      "text": "test environment before release",
+      "relevant": [
+        "dev01",
+        "dev02",
+        "dev03",
+        "dev04",
+        "dev05",
+        "dev06"
+      ]
+    },
+    {
+      "text": "outbound mail delivery hosts",
+      "relevant": [
+        "mail01",
+        "mail02",
+        "mail03",
+        "mail04",
+        "mail05"
+      ]
+    },
+    {
+      "text": "content delivery edge cache",
+      "relevant": [
+        "cdn01",
+        "cdn02",
+        "cdn03",
+        "cdn04",
+        "cdn05"
+      ]
+    },
+    {
+      "text": "public API backend endpoints",
+      "relevant": [
+        "api01",
+        "api02",
+        "api03",
+        "api04"
+      ]
+    },
+    {
+      "text": "developer API reference documentation",
+      "relevant": [
+        "api05",
+        "api06"
+      ]
+    },
+    {
+      "text": "object and file storage",
+      "relevant": [
+        "store01",
+        "store02",
+        "store03",
+        "store04",
+        "store05",
+        "store06"
+      ]
+    },
+    {
+      "text": "payment checkout processing",
+      "relevant": [
+        "pay01",
+        "pay02",
+        "pay03",
+        "pay04",
+        "pay05"
+      ]
+    },
+    {
+      "text": "remote access VPN service",
+      "relevant": [
+        "misc01"
+      ]
+    },
+    {
+      "text": "analytics tracking service",
+      "relevant": [
+        "misc02"
+      ]
+    },
+    {
+      "text": "retired or unreachable address",
+      "relevant": [
+        "dev06",
+        "misc04"
+      ]
+    },
+    {
+      "text": "DNS ownership verification token",
+      "relevant": [
+        "mail06",
+        "misc05"
+      ]
+    }
+  ]
+}

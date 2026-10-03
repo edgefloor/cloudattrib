@@ -43,13 +43,22 @@ func (s *Store) EnableInventoryVectors(ctx context.Context) error {
 		description_revision bigint NOT NULL,
 		description_hash text NOT NULL,
 		deletion_generation bigint NOT NULL,
-		embedding vector NOT NULL CHECK (vector_dims(embedding) BETWEEN 1 AND 2000),
+		embedding halfvec NOT NULL CHECK (vector_dims(embedding) BETWEEN 1 AND 2000),
 		created_at timestamptz NOT NULL DEFAULT clock_timestamp(),
 		updated_at timestamptz NOT NULL DEFAULT clock_timestamp(),
 		PRIMARY KEY (asset_id,context_id,generation_id),
 		FOREIGN KEY (asset_id,context_id) REFERENCES inventory_asset_contexts(asset_id,context_id) ON DELETE CASCADE
 	)`); err != nil {
 		return persistence("create inventory vector storage", err)
+	}
+	var storageType string
+	if err := tx.QueryRow(ctx, `SELECT a.atttypid::regtype::text FROM pg_attribute a
+		WHERE a.attrelid='inventory_embeddings'::regclass AND a.attname='embedding'`).Scan(&storageType); err != nil {
+		return persistence("read inventory vector storage type", err)
+	}
+	if storageType != "halfvec" {
+		return model.NewError(model.CodeCapabilityUnavailable,
+			"inventory vector storage uses an incompatible type; migrate it before enabling semantic search", nil)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return persistence("commit inventory vector setup", err)

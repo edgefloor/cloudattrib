@@ -62,3 +62,22 @@ go test ./internal/store/postgres -run '^TestInventorySemanticCapacityQualificat
 ```
 
 The test refuses an existing inventory. `CLOUDATTRIB_SEMANTIC_CAPACITY_MAX=10000` runs only the 10,000-row checkpoint. `CLOUDATTRIB_SEMANTIC_CAPACITY_REUSE=1` reruns the 100,000-row queries against a fixture left in the same disposable database. Add `CLOUDATTRIB_SEMANTIC_CAPACITY_APP=1` to measure semantic and hybrid retrieval through the shared application service with a fixed test embedder. None of these modes deletes existing data.
+
+## Half precision and scope query follow-up
+
+The optional table now uses pgvector `halfvec`, which rounds 384-dimensional model vectors to half precision. The scope query joins `inventory_memberships` before ranking instead of using a correlated `EXISTS` predicate. A separate [54-document judged fixture](inventory-retrieval-evaluation-v3.md) compared full and half precision; all top-five rankings and summary metrics were unchanged in that small set. This does not rule out changed close ties in larger inventories.
+
+On the same Apple M4 Pro and PostgreSQL 18.6/pgvector 0.8.6 Docker host, the disposable 100,000-row fixed-vector fixture was converted from `vector` to `halfvec`. `inventory_embeddings` including indexes fell from 211,714,048 bytes to 109,428,736 bytes; database size fell from 352,982,719 to 250,713,791 bytes. Ten concurrent readers made 200 database calls per scope and 50 shared-service calls per mode and scope. The shared service used a zero-cost deterministic embedder, so these remain lower bounds for a real local model.
+
+| 100,000-asset fixed-vector path | Scope candidates | p95 before | p95 after halfvec and scope join |
+| --- | ---: | ---: | ---: |
+| Exact vector query | 100,000 | 542 ms | 484 ms |
+| Exact vector query | 10,000 | 803 ms | 99 ms |
+| Shared semantic | 100,000 | 555 ms | 485 ms |
+| Shared semantic | 10,000 | 811 ms | 107 ms |
+| Shared hybrid, any-term lexical | 100,000 | 766 ms | 674 ms |
+| Shared hybrid, any-term lexical | 10,000 | 907 ms | 195 ms |
+
+The “before” shared-service run had `vector` storage and the new any-term lexical path, but lexical and semantic calls were sequential. The “after” run used `halfvec`, the scope join, and concurrent lexical and semantic calls. These are combined changes, so the service delta cannot be attributed to one of them. The database-only vector comparison isolates half precision and the scope join from service fusion. The proposed warm hybrid p95 below 500 ms at 100,000 documents remains unmet without a scope filter. A bounded approximate index, batched candidate design, or another measured query change needs separate qualification before that target can be claimed.
+
+The half-precision 100,000-row fixture was also dumped with PostgreSQL 18.6 `pg_dump -Fc` and restored into a fresh database in the same pinned pgvector 0.8.6 container with `pg_restore --no-owner --no-acl`. The archive was 8,785,580 bytes. `TestInventorySemanticRestoreQualification` passed against the restored database, confirming extension version, active generation, 100,000 assets and vectors, and in-scope semantic and hybrid application retrieval. The repeated fixed vectors compress unusually well. This drill does not restore model artifacts or prove cross-version compatibility; the separate real-model restore drill in [local worker qualification](local-embedding-worker.md) covers real vectors with the original worker still mounted.

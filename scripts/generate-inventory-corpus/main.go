@@ -68,7 +68,7 @@ func generate(input, output string) error {
 	if err := json.Unmarshal(data, &source); err != nil {
 		return err
 	}
-	if source.Version != "2" {
+	if source.Version != "2" && source.Version != "3" {
 		return fmt.Errorf("unsupported facts version %q", source.Version)
 	}
 	result := corpus{Version: source.Version, Provenance: "Synthetic typed report facts rendered by inventory.DescribeReport; no live hosts or customer data.", Documents: make([]document, 0, len(source.Facts)), Queries: source.Queries}
