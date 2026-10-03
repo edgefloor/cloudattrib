@@ -45,14 +45,17 @@ type Data struct {
 
 // Limits adds service-wide bounds to the per-target policy.
 type Limits struct {
-	Target                     policy.Limits `json:"target" yaml:"target"`
-	ConcurrentTargets          int           `json:"concurrent_targets" yaml:"concurrent_targets"`
-	ConcurrentHTTP             int           `json:"concurrent_http" yaml:"concurrent_http"`
-	ConcurrentDNS              int           `json:"concurrent_dns" yaml:"concurrent_dns"`
-	MaximumRequestBytes        int64         `json:"maximum_request_bytes" yaml:"maximum_request_bytes"`
-	MaximumBatchTargets        int           `json:"maximum_batch_targets" yaml:"maximum_batch_targets"`
-	MaximumBacklogTargets      int           `json:"maximum_backlog_targets" yaml:"maximum_backlog_targets"`
-	MaximumResidentGenerations int           `json:"maximum_resident_generations" yaml:"maximum_resident_generations"`
+	Target                      policy.Limits `json:"target" yaml:"target"`
+	ConcurrentTargets           int           `json:"concurrent_targets" yaml:"concurrent_targets"`
+	ConcurrentHTTP              int           `json:"concurrent_http" yaml:"concurrent_http"`
+	ConcurrentDNS               int           `json:"concurrent_dns" yaml:"concurrent_dns"`
+	MaximumRequestBytes         int64         `json:"maximum_request_bytes" yaml:"maximum_request_bytes"`
+	MaximumBatchTargets         int           `json:"maximum_batch_targets" yaml:"maximum_batch_targets"`
+	MaximumBacklogTargets       int           `json:"maximum_backlog_targets" yaml:"maximum_backlog_targets"`
+	MaximumResidentGenerations  int           `json:"maximum_resident_generations" yaml:"maximum_resident_generations"`
+	SynchronousWaiters          int           `json:"synchronous_waiters" yaml:"synchronous_waiters"`
+	SynchronousAdmissionTimeout time.Duration `json:"synchronous_admission_timeout" yaml:"synchronous_admission_timeout"`
+	ResponseWriteGrace          time.Duration `json:"response_write_grace" yaml:"response_write_grace"`
 }
 
 // CT configures the optional local CT index and background collector.
@@ -76,14 +79,17 @@ func Default() Config {
 		Resolver: Resolver{Address: "127.0.0.1:53", Network: "udp"},
 		Data:     Data{BundleDirectory: "./data/bundles", SourceDirectory: "./data/sources"},
 		Limits: Limits{
-			Target:                     policy.DefaultLimits(),
-			ConcurrentTargets:          32,
-			ConcurrentHTTP:             32,
-			ConcurrentDNS:              128,
-			MaximumRequestBytes:        1 << 20,
-			MaximumBatchTargets:        1000,
-			MaximumBacklogTargets:      10000,
-			MaximumResidentGenerations: 4,
+			Target:                      policy.DefaultLimits(),
+			ConcurrentTargets:           32,
+			ConcurrentHTTP:              32,
+			ConcurrentDNS:               128,
+			MaximumRequestBytes:         1 << 20,
+			MaximumBatchTargets:         1000,
+			MaximumBacklogTargets:       10000,
+			MaximumResidentGenerations:  4,
+			SynchronousWaiters:          32,
+			SynchronousAdmissionTimeout: 5 * time.Second,
+			ResponseWriteGrace:          10 * time.Second,
 		},
 		CT:      CT{Enabled: false, MaximumSeedNames: 20},
 		Storage: Storage{LeaseDuration: 30 * time.Second, MaximumAttempts: 3},
@@ -113,6 +119,9 @@ func (c Config) Validate() error {
 	}
 	if c.Limits.MaximumResidentGenerations < 2 {
 		return fmt.Errorf("maximum resident generations must be at least 2")
+	}
+	if c.Limits.SynchronousWaiters <= 0 || c.Limits.SynchronousAdmissionTimeout <= 0 || c.Limits.ResponseWriteGrace <= 0 {
+		return fmt.Errorf("synchronous admission and response limits must be positive")
 	}
 	if c.CT.MaximumSeedNames < 0 || c.CT.MaximumSeedNames > c.Limits.Target.SeedHostnames {
 		return fmt.Errorf("CT seed limit exceeds the target seed limit")

@@ -76,3 +76,25 @@ func TestValidateRequiresCapacityForActiveAndReplacementGenerations(t *testing.T
 		t.Fatal("Validate() error = nil, want resident generation capacity error")
 	}
 }
+
+func TestValidateRequiresFiniteSynchronousLimits(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		change func(*Config)
+	}{
+		{"waiters", func(c *Config) { c.Limits.SynchronousWaiters = 0 }},
+		{"admission timeout", func(c *Config) { c.Limits.SynchronousAdmissionTimeout = 0 }},
+		{"write grace", func(c *Config) { c.Limits.ResponseWriteGrace = 0 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			configuration := Default()
+			test.change(&configuration)
+			if err := configuration.Validate(); err == nil {
+				t.Fatal("Validate() accepted an unbounded synchronous setting")
+			}
+		})
+	}
+}

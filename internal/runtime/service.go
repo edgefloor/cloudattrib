@@ -199,9 +199,11 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	}
 	handler, err := api.NewHandler(api.Config{
 		Analyzer: analyzerFactory, Jobs: store, Results: store, Findings: store, Authentication: authentication,
-		Readiness:           serviceReadiness{store: store, analyzers: analyzerFactory},
-		Metrics:             serviceMetricsProvider{durable: store, analyzers: analyzerFactory},
-		MaximumRequestBytes: configuration.Limits.MaximumRequestBytes,
+		Readiness:                   serviceReadiness{store: store, analyzers: analyzerFactory},
+		Metrics:                     serviceMetricsProvider{durable: store, analyzers: analyzerFactory},
+		MaximumRequestBytes:         configuration.Limits.MaximumRequestBytes,
+		SynchronousWaiters:          configuration.Limits.SynchronousWaiters,
+		SynchronousAdmissionTimeout: configuration.Limits.SynchronousAdmissionTimeout,
 	})
 	if err != nil {
 		return fmt.Errorf("create API handler: %w", err)
@@ -235,11 +237,9 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	workerErr := make(chan error, 1)
 	go func() { workerErr <- supervisor.Run(workerCtx) }()
 
-	server := &http.Server{
-		Handler: handler, ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout: configuration.Limits.Target.TargetDeadline + 5*time.Second,
-		IdleTimeout: 30 * time.Second,
-	}
+	serveCtx, stopServing := context.WithCancel(ctx)
+	defer stopServing()
+	server := newServiceHTTPServer(handler, configuration, serveCtx)
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.Serve(listener) }()
 
@@ -261,6 +261,7 @@ func Serve(ctx context.Context, configuration config.Config) error {
 		}
 	}
 	stopWorkers()
+	stopServing()
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), serviceShutdownGrace)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
@@ -281,6 +282,16 @@ func Serve(ctx context.Context, configuration config.Config) error {
 		}
 	}
 	return runErr
+}
+
+func newServiceHTTPServer(handler http.Handler, configuration config.Config, baseContext context.Context) *http.Server {
+	return &http.Server{
+		Handler: handler, ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:  configuration.Limits.Target.TargetDeadline + 5*time.Second,
+		WriteTimeout: configuration.Limits.SynchronousAdmissionTimeout + configuration.Limits.Target.TargetDeadline + configuration.Limits.ResponseWriteGrace,
+		IdleTimeout:  30 * time.Second,
+		BaseContext:  func(net.Listener) context.Context { return baseContext },
+	}
 }
 
 type bundleAnalyzerFactory struct {

@@ -122,9 +122,18 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		}
 		defer release()
 	} else if s.targetTimeout > 0 {
+		ctx, err = policy.PromoteSynchronousAdmission(ctx)
+		if err != nil {
+			return model.Report{}, err
+		}
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, s.targetTimeout)
 		defer cancel()
+	} else {
+		ctx, err = policy.PromoteSynchronousAdmission(ctx)
+		if err != nil {
+			return model.Report{}, err
+		}
 	}
 	startedAt := s.now()
 	var seedCoverage *model.Coverage
@@ -468,6 +477,12 @@ func (s *Service) LookupIP(ctx context.Context, request model.IPLookupRequest) (
 			return model.IPLookupResult{}, err
 		}
 		defer release()
+	} else {
+		var err error
+		ctx, err = policy.PromoteSynchronousAdmission(ctx)
+		if err != nil {
+			return model.IPLookupResult{}, err
+		}
 	}
 	result := model.IPLookupResult{Address: request.Address.Unmap(), Status: model.StatusComplete}
 	result.Coverage = append(result.Coverage, s.sourceCoverage([]netip.Addr{result.Address}, s.now())...)
