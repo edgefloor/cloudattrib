@@ -109,6 +109,8 @@ DNS analysis follows bounded CNAME chains, collects MX and NS address dependenci
 
 Analyze a URL. URLs containing a query string are rejected:
 
+For HTTP redirects, collection starts with the first policy-approved DNS address and keeps the other address family's outcome in the report. A failed or blocked sibling address can therefore leave partial coverage even when the redirected page responds.
+
 ```sh
 ./bin/cloudattrib analyze https://example.com/ --kind url
 ```

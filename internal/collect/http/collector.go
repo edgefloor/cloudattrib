@@ -31,6 +31,10 @@ type DialFunc func(context.Context, string, netip.Addr, uint16) (net.Conn, error
 // ResolveFunc resolves a redirect hostname through the configured resolver.
 type ResolveFunc func(context.Context, string) ([]netip.Addr, error)
 
+// StreamResolveFunc publishes redirect addresses as their DNS answers arrive.
+// It returns after all address-family queries have completed.
+type StreamResolveFunc func(context.Context, string, int, func(netip.Addr)) error
+
 type addressSource func(context.Context) (netip.Addr, bool, error)
 
 type preResponseError struct{ err error }
@@ -80,6 +84,7 @@ func WithLimits(limits policy.Limits) Option {
 		collector.maxBody = limits.HTTPDocumentBytes
 		collector.maxHeaders = limits.HTTPResponseHeaders
 		collector.maxRedirects = limits.Redirects
+		collector.maxCandidates = limits.ResolvedAddresses
 		collector.requestTimeout = limits.HTTPRequestTimeout
 	}
 }
@@ -99,17 +104,19 @@ type Result struct {
 type Collector struct {
 	dial           DialFunc
 	resolve        ResolveFunc
+	streamResolve  StreamResolveFunc
 	policy         policy.DestinationPolicy
 	maxBody        int64
 	maxHeaders     int64
 	maxRedirects   int
+	maxCandidates  int
 	requestTimeout time.Duration
 	now            func() time.Time
 }
 
 // New constructs a bounded collector without environment proxy behavior.
 func New(dial DialFunc, destinationPolicy policy.DestinationPolicy, maxBody int64, options ...Option) *Collector {
-	collector := &Collector{dial: dial, policy: destinationPolicy, maxBody: maxBody, maxHeaders: 64 << 10, maxRedirects: 5, requestTimeout: 10 * time.Second, now: time.Now}
+	collector := &Collector{dial: dial, policy: destinationPolicy, maxBody: maxBody, maxHeaders: 64 << 10, maxRedirects: 5, maxCandidates: policy.DefaultLimits().ResolvedAddresses, requestTimeout: 10 * time.Second, now: time.Now}
 	for _, option := range options {
 		option(collector)
 	}
@@ -152,6 +159,18 @@ func (c *Collector) CollectTargetOccurrence(ctx context.Context, rawURL string, 
 // approved addresses in publication order after eligible connection failures.
 // The candidate channel must be closed when resolution completes.
 func (c *Collector) CollectTargetCandidatesOccurrence(ctx context.Context, rawURL string, candidates <-chan netip.Addr, occurrence model.ObservationOccurrence) (Result, error) {
+	return c.collectTargetCandidatesOccurrence(ctx, rawURL, candidates, occurrence)
+}
+
+// CollectTargetCandidatesOccurrenceWithRedirectResolver uses one analysis job's
+// streaming redirect resolver without changing the shared Collector.
+func (c *Collector) CollectTargetCandidatesOccurrenceWithRedirectResolver(ctx context.Context, rawURL string, candidates <-chan netip.Addr, occurrence model.ObservationOccurrence, resolve StreamResolveFunc) (Result, error) {
+	copy := *c
+	copy.streamResolve = resolve
+	return copy.collectTargetCandidatesOccurrence(ctx, rawURL, candidates, occurrence)
+}
+
+func (c *Collector) collectTargetCandidatesOccurrence(ctx context.Context, rawURL string, candidates <-chan netip.Addr, occurrence model.ObservationOccurrence) (output Result, outputErr error) {
 	currentURL, err := url.Parse(rawURL)
 	if err != nil {
 		return Result{}, fmt.Errorf("parse HTTP target: %w", err)
@@ -164,6 +183,33 @@ func (c *Collector) CollectTargetCandidatesOccurrence(ctx context.Context, rawUR
 	}
 	originalHostname := currentURL.Hostname()
 	coverage := model.Coverage{Capability: "http", Status: model.CoverageComplete}
+	type pendingResolution struct {
+		addresses <-chan netip.Addr
+		done      <-chan error
+		port      uint16
+	}
+	var pending []pendingResolution
+	defer func() {
+		for _, resolution := range pending {
+			if resolveErr := <-resolution.done; resolveErr != nil {
+				output.Coverage.Status = model.CoveragePartial
+				var partial *PartialResolutionError
+				if errors.As(resolveErr, &partial) {
+					output.Coverage.Omitted += max(partial.Omitted, 1)
+					output.Coverage.ErrorCodes = append(output.Coverage.ErrorCodes, collectionErrorCode(partial.Err))
+				} else {
+					output.Coverage.Omitted++
+					output.Coverage.ErrorCodes = append(output.Coverage.ErrorCodes, collectionErrorCode(resolveErr))
+				}
+			}
+			for address := range resolution.addresses {
+				if decision := c.policy.Check(address.Unmap(), resolution.port); !decision.Allowed {
+					output.Coverage.Status = model.CoveragePartial
+					output.Coverage.ErrorCodes = append(output.Coverage.ErrorCodes, model.CodePolicyBlocked)
+				}
+			}
+		}
+	}()
 	var observations []model.Observation
 	var final Result
 	tlsAttempted := false
@@ -199,7 +245,7 @@ func (c *Collector) CollectTargetCandidatesOccurrence(ctx context.Context, rawUR
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeBudgetExceeded)
 			return finish(final, observations, coverage, tlsAttempted), nil
 		}
-		if c.resolve == nil {
+		if c.resolve == nil && c.streamResolve == nil {
 			coverage.Status = model.CoveragePartial
 			coverage.Omitted++
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodeCapabilityUnavailable)
@@ -217,6 +263,29 @@ func (c *Collector) CollectTargetCandidatesOccurrence(ctx context.Context, rawUR
 			coverage.Omitted++
 			coverage.ErrorCodes = append(coverage.ErrorCodes, model.CodePolicyBlocked)
 			return finish(final, observations, coverage, tlsAttempted), nil
+		}
+		if c.streamResolve != nil {
+			stream := make(chan netip.Addr, c.maxCandidates)
+			done := make(chan error, 1)
+			pending = append(pending, pendingResolution{addresses: stream, done: done, port: portForURL(nextURL)})
+			go func() {
+				dropped := 0
+				resolveErr := c.streamResolve(ctx, nextURL.Hostname(), hop+1, func(address netip.Addr) {
+					select {
+					case stream <- address:
+					default:
+						dropped++
+					}
+				})
+				if dropped > 0 {
+					resolveErr = errors.Join(resolveErr, &PartialResolutionError{Omitted: dropped, Err: model.NewError(model.CodeBudgetExceeded, "redirect candidate buffer exhausted", nil)})
+				}
+				close(stream)
+				done <- resolveErr
+			}()
+			currentURL = nextURL
+			currentCandidates = channelAddressSource(stream)
+			continue
 		}
 		addresses, resolveErr := c.resolve(ctx, nextURL.Hostname())
 		if resolveErr != nil {

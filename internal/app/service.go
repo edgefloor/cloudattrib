@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"cloudattrib/internal/aggregate"
@@ -148,9 +149,10 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 		result   collectdns.Result
 	}
 	type httpRun struct {
-		hostname string
-		result   collecthttp.Result
-		err      error
+		hostname             string
+		result               collecthttp.Result
+		redirectObservations []model.Observation
+		err                  error
 	}
 	dnsRuns := make([]dnsRun, 0, len(normalized.SeedHostnames))
 	httpRuns := make([]httpRun, 0, len(normalized.SeedHostnames))
@@ -185,15 +187,25 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 			close(candidates)
 			dnsDone <- result
 		}()
-		httpResult, httpErr := s.http.CollectTargetCandidatesOccurrence(ctx, seedURL(normalized, seed, s.httpScheme), candidates, occurrence)
+		var redirectMu sync.Mutex
+		var redirectObservations []model.Observation
+		retainRedirect := func(items []model.Observation) {
+			redirectMu.Lock()
+			redirectObservations = append(redirectObservations, items...)
+			redirectMu.Unlock()
+		}
+		httpResult, httpErr := s.http.CollectTargetCandidatesOccurrenceWithRedirectResolver(ctx, seedURL(normalized, seed, s.httpScheme), candidates, occurrence, redirectResolver(dnsJob, occurrence, normalized.ScopeRoots, retainRedirect))
 		dnsResult := <-dnsDone
+		redirectMu.Lock()
+		retainedRedirect := slices.Clone(redirectObservations)
+		redirectMu.Unlock()
 		dnsRuns = append(dnsRuns, dnsRun{hostname: seed, result: dnsResult})
 		if model.ErrorCodeOf(httpErr) == model.CodeCapabilityUnavailable {
 			httpResult.Coverage.Status = model.CoverageUnavailable
 			httpResult.Coverage.Reason = "no approved address"
 			httpErr = nil
 		}
-		httpRuns = append(httpRuns, httpRun{hostname: seed, result: httpResult, err: httpErr})
+		httpRuns = append(httpRuns, httpRun{hostname: seed, result: httpResult, redirectObservations: retainedRedirect, err: httpErr})
 	}
 
 	observations := slices.Clone(ctObservations)
@@ -221,6 +233,7 @@ func (s *Service) Analyze(ctx context.Context, request model.AnalyzeRequest) (mo
 	}
 	for _, run := range httpRuns {
 		coverage = append(coverage, run.result.Coverage)
+		observations = append(observations, run.redirectObservations...)
 		for _, observation := range run.result.Observations {
 			if observation.Scope != model.ScopeExternalRedirect {
 				observation.Scope = scopeForSeed(run.hostname, normalized.ScopeRoots)
