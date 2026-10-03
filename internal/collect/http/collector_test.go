@@ -817,3 +817,37 @@ func equalAddresses(a, b []netip.Addr) bool {
 	}
 	return true
 }
+
+func TestStreamingRedirectRetainsBlockedSiblingAfterSuccessfulHTTP(t *testing.T) {
+	start := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.Header().Set("Location", "http://redirect.example/")
+		writer.WriteHeader(stdhttp.StatusFound)
+	}))
+	t.Cleanup(start.Close)
+	landing := httptest.NewServer(stdhttp.HandlerFunc(func(writer stdhttp.ResponseWriter, _ *stdhttp.Request) {
+		writer.WriteHeader(stdhttp.StatusNoContent)
+	}))
+	t.Cleanup(landing.Close)
+	first := netip.MustParseAddr("93.184.216.34")
+	second := netip.MustParseAddr("1.1.1.1")
+	blocked := netip.MustParseAddr("127.0.0.1")
+	dialer := &mappedDialer{destinations: map[netip.Addr]string{first: start.Listener.Addr().String(), second: landing.Listener.Addr().String()}}
+	collector := New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20)
+	candidates := make(chan netip.Addr, 1)
+	candidates <- first
+	close(candidates)
+	result, err := collector.CollectTargetCandidatesOccurrenceWithRedirectResolver(t.Context(), "http://example.com/", candidates, model.ObservationOccurrence{CollectionRunID: "run-1", Seed: "example.com", Attempt: 1}, func(_ context.Context, _ string, _ int, publish func(netip.Addr)) error {
+		publish(second)
+		publish(blocked)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := dialer.Addresses(); !slices.Equal(got, []netip.Addr{first, second}) {
+		t.Fatalf("dial addresses = %v", got)
+	}
+	if len(result.Observations) != 2 || result.Coverage.Status != model.CoveragePartial || !slices.Contains(result.Coverage.ErrorCodes, model.CodePolicyBlocked) {
+		t.Fatalf("result = %#v", result)
+	}
+}

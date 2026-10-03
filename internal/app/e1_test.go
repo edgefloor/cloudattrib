@@ -779,3 +779,284 @@ func TestAnalyzeDoesNotDialMailOrDNSDependencies(t *testing.T) {
 		t.Fatalf("dependency address observations missing: mail=%t dns=%t", mail, dns)
 	}
 }
+
+func TestRedirectStartsHTTPBeforeOtherAddressFamilyFinishes(t *testing.T) {
+	for _, fastType := range []uint16{1, 28} {
+		t.Run(map[uint16]string{1: "A first", 28: "AAAA first"}[fastType], func(t *testing.T) {
+			landingStarted := make(chan struct{}, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Host == "redirect.example" {
+					landingStarted <- struct{}{}
+					writer.WriteHeader(http.StatusNoContent)
+					return
+				}
+				writer.Header().Set("Location", "http://redirect.example/landing")
+				writer.WriteHeader(http.StatusFound)
+			}))
+			t.Cleanup(server.Close)
+			allowSlow := make(chan struct{})
+			address := netip.MustParseAddr("93.184.216.34")
+			if fastType == 28 {
+				address = netip.MustParseAddr("2606:2800:220:1:248:1893:25c8:1946")
+			}
+			collector := collectdns.New(func(ctx context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+				result := model.DNSResult{Question: question, Outcome: model.DNSOutcomeNoData}
+				if question.Name == "example.com" && question.Type == 1 {
+					result.Outcome = model.DNSOutcomeAnswered
+					result.Addresses = []netip.Addr{netip.MustParseAddr("93.184.216.34")}
+				}
+				if question.Name == "redirect.example" && (question.Type == 1 || question.Type == 28) {
+					if question.Type == fastType {
+						result.Outcome = model.DNSOutcomeAnswered
+						result.Addresses = []netip.Addr{address}
+					} else {
+						select {
+						case <-allowSlow:
+							result.Outcome = model.DNSOutcomeTimeout
+						case <-ctx.Done():
+							return result, ctx.Err()
+						}
+					}
+				}
+				return result, nil
+			}, policy.PublicDestinationPolicy())
+			dialer := &fixtureDialer{fixtureAddress: server.Listener.Addr().String(), started: make(chan struct{})}
+			service := app.NewService(app.Dependencies{
+				DNS: collector, HTTP: collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20),
+				View: model.NewAttributionView("fixture-bundle", "public-v1", nil, nil), HTTPScheme: "http", Now: time.Now,
+			})
+			type outcome struct {
+				report model.Report
+				err    error
+			}
+			finished := make(chan outcome, 1)
+			go func() {
+				includeWWW := false
+				report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull, IncludeWWW: &includeWWW})
+				finished <- outcome{report: report, err: err}
+			}()
+			select {
+			case <-landingStarted:
+			case <-time.After(2 * time.Second):
+				t.Fatal("redirect HTTP did not start before the other address family finished")
+			}
+			close(allowSlow)
+			completed := <-finished
+			if completed.err != nil {
+				t.Fatal(completed.err)
+			}
+			var landing, partialHTTP, failedFamilyRetained bool
+			for _, observation := range completed.report.Observations {
+				landing = landing || observation.Type == "http_response" && observation.Subject == "redirect.example"
+				if observation.Type == "dns_query" && observation.Subject == "redirect.example" && observation.Status == string(model.DNSOutcomeTimeout) && observation.Scope == model.ScopeExternalRedirect {
+					var payload model.DNSPayload
+					if err := json.Unmarshal(observation.Payload, &payload); err != nil {
+						t.Fatal(err)
+					}
+					failedFamilyRetained = payload.RRType == map[uint16]string{1: "AAAA", 28: "A"}[fastType]
+				}
+			}
+			for _, coverage := range completed.report.Coverage {
+				partialHTTP = partialHTTP || coverage.Capability == "http" && coverage.Status == model.CoveragePartial
+			}
+			if !landing || !partialHTTP || !failedFamilyRetained {
+				t.Fatalf("landing response = %t, partial HTTP coverage = %t, failed family retained = %t", landing, partialHTTP, failedFamilyRetained)
+			}
+		})
+	}
+}
+
+func TestSameHostRedirectPathsReuseDNSQuestionsWithinAnalysis(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.Host + request.URL.Path {
+		case "example.com/":
+			writer.Header().Set("Location", "http://redirect.example/one")
+			writer.WriteHeader(http.StatusFound)
+		case "redirect.example/one":
+			writer.Header().Set("Location", "/two")
+			writer.WriteHeader(http.StatusFound)
+		default:
+			writer.WriteHeader(http.StatusNoContent)
+		}
+	}))
+	t.Cleanup(server.Close)
+	var mu sync.Mutex
+	calls := make(map[uint16]int)
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := collectdns.New(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		result := model.DNSResult{Question: question, Outcome: model.DNSOutcomeNoData}
+		if question.Name == "example.com" && question.Type == 1 {
+			result.Outcome = model.DNSOutcomeAnswered
+			result.Addresses = []netip.Addr{address}
+		}
+		if question.Name == "redirect.example" && (question.Type == 1 || question.Type == 28) {
+			mu.Lock()
+			calls[question.Type]++
+			mu.Unlock()
+			if question.Type == 1 {
+				result.Outcome = model.DNSOutcomeAnswered
+				result.Addresses = []netip.Addr{address}
+				payload, _ := json.Marshal(model.DNSPayload{RRType: "A", Owner: question.Name, Address: address, TTL: 300})
+				result.Records = []model.Observation{{Type: "dns_record", Subject: question.Name, Status: "answered", Payload: payload}}
+			} else {
+				result.NegativeTTL = 300
+			}
+		}
+		return result, nil
+	}, policy.PublicDestinationPolicy())
+	dialer := &fixtureDialer{fixtureAddress: server.Listener.Addr().String(), started: make(chan struct{})}
+	service := app.NewService(app.Dependencies{
+		DNS: collector, HTTP: collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20),
+		View: model.NewAttributionView("fixture-bundle", "public-v1", nil, nil), HTTPScheme: "http", Now: time.Now,
+	})
+	includeWWW := false
+	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull, IncludeWWW: &includeWWW})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls[1] != 1 || calls[28] != 1 {
+		t.Fatalf("redirect DNS calls = %#v", calls)
+	}
+	var responses int
+	for _, observation := range report.Observations {
+		if observation.Type == "http_response" {
+			responses++
+		}
+	}
+	if responses != 3 {
+		t.Fatalf("HTTP response count = %d, want 3", responses)
+	}
+	var redirectAQueries []model.Observation
+	for _, observation := range report.Observations {
+		if observation.Type != "dns_query" || observation.Subject != "redirect.example" {
+			continue
+		}
+		var payload model.DNSPayload
+		if err := json.Unmarshal(observation.Payload, &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.RRType == "A" {
+			redirectAQueries = append(redirectAQueries, observation)
+		}
+	}
+	if len(redirectAQueries) != 2 || redirectAQueries[0].ID == redirectAQueries[1].ID || !redirectAQueries[0].ObservedAt.Equal(redirectAQueries[1].ObservedAt) {
+		t.Fatalf("cached redirect query observations = %#v", redirectAQueries)
+	}
+	if err := report.ValidateReferences(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRedirectCancellationJoinsOutstandingDNSFamily(t *testing.T) {
+	landingStarted := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Host == "redirect.example" {
+			writer.WriteHeader(http.StatusNoContent)
+			landingStarted <- struct{}{}
+			return
+		}
+		writer.Header().Set("Location", "http://redirect.example/")
+		writer.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+	slowDone := make(chan struct{})
+	address := netip.MustParseAddr("93.184.216.34")
+	collector := collectdns.New(func(ctx context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		result := model.DNSResult{Question: question, Outcome: model.DNSOutcomeNoData}
+		if question.Type == 1 && (question.Name == "example.com" || question.Name == "redirect.example") {
+			result.Outcome = model.DNSOutcomeAnswered
+			result.Addresses = []netip.Addr{address}
+		}
+		if question.Name == "redirect.example" && question.Type == 28 {
+			<-ctx.Done()
+			close(slowDone)
+			return model.DNSResult{Question: question, Outcome: model.DNSOutcomeCancelled}, ctx.Err()
+		}
+		return result, nil
+	}, policy.PublicDestinationPolicy())
+	dialer := &fixtureDialer{fixtureAddress: server.Listener.Addr().String(), started: make(chan struct{})}
+	service := app.NewService(app.Dependencies{
+		DNS: collector, HTTP: collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20),
+		View: model.NewAttributionView("fixture-bundle", "public-v1", nil, nil), HTTPScheme: "http", Now: time.Now,
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	type outcome struct {
+		report model.Report
+		err    error
+	}
+	finished := make(chan outcome, 1)
+	go func() {
+		includeWWW := false
+		report, err := service.Analyze(ctx, model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull, IncludeWWW: &includeWWW})
+		finished <- outcome{report: report, err: err}
+	}()
+	select {
+	case <-landingStarted:
+		cancel()
+	case <-time.After(2 * time.Second):
+		t.Fatal("landing request did not start")
+	}
+	completed := <-finished
+	select {
+	case <-slowDone:
+	default:
+		t.Fatal("analysis returned before outstanding redirect DNS query stopped")
+	}
+	if completed.err != nil {
+		t.Fatal(completed.err)
+	}
+	var completedHop, cancelledDNS bool
+	for _, observation := range completed.report.Observations {
+		completedHop = completedHop || observation.Type == "http_response" && observation.Subject == "example.com"
+		cancelledDNS = cancelledDNS || observation.Type == "dns_query" && observation.Subject == "redirect.example" && observation.Status == string(model.DNSOutcomeCancelled)
+	}
+	if !completedHop || !cancelledDNS {
+		t.Fatalf("completed hop retained = %t, DNS cancellation retained = %t", completedHop, cancelledDNS)
+	}
+}
+
+func TestRedirectUsesSharedDNSQuestionBudgetAndRetainsPriorHop(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Location", "http://redirect.example/")
+		writer.WriteHeader(http.StatusFound)
+	}))
+	t.Cleanup(server.Close)
+	address := netip.MustParseAddr("93.184.216.34")
+	limits := policy.DefaultLimits()
+	limits.DNSQuestions = 6
+	collector := collectdns.New(func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		result := model.DNSResult{Question: question, Outcome: model.DNSOutcomeNoData}
+		if question.Name == "example.com" && question.Type == 1 {
+			result.Outcome = model.DNSOutcomeAnswered
+			result.Addresses = []netip.Addr{address}
+		}
+		if question.Name == "example.com" && question.Type == 2 {
+			payload, _ := json.Marshal(model.DNSPayload{RRType: "NS", Owner: question.Name, Value: "ns.example.net"})
+			result.Outcome = model.DNSOutcomeAnswered
+			result.Records = []model.Observation{{Type: "dns_record", Subject: question.Name, Status: "answered", Payload: payload}}
+		}
+		return result, nil
+	}, policy.PublicDestinationPolicy()).WithLimits(limits)
+	dialer := &fixtureDialer{fixtureAddress: server.Listener.Addr().String(), started: make(chan struct{})}
+	service := app.NewService(app.Dependencies{
+		DNS: collector, HTTP: collecthttp.New(dialer.DialContext, policy.PublicDestinationPolicy(), 2<<20),
+		View: model.NewAttributionView("fixture-bundle", "public-v1", nil, nil), HTTPScheme: "http", Now: time.Now,
+	})
+	includeWWW := false
+	report, err := service.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeFull, IncludeWWW: &includeWWW})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var completedHop, exhaustedRedirect, landing bool
+	for _, observation := range report.Observations {
+		completedHop = completedHop || observation.Type == "http_response" && observation.Subject == "example.com"
+		exhaustedRedirect = exhaustedRedirect || observation.Type == "dns_query" && observation.Subject == "redirect.example" && observation.Status == string(model.DNSOutcomeBudgetExhausted)
+		landing = landing || observation.Type == "http_response" && observation.Subject == "redirect.example"
+	}
+	if !completedHop || !exhaustedRedirect || landing {
+		t.Fatalf("completed hop = %t, budget outcome = %t, landing = %t", completedHop, exhaustedRedirect, landing)
+	}
+}
