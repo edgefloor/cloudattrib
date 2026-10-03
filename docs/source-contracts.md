@@ -89,6 +89,8 @@ Preserve the top-level category, provider key, CIDR or suffix, source revision, 
 
 CDN prefix association IDs use SHA-256 of the source ID, raw provider key, category, and masked prefix. Identical semantic records share one association and retain every source record reference. Revision, digest, and record references remain provenance and do not change that ID. Reloading the same data produces the same association order and IDs. Changing a provider, category, or canonical prefix changes the ID. This replaces the earlier load-order-based CDN IDs; stored reports keep their original IDs and content.
 
+Imported DNS suffixes use the same semantic identity fields, with the normalized suffix in place of a prefix. The local detector matches answered CNAME destinations at DNS label boundaries, including the suffix itself. It emits provider-level web-delivery evidence for `cdn`, `waf`, and `cloud` records, retaining the observation scope and source record provenance. It does not infer a product from a suffix. Other categories remain omitted with explicit partial or unavailable `cdn_suffix` coverage. A suffix-only source does not advertise usable prefix data. Replay applies the same detector to retained observations without DNS requests.
+
 A match in both this data and a mirrored cloud-range source is not independent corroboration unless the provenance groups differ.
 
 ## Normalized manifests

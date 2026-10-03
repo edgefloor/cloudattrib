@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -18,6 +20,7 @@ import (
 	"cloudattrib/internal/cli"
 	collectdns "cloudattrib/internal/collect/dns"
 	collecthttp "cloudattrib/internal/collect/http"
+	"cloudattrib/internal/datasets"
 	"cloudattrib/internal/detect/dnsrules"
 	"cloudattrib/internal/enrich/prefix"
 	"cloudattrib/internal/model"
@@ -497,4 +500,139 @@ func hasProductRelation(findings []model.Finding, product string, relation model
 		}
 	}
 	return false
+}
+
+func TestImportedCDNSuffixWorksInAnalysisAndReplay(t *testing.T) {
+	directory := t.TempDir()
+	data := []byte(`{"cdn":{"fixture-provider":["edge.fixture.test"]}}`)
+	if err := os.WriteFile(filepath.Join(directory, "cdncheck-sources-data.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := datasets.LoadSources(t.Context(), directory, "build-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Prefixes != nil {
+		t.Fatal("suffix-only import created a prefix index")
+	}
+	for _, capability := range loaded.Candidate.View.Capabilities() {
+		if capability.Name == "prefix_source/cdncheck-data" && capability.Status != model.CoverageUnavailable {
+			t.Fatalf("suffix-only source advertises prefix availability: %#v", capability)
+		}
+	}
+	query := func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		result := model.DNSResult{Question: question, ResponseCode: 0}
+		if question.Type == 5 {
+			payload, err := json.Marshal(model.DNSPayload{RRType: "CNAME", Owner: question.Name, Value: "customer.edge.fixture.test"})
+			if err != nil {
+				return result, err
+			}
+			result.Records = []model.Observation{{ID: "fixture-cname", Type: "dns_record", Subject: question.Name, Status: "answered", Scope: model.ScopeRoot, Payload: payload}}
+		}
+		return result, nil
+	}
+	live := app.NewService(app.Dependencies{
+		DNS:       collectdns.New(query, policy.PublicDestinationPolicy()),
+		Detectors: []app.Detector{loaded.Suffixes}, View: loaded.Candidate.View,
+	})
+	includeWWW := false
+	report, err := live.Analyze(t.Context(), model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeDNS, IncludeWWW: &includeWWW})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var liveEvidence model.Evidence
+	for _, item := range report.Evidence {
+		if item.ProviderID == "fixture-provider" && item.DetectorID == "cdn-suffix-v1" {
+			liveEvidence = item
+		}
+	}
+	if liveEvidence.ID == "" || liveEvidence.ProductID != "" || liveEvidence.DatasetRecords[0].RecordRef == "" {
+		t.Fatalf("imported suffix evidence = %#v", report.Evidence)
+	}
+	if err := report.ValidateReferences(); err != nil {
+		t.Fatalf("live report references: %v", err)
+	}
+	replay := app.NewService(app.Dependencies{Store: replayReportStore{report: report}, Detectors: []app.Detector{loaded.Suffixes}, View: loaded.Candidate.View})
+	reclassified, err := replay.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: report.ID, BundleID: loaded.Candidate.View.BundleID()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replayEvidence model.Evidence
+	for _, item := range reclassified.Evidence {
+		if item.DetectorID == "cdn-suffix-v1" {
+			replayEvidence = item
+		}
+	}
+	if replayEvidence.ID != liveEvidence.ID || replayEvidence.ProviderID != liveEvidence.ProviderID || replayEvidence.Scope != liveEvidence.Scope {
+		t.Fatalf("replay evidence = %#v, live = %#v", replayEvidence, liveEvidence)
+	}
+	if err := reclassified.ValidateReferences(); err != nil {
+		t.Fatalf("replay report references: %v", err)
+	}
+}
+
+func TestImportedCDNSuffixReplayPreservesRetainedObservationScopes(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.WriteFile(filepath.Join(directory, "cdncheck-sources-data.json"),
+		[]byte(`{"cdn":{"fixture-provider":["edge.fixture.test"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := datasets.LoadSources(t.Context(), directory, "build-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	observations := make([]model.Observation, 0, 4)
+	want := map[string]model.Scope{
+		"example.com":           model.ScopeRoot,
+		"sub.example.com":       model.ScopeSubdomain,
+		"dep.example.net":       model.ScopeDNSDependency,
+		"landing.other.example": model.ScopeExternalRedirect,
+	}
+	for subject, scope := range want {
+		payload, err := json.Marshal(model.DNSPayload{RRType: "CNAME", Owner: subject, Value: "host.edge.fixture.test"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		observations = append(observations, model.Observation{
+			ID: "cname-" + subject, Type: "dns_record", Subject: subject, Scope: scope, Status: "answered", Payload: payload,
+		})
+	}
+	original := model.Report{ID: "retained-suffix-scopes", BundleID: loaded.Candidate.View.BundleID(),
+		Target: model.Target{Canonical: "example.com", Kind: model.TargetDomain}, Observations: observations}
+	service := app.NewService(app.Dependencies{Store: replayReportStore{report: original},
+		Detectors: []app.Detector{loaded.Suffixes}, View: loaded.Candidate.View})
+	replayed, err := service.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: original.ID, BundleID: original.BundleID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]bool, len(want))
+	for _, evidence := range replayed.Evidence {
+		if evidence.DetectorID != "cdn-suffix-v1" {
+			continue
+		}
+		scope, exists := want[evidence.Subject]
+		if !exists || evidence.Scope != scope || evidence.ProviderID != "fixture-provider" ||
+			len(evidence.ObservationIDs) != 1 || len(evidence.DatasetRecords) != 1 ||
+			evidence.DatasetRecords[0].Revision == "" || evidence.DatasetRecords[0].Digest == "" || evidence.DatasetRecords[0].RecordRef == "" {
+			t.Fatalf("replay lost suffix scope or provenance: %#v", evidence)
+		}
+		if seen[evidence.Subject] {
+			t.Fatalf("duplicate suffix evidence for %q", evidence.Subject)
+		}
+		seen[evidence.Subject] = true
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("replay covered %d scopes, want %d: %#v", len(seen), len(want), replayed.Evidence)
+	}
+	for _, finding := range replayed.Findings {
+		if finding.ProviderID != "fixture-provider" {
+			continue
+		}
+		if scope, exists := want[finding.Subject]; !exists || finding.Scope != scope {
+			t.Fatalf("replay promoted scoped suffix evidence: %#v", finding)
+		}
+	}
+	if err := replayed.ValidateReferences(); err != nil {
+		t.Fatalf("replay references: %v", err)
+	}
 }

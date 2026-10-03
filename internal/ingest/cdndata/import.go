@@ -30,7 +30,10 @@ type CIDRRecord struct {
 }
 
 // SuffixRecord is one normalized local DNS suffix classification.
-type SuffixRecord struct{ Suffix, Category, Provider, SourceID, RecordRef, Revision, Digest, ProvenanceGroup string }
+type SuffixRecord struct {
+	Suffix, Category, Provider, SourceID, ID, RecordRef, Revision, Digest, ProvenanceGroup string
+	RecordRefs                                                                             []string
+}
 
 // Result contains every converted CIDR and suffix record.
 type Result struct {
@@ -75,7 +78,7 @@ func Parse(data []byte, metadata Metadata) (Result, error) {
 				if err != nil {
 					return Result{}, fmt.Errorf("parse cdn data %s: %w", ref, err)
 				}
-				result.Suffixes = append(result.Suffixes, SuffixRecord{Suffix: suffix, Category: category, Provider: provider, SourceID: "cdncheck-data", RecordRef: ref, Revision: metadata.Revision, Digest: metadata.Digest, ProvenanceGroup: group})
+				result.Suffixes = append(result.Suffixes, SuffixRecord{Suffix: suffix, Category: category, Provider: provider, SourceID: "cdncheck-data", ID: suffixID("cdncheck-data", provider, category, suffix), RecordRef: ref, RecordRefs: []string{ref}, Revision: metadata.Revision, Digest: metadata.Digest, ProvenanceGroup: group})
 			}
 		}
 	}
@@ -98,6 +101,20 @@ func Parse(data []byte, metadata Metadata) (Result, error) {
 		slices.Sort(result.CIDRs[i].RecordRefs)
 		result.CIDRs[i].RecordRef = result.CIDRs[i].RecordRefs[0]
 	}
+	slices.SortFunc(result.Suffixes, func(a, b SuffixRecord) int { return strings.Compare(a.ID, b.ID) })
+	uniqueSuffixes := result.Suffixes[:0]
+	for _, record := range result.Suffixes {
+		if len(uniqueSuffixes) > 0 && uniqueSuffixes[len(uniqueSuffixes)-1].ID == record.ID {
+			uniqueSuffixes[len(uniqueSuffixes)-1].RecordRefs = append(uniqueSuffixes[len(uniqueSuffixes)-1].RecordRefs, record.RecordRef)
+			continue
+		}
+		uniqueSuffixes = append(uniqueSuffixes, record)
+	}
+	result.Suffixes = uniqueSuffixes
+	for i := range result.Suffixes {
+		slices.Sort(result.Suffixes[i].RecordRefs)
+		result.Suffixes[i].RecordRef = result.Suffixes[i].RecordRefs[0]
+	}
 	return result, nil
 }
 
@@ -105,6 +122,12 @@ func cidrID(sourceID, provider, category string, prefix netip.Prefix) string {
 	semantic := fmt.Sprintf("%q\x00%q\x00%q\x00%q", sourceID, provider, category, prefix.String())
 	sum := sha256.Sum256([]byte(semantic))
 	return "cdn:" + hex.EncodeToString(sum[:])
+}
+
+func suffixID(sourceID, provider, category, suffix string) string {
+	semantic := fmt.Sprintf("%q\x00%q\x00%q\x00%q", sourceID, provider, category, suffix)
+	sum := sha256.Sum256([]byte(semantic))
+	return "cdn-suffix:" + hex.EncodeToString(sum[:])
 }
 
 func normalizeSuffix(value string) (string, error) {

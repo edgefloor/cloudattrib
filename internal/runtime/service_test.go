@@ -21,6 +21,7 @@ import (
 
 	"cloudattrib/internal/api"
 	"cloudattrib/internal/app"
+	collectdns "cloudattrib/internal/collect/dns"
 	"cloudattrib/internal/config"
 	"cloudattrib/internal/datasets"
 	"cloudattrib/internal/enrich/asn"
@@ -29,6 +30,7 @@ import (
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/observability"
+	"cloudattrib/internal/policy"
 )
 
 func TestBundleAnalyzerFactoryBoundsResidencyAndEvictsUnusedLRU(t *testing.T) {
@@ -443,6 +445,54 @@ func TestNewAnalyzerLoadsOfflinePrefixAndASNData(t *testing.T) {
 	}
 }
 
+func TestNewLocalReclassifiesImportedSuffixWithoutCollection(t *testing.T) {
+	sources := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sources, "cdncheck-sources-data.json"),
+		[]byte(`{"cdn":{"fixture-provider":["edge.fixture.test"]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configuration := config.Default()
+	configuration.Data.SourceDirectory = sources
+	configuration.Data.BundleDirectory = filepath.Join(t.TempDir(), "bundles")
+	configuration.Resolver.Address = "127.0.0.1:1"
+	analyzer, bundleID, _, _, err := newAnalyzerDetails(t.Context(), configuration, standaloneReportStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(model.DNSPayload{RRType: "CNAME", Owner: "example.com", Value: "host.edge.fixture.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := model.Report{ID: "retained-imported-suffix", BundleID: bundleID,
+		Target: model.Target{Canonical: "example.com", Kind: model.TargetDomain},
+		Observations: []model.Observation{{ID: "cname-1", Type: "dns_record", Subject: "example.com", Scope: model.ScopeRoot,
+			Status: "answered", Payload: payload}}}
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "report.json")
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := analyzer.Reclassify(t.Context(), model.ReclassifyRequest{ReportID: path, BundleID: bundleID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var matches int
+	for _, evidence := range replayed.Evidence {
+		if evidence.DetectorID == "cdn-suffix-v1" {
+			matches++
+			if evidence.ProviderID != "fixture-provider" || len(evidence.DatasetRecords) != 1 || evidence.DatasetRecords[0].RecordRef == "" {
+				t.Fatalf("imported suffix evidence = %#v", evidence)
+			}
+		}
+	}
+	if matches != 1 || len(replayed.Observations) != 1 {
+		t.Fatalf("replay produced %d imported matches and %d observations", matches, len(replayed.Observations))
+	}
+}
+
 func TestNewAnalyzerTreatsMissingASNAsDegradedNotAvailable(t *testing.T) {
 	t.Parallel()
 
@@ -772,6 +822,98 @@ func TestBundleAnalyzerFactoryActivationDoesNotChangeInflightAttempt(t *testing.
 	if report := <-reportDone; report.BundleID != previous.bundleID {
 		t.Fatalf("in-flight report bundle = %q, want %q", report.BundleID, previous.bundleID)
 	}
+}
+
+func TestBundleActivationKeepsImportedSuffixEvidenceWithinCapturedGeneration(t *testing.T) {
+	load := func(provider string) datasets.LoadedBundle {
+		t.Helper()
+		directory := t.TempDir()
+		data := []byte(fmt.Sprintf(`{"cdn":{%q:["edge.fixture.test"]}}`, provider))
+		if err := os.WriteFile(filepath.Join(directory, "cdncheck-sources-data.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := datasets.LoadSources(t.Context(), directory, "build-a")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return loaded
+	}
+	previous := load("previous-provider")
+	next := load("next-provider")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	query := func(_ context.Context, question model.DNSQuestion) (model.DNSResult, error) {
+		result := model.DNSResult{Question: question, ResponseCode: 0}
+		if question.Name == "example.com" && question.Type == 5 {
+			once.Do(func() { close(started) })
+			<-release
+			payload, err := json.Marshal(model.DNSPayload{RRType: "CNAME", Owner: question.Name, Value: "host.edge.fixture.test"})
+			if err != nil {
+				return result, err
+			}
+			result.Records = []model.Observation{{ID: "fixture-cname", Type: "dns_record", Subject: question.Name, Status: "answered", Scope: model.ScopeRoot, Payload: payload}}
+		}
+		return result, nil
+	}
+	analyzer := func(loaded datasets.LoadedBundle) app.Analyzer {
+		return app.NewService(app.Dependencies{
+			DNS: collectdns.New(query, policy.PublicDestinationPolicy()), Detectors: []app.Detector{loaded.Suffixes}, View: loaded.Candidate.View,
+		})
+	}
+	previousAnalyzer, nextAnalyzer := analyzer(previous), analyzer(next)
+	factory := newBundleAnalyzerFactory(2, previousAnalyzer, previous.Candidate.Manifest.BundleID, lookupAvailability{}, datasets.Activation{BundleID: previous.Candidate.Manifest.BundleID}, 0)
+	factory.load = func(context.Context, string) (app.Analyzer, lookupAvailability, int64, error) {
+		return nextAnalyzer, lookupAvailability{}, 0, nil
+	}
+	captured, err := factory.CaptureAnalyzer(t.Context(), next.Candidate.Manifest.BundleID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	captured.Release()
+	includeWWW := false
+	request := model.AnalyzeRequest{Target: "example.com", Kind: model.TargetDomain, Mode: model.ModeDNS, IncludeWWW: &includeWWW}
+	type result struct {
+		report model.Report
+		err    error
+	}
+	done := make(chan result, 1)
+	go func() {
+		report, err := factory.Analyze(t.Context(), request)
+		done <- result{report: report, err: err}
+	}()
+	<-started
+	factory.mu.Lock()
+	factory.active = nextAnalyzer
+	factory.activeBundleID = next.Candidate.Manifest.BundleID
+	factory.notifyLocked()
+	factory.mu.Unlock()
+	close(release)
+	first := <-done
+	if first.err != nil || first.report.BundleID != previous.Candidate.Manifest.BundleID {
+		t.Fatalf("in-flight report bundle = %q, error = %v", first.report.BundleID, first.err)
+	}
+	assertProvider := func(report model.Report, want string) {
+		t.Helper()
+		var matches int
+		for _, evidence := range report.Evidence {
+			if evidence.DetectorID == "cdn-suffix-v1" {
+				matches++
+				if evidence.ProviderID != want {
+					t.Fatalf("report includes suffix provider %q, want %q", evidence.ProviderID, want)
+				}
+			}
+		}
+		if matches != 1 {
+			t.Fatalf("report has %d imported suffix matches, want one: %#v", matches, report.Evidence)
+		}
+	}
+	assertProvider(first.report, "previous-provider")
+	second, err := factory.Analyze(t.Context(), request)
+	if err != nil || second.BundleID != next.Candidate.Manifest.BundleID {
+		t.Fatalf("new report bundle = %q, error = %v", second.BundleID, err)
+	}
+	assertProvider(second, "next-provider")
 }
 
 type fixtureActivationAuthority struct {
