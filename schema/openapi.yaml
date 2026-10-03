@@ -258,6 +258,31 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InventoryEvidencePage"
+  /v1/inventory/retrieve:
+    post:
+      summary: Rank retained inventory evidence by lexical, semantic, or hybrid matching.
+      description: |
+        Query text is carried in the request body. Semantic search requires a local
+        model matching the active vector generation. Hybrid results explicitly
+        report lexical-only degradation when semantic execution is unavailable.
+        Similarity is a ranking value, not attribution confidence.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InventoryRetrievalRequest"
+      responses:
+        "200":
+          description: Bounded ranked window with candidate truncation metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryRetrievalPage"
+        "422":
+          description: Invalid mode, text, filter, or limit.
+        "503":
+          description: Semantic-only retrieval is unavailable without a matching local model and vector generation.
   /v1/inventory/projection-status:
     get:
       summary: Read pending, running, and failed report-projection counts.
@@ -603,6 +628,43 @@ components:
           items:
             $ref: "#/components/schemas/InventoryEvidenceResult"
         truncated: {type: boolean}
+    InventoryRetrievalRequest:
+      type: object
+      additionalProperties: false
+      required: [text]
+      properties:
+        text: {type: string, minLength: 1, maxLength: 1024}
+        mode: {type: string, enum: [lexical, semantic, hybrid], default: hybrid}
+        scope_root: {type: string}
+        context_id: {type: string}
+        limit: {type: integer, minimum: 1, maximum: 100, default: 50}
+    InventoryRetrievalResult:
+      allOf:
+        - $ref: "#/components/schemas/InventoryEvidenceResult"
+        - type: object
+          required: [match_modes]
+          properties:
+            match_modes:
+              type: array
+              items: {type: string, enum: [exact_hostname, lexical, semantic]}
+            semantic_similarity:
+              type: number
+              description: Cosine similarity, not evidence confidence.
+            model_generation: {type: string}
+            fusion_score: {type: number}
+    InventoryRetrievalPage:
+      type: object
+      required: [items, truncated, candidate_truncated, degraded_to_lexical]
+      properties:
+        items:
+          type: array
+          maxItems: 100
+          items:
+            $ref: "#/components/schemas/InventoryRetrievalResult"
+        truncated: {type: boolean}
+        candidate_truncated: {type: boolean}
+        degraded_to_lexical: {type: boolean}
+        model_generation: {type: string}
     InventoryImport:
       type: object
       additionalProperties: false

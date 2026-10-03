@@ -1,0 +1,14 @@
+FROM python:3.13.14-slim-bookworm@sha256:67a1e1f215ccda113cfc024e8639049257e88f273898f595b61476d128d387e8
+
+COPY deploy/requirements.embedding.lock /tmp/requirements.embedding.lock
+RUN python -m pip install --no-cache-dir --require-hashes -r /tmp/requirements.embedding.lock \
+    && rm /tmp/requirements.embedding.lock
+
+COPY scripts/embedding-worker.py /opt/cloudattrib/embedding-worker.py
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    HF_HUB_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    ORT_DISABLE_TELEMETRY=1
+USER 65532:65532
+ENTRYPOINT ["python", "/opt/cloudattrib/embedding-worker.py"]

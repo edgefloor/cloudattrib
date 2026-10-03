@@ -19,6 +19,45 @@ func runInventory(ctx context.Context, args []string, dependencies Dependencies,
 		return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "inventory requires an operation", nil))
 	}
 	switch args[0] {
+	case "embedding":
+		return runInventoryEmbedding(ctx, args[1:], dependencies, streams)
+	case "retrieve":
+		flags := flag.NewFlagSet("inventory retrieve", flag.ContinueOnError)
+		flags.SetOutput(io.Discard)
+		query := flags.String("query", "", "")
+		mode := flags.String("mode", "hybrid", "")
+		scope := flags.String("scope", "", "")
+		contextID := flags.String("context", "", "")
+		limit := flags.Int("limit", 50, "")
+		format := flags.String("format", "json", "")
+		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 || (*format != "json" && *format != "ndjson") {
+			return diagnostic(streams.stderr, model.NewError(model.CodeInvalidSyntax, "invalid inventory retrieval flags", err))
+		}
+		if dependencies.InventoryRetrieve == nil {
+			return diagnostic(streams.stderr, model.NewError(model.CodeCapabilityUnavailable, "inventory retrieval is unavailable", nil))
+		}
+		page, err := dependencies.InventoryRetrieve(ctx, inventory.RetrievalRequest{
+			Text: *query, Mode: inventory.RetrievalMode(*mode), ScopeRoot: *scope, ContextID: *contextID, Limit: *limit,
+		})
+		if err != nil {
+			return diagnostic(streams.stderr, err)
+		}
+		if *format == "json" {
+			return writeCommandJSON(streams, page)
+		}
+		encoder := json.NewEncoder(streams.stdout)
+		for _, item := range page.Items {
+			if err := encoder.Encode(item); err != nil {
+				return diagnostic(streams.stderr, err)
+			}
+		}
+		if page.Truncated {
+			_, _ = fmt.Fprintln(streams.stderr, "results_truncated=true")
+		}
+		if page.DegradedToLexical {
+			_, _ = fmt.Fprintln(streams.stderr, "degraded_to_lexical=true")
+		}
+		return 0
 	case "validate":
 		flags := flag.NewFlagSet("inventory validate", flag.ContinueOnError)
 		flags.SetOutput(io.Discard)

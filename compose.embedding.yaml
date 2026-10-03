@@ -1,0 +1,49 @@
+# Optional local semantic search stack. Start with -f compose.yaml -f compose.embedding.yaml.
+services:
+  volume-init:
+    command: ["sh", "-c", "chmod 700 /run/cloudattrib/embedding && chown 65532:65532 /var/lib/cloudattrib/bundles /run/cloudattrib/embedding"]
+    volumes:
+      - embedding-sockets:/run/cloudattrib/embedding
+
+  postgres:
+    image: pgvector/pgvector:0.8.6-pg18@sha256:2ba9ca5f2e7daa0f0e7723cba1ee9167bab54efd3640516a44ac1a928dd67e7a
+    volumes:
+      - postgres-embedding:/var/lib/postgresql
+
+  app:
+    volumes:
+      - ./deploy/config.compose.embedding.yaml:/etc/cloudattrib/config.yaml:ro
+      - ${CLOUDATTRIB_EMBEDDING_CONTRACT_FILE:?set CLOUDATTRIB_EMBEDDING_CONTRACT_FILE}:/etc/cloudattrib/embedding-contract.json:ro
+      - embedding-sockets:/run/cloudattrib/embedding:ro
+
+  embedding-worker:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.embedding
+    command:
+      - --contract
+      - /etc/cloudattrib/embedding-contract.json
+      - --cache-dir
+      - /models
+      - --socket-dir
+      - /run/cloudattrib/embedding
+    depends_on:
+      volume-init:
+        condition: service_completed_successfully
+    volumes:
+      - ${CLOUDATTRIB_EMBEDDING_CONTRACT_FILE:?set CLOUDATTRIB_EMBEDDING_CONTRACT_FILE}:/etc/cloudattrib/embedding-contract.json:ro
+      - ${CLOUDATTRIB_EMBEDDING_CACHE_DIR:?set CLOUDATTRIB_EMBEDDING_CACHE_DIR}:/models:ro
+      - embedding-sockets:/run/cloudattrib/embedding
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    user: "65532:65532"
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  embedding-sockets: {}
+  postgres-embedding: {}

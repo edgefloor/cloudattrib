@@ -1,0 +1,30 @@
+{
+  "artifact_bytes": 90387630,
+  "artifact_sha256": "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+  "batch_size": 256,
+  "checkpoints": [
+    {
+      "documents": 10000,
+      "documents_per_second": 1611.430824297786,
+      "embedding_seconds": 6.20566508299089,
+      "peak_rss_bytes": 541556736
+    },
+    {
+      "documents": 100000,
+      "documents_per_second": 1607.91517900968,
+      "embedding_seconds": 62.19233533300576,
+      "peak_rss_bytes": 639139840
+    }
+  ],
+  "corpus_version": "2",
+  "fastembed_version": "0.8.1",
+  "model_id": "sentence-transformers/all-MiniLM-L6-v2",
+  "model_load_peak_rss_bytes": 246595584,
+  "model_load_seconds": 0.061757582996506244,
+  "model_revision": "d13954661f83248295ba75c1ed411eef3b7b936e",
+  "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+  "source_document_count": 30,
+  "synthetic_hostname_pattern": "qNNNNNN.example.com",
+  "threads": 4,
+  "verification_seconds": 0.033836415997939184
+}

@@ -20,6 +20,7 @@ type InventoryService interface {
 	Archive(context.Context, string, bool) (inventory.Asset, error)
 	Delete(context.Context, string, bool) (int64, error)
 	SearchEvidence(context.Context, inventory.EvidenceQuery) (inventory.EvidencePage, error)
+	Retrieve(context.Context, inventory.RetrievalRequest) (inventory.RetrievalPage, error)
 	ReadEvidence(context.Context, string, string) (inventory.EvidenceResult, error)
 	ProjectionStatus(context.Context) (inventory.ProjectionStatus, error)
 }
@@ -35,6 +36,18 @@ func (s *server) inventoryRoute(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	switch {
+	case request.Method == http.MethodPost && request.URL.Path == "/v1/inventory/retrieve":
+		var input inventory.RetrievalRequest
+		if err := decodeJSONBody(writer, request, s.maxBytes, &input); err != nil {
+			writeRequestError(writer, err)
+			return
+		}
+		page, err := s.inventory.Retrieve(request.Context(), input)
+		if err != nil {
+			writeApplicationError(writer, err)
+			return
+		}
+		writeJSON(writer, http.StatusOK, page)
 	case request.Method == http.MethodPost && request.URL.Path == "/v1/inventory/validate":
 		if s.inventoryValidator == nil {
 			writeApplicationError(writer, model.NewError(model.CodeCapabilityUnavailable, "inventory validation is unavailable", nil))

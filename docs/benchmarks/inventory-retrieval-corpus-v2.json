@@ -1,0 +1,232 @@
+{
+  "version": "2",
+  "provenance": "Synthetic typed report facts rendered by inventory.DescribeReport; no live hosts or customer data.",
+  "documents": [
+    {
+      "id": "a01",
+      "hostname": "id.example.com",
+      "description": "DNS a answered HTTP 200 response hostname id.example.com identity technology keycloak"
+    },
+    {
+      "id": "a02",
+      "hostname": "x7.example.com",
+      "description": "DNS a answered HTTP 403 response hostname x7.example.com identity technology auth0"
+    },
+    {
+      "id": "a03",
+      "hostname": "portal.example.com",
+      "description": "DNS a answered HTTP 200 response hostname portal.example.com monitoring technology grafana"
+    },
+    {
+      "id": "a04",
+      "hostname": "login-static.example.com",
+      "description": "DNS cname answered HTTP 200 response cdn cloudfront hostname login-static.example.com"
+    },
+    {
+      "id": "a05",
+      "hostname": "sso-old.example.com",
+      "description": "DNS a timeout hostname sso-old.example.com identity"
+    },
+    {
+      "id": "a06",
+      "hostname": "staging.example.com",
+      "description": "DNS a answered HTTP 200 response hostname staging.example.com staging"
+    },
+    {
+      "id": "a07",
+      "hostname": "x8.example.com",
+      "description": "DNS a answered HTTP 200 response hostname x8.example.com preview"
+    },
+    {
+      "id": "a08",
+      "hostname": "test-payments.example.com",
+      "description": "DNS a answered HTTP 200 response hostname test-payments.example.com payments"
+    },
+    {
+      "id": "a09",
+      "hostname": "prod.example.com",
+      "description": "DNS a answered HTTP 200 response commerce hostname prod.example.com"
+    },
+    {
+      "id": "a10",
+      "hostname": "mail.example.com",
+      "description": "DNS mx answered email hostname mail.example.com"
+    },
+    {
+      "id": "a11",
+      "hostname": "mx2.example.com",
+      "description": "DNS mx answered email hostname mx2.example.com"
+    },
+    {
+      "id": "a12",
+      "hostname": "mail-test.example.com",
+      "description": "DNS mx answered HTTP 200 response email hostname mail-test.example.com"
+    },
+    {
+      "id": "a13",
+      "hostname": "cdn.example.com",
+      "description": "DNS cname answered HTTP 200 response cdn hostname cdn.example.com"
+    },
+    {
+      "id": "a14",
+      "hostname": "e1.example.com",
+      "description": "DNS cname answered HTTP 200 response cdn cloudfront hostname e1.example.com"
+    },
+    {
+      "id": "a15",
+      "hostname": "origin.example.com",
+      "description": "DNS a answered HTTP 200 response hostname origin.example.com web"
+    },
+    {
+      "id": "a16",
+      "hostname": "api.example.com",
+      "description": "DNS a answered HTTP 200 response api hostname api.example.com"
+    },
+    {
+      "id": "a17",
+      "hostname": "z2.example.com",
+      "description": "DNS a answered HTTP 200 response api hostname z2.example.com technology graphql"
+    },
+    {
+      "id": "a18",
+      "hostname": "api-docs.example.com",
+      "description": "DNS a answered HTTP 200 response documentation hostname api-docs.example.com"
+    },
+    {
+      "id": "a19",
+      "hostname": "docs.example.com",
+      "description": "DNS a answered HTTP 200 response documentation hostname docs.example.com"
+    },
+    {
+      "id": "a20",
+      "hostname": "files.example.com",
+      "description": "DNS a answered HTTP 200 response hostname files.example.com storage"
+    },
+    {
+      "id": "a21",
+      "hostname": "s3.example.com",
+      "description": "DNS cname answered HTTP 403 response aws hostname s3.example.com s3 storage"
+    },
+    {
+      "id": "a22",
+      "hostname": "status.example.com",
+      "description": "DNS a answered HTTP 200 response hostname status.example.com status"
+    },
+    {
+      "id": "a23",
+      "hostname": "m3.example.com",
+      "description": "DNS a answered HTTP 200 response hostname m3.example.com monitoring technology prometheus"
+    },
+    {
+      "id": "a24",
+      "hostname": "analytics.example.com",
+      "description": "DNS a answered HTTP 200 response analytics hostname analytics.example.com technology google analytics"
+    },
+    {
+      "id": "a25",
+      "hostname": "checkout.example.com",
+      "description": "DNS a answered HTTP 200 response hostname checkout.example.com payments"
+    },
+    {
+      "id": "a26",
+      "hostname": "p7.example.com",
+      "description": "DNS a answered HTTP 403 response hostname p7.example.com payments stripe"
+    },
+    {
+      "id": "a27",
+      "hostname": "vpn.example.com",
+      "description": "DNS a answered HTTP 200 response hostname vpn.example.com vpn"
+    },
+    {
+      "id": "a28",
+      "hostname": "legacy.example.com",
+      "description": "DNS a timeout hostname legacy.example.com"
+    },
+    {
+      "id": "a29",
+      "hostname": "verify.example.com",
+      "description": "DNS txt answered hostname verify.example.com verification"
+    },
+    {
+      "id": "a30",
+      "hostname": "external.example.com",
+      "description": "DNS a answered HTTP 302 response hostname external.example.com redirect"
+    }
+  ],
+  "queries": [
+    {
+      "text": "customer sign in service",
+      "relevant": [
+        "a01",
+        "a02"
+      ]
+    },
+    {
+      "text": "test or preview deployments",
+      "relevant": [
+        "a06",
+        "a07",
+        "a12"
+      ]
+    },
+    {
+      "text": "email delivery infrastructure",
+      "relevant": [
+        "a10",
+        "a11",
+        "a12"
+      ]
+    },
+    {
+      "text": "content delivery edge cache",
+      "relevant": [
+        "a13",
+        "a14"
+      ]
+    },
+    {
+      "text": "developer API endpoints",
+      "relevant": [
+        "a16",
+        "a17"
+      ]
+    },
+    {
+      "text": "developer documentation",
+      "relevant": [
+        "a18",
+        "a19"
+      ]
+    },
+    {
+      "text": "file and object storage",
+      "relevant": [
+        "a20",
+        "a21"
+      ]
+    },
+    {
+      "text": "service monitoring and health",
+      "relevant": [
+        "a03",
+        "a22",
+        "a23"
+      ]
+    },
+    {
+      "text": "payment checkout services",
+      "relevant": [
+        "a08",
+        "a25",
+        "a26"
+      ]
+    },
+    {
+      "text": "historical or retired evidence",
+      "relevant": [
+        "a05",
+        "a28"
+      ]
+    }
+  ]
+}

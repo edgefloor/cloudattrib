@@ -14,8 +14,9 @@ import (
 )
 
 // DescriptionFormatVersion identifies the deterministic retained-fact rendering contract.
-const DescriptionFormatVersion = "2"
-const maximumDescriptionBytes = 4096
+const DescriptionFormatVersion = "3"
+const maximumDescriptionBytes = 1024
+const maximumDescriptionWords = 128
 const maximumDescriptionRefs = 100
 
 // Description contains deterministic, bounded terms and links to retained evidence.
@@ -39,6 +40,13 @@ func DescribeReport(report model.Report, hostname string) Description {
 	description := Description{FormatVersion: DescriptionFormatVersion, ReportID: report.ID, AttemptedAt: report.EndedAt,
 		ObservationIDs: []string{}, EvidenceIDs: []string{}, Coverage: []string{}}
 	terms := []string{"hostname " + hostname}
+	priority := map[string]int{"hostname " + hostname: 0}
+	addTerm := func(term string, rank int) {
+		terms = append(terms, term)
+		if current, ok := priority[term]; !ok || rank < current {
+			priority[term] = rank
+		}
+	}
 	for _, observation := range report.Observations {
 		if observation.Subject != hostname || observation.Scope == model.ScopeExternalRedirect || observation.Scope == model.ScopeMailDependency || observation.Scope == model.ScopeDNSDependency {
 			continue
@@ -59,7 +67,7 @@ func DescribeReport(report model.Report, hostname string) Description {
 				description.Omitted++
 				continue
 			}
-			terms = append(terms, "DNS "+rrtype+" "+outcome)
+			addTerm("DNS "+rrtype+" "+outcome, 2)
 			if observation.Status == string(model.DNSOutcomeAnswered) {
 				description.Positive = true
 			}
@@ -74,7 +82,7 @@ func DescribeReport(report model.Report, hostname string) Description {
 				description.Omitted++
 				continue
 			}
-			terms = append(terms, "DNS "+rrtype+" record")
+			addTerm("DNS "+rrtype+" record", 2)
 			description.Positive = true
 		case "http_response":
 			var payload model.HTTPPayload
@@ -83,7 +91,7 @@ func DescribeReport(report model.Report, hostname string) Description {
 				continue
 			}
 			if payload.StatusCode >= 100 && payload.StatusCode <= 599 {
-				terms = append(terms, fmt.Sprintf("HTTP %d response", payload.StatusCode))
+				addTerm(fmt.Sprintf("HTTP %d response", payload.StatusCode), 2)
 				description.Positive = true
 			}
 		case "technology":
@@ -93,7 +101,7 @@ func DescribeReport(report model.Report, hostname string) Description {
 				continue
 			}
 			if name := safeDescriptionLabel(payload.Name); name != "" {
-				terms = append(terms, "technology "+name)
+				addTerm("technology "+name, 1)
 			}
 		}
 		if observation.ID != "" {
@@ -106,7 +114,7 @@ func DescribeReport(report model.Report, hostname string) Description {
 		}
 		for _, value := range []string{finding.ProviderID, finding.ProductID, finding.Category, string(finding.Relation)} {
 			if token := safeDescriptionToken(value); token != "" {
-				terms = append(terms, token)
+				addTerm(token, 1)
 			}
 		}
 		description.EvidenceIDs = append(description.EvidenceIDs, finding.EvidenceIDs...)
@@ -133,9 +141,21 @@ func DescribeReport(report model.Report, hostname string) Description {
 		description.Omitted += len(description.EvidenceIDs) - maximumDescriptionRefs
 		description.EvidenceIDs = description.EvidenceIDs[:maximumDescriptionRefs]
 	}
-	for len(terms) > 1 && len(strings.Join(terms, " ")) > maximumDescriptionBytes {
+	for len(terms) > 1 && (len(strings.Join(terms, " ")) > maximumDescriptionBytes || len(strings.Fields(strings.Join(terms, " "))) > maximumDescriptionWords) {
 		description.Omitted++
-		terms = terms[:len(terms)-1]
+		remove := -1
+		for index := range terms {
+			if priority[terms[index]] == 0 {
+				continue
+			}
+			if remove < 0 || priority[terms[index]] > priority[terms[remove]] || priority[terms[index]] == priority[terms[remove]] && terms[index] > terms[remove] {
+				remove = index
+			}
+		}
+		if remove < 0 {
+			break
+		}
+		terms = append(terms[:remove], terms[remove+1:]...)
 	}
 	description.Text = strings.Join(terms, " ")
 	digest := sha256.Sum256([]byte(description.FormatVersion + "\x00" + description.Text))

@@ -111,8 +111,10 @@ type Store interface {
 
 // Service validates imports without contacting any target.
 type Service struct {
-	store          Store
-	defaultContext string
+	store             Store
+	defaultContext    string
+	embeddingProvider EmbeddingProvider
+	embeddingSlots    chan struct{}
 }
 
 // NewService builds the inventory application service.

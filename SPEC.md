@@ -59,7 +59,7 @@ Findings name the relationship supported by the input. An AWS endpoint can produ
 | R19 | Observability | Expose health, coverage, data freshness, errors, and low-cardinality metrics. |
 | R20 | Reproducibility and testing | Reclassify stored evidence and test against fixtures, an IP oracle, and controlled network services. |
 | R21 | Self-hosted deployment | Supply a Go application, PostgreSQL, a local recursive resolver, and operator-run update jobs. |
-| R22 | Deterministic search | Use CIDR, suffix, alias, and structured database indexes. No embeddings or vector database. |
+| R22 | Local search | Use CIDR, suffix, alias, and structured database indexes. Optional local embeddings and vector search may rank retained evidence descriptions; they do not alter attribution findings. Basic search works without the model or vector extension. |
 | R23 | Dependency and data governance | Pin dependencies and source revisions, retain notices, and audit network side effects. |
 
 All listed capabilities are required for delivery. Phases set the work order without reducing scope.
@@ -86,7 +86,7 @@ Upstream metadata can mention APIs used by the upstream crawler. Preserve those 
 
 Excluded operations are vulnerability assessment, port scanning, exploitation, SMTP interrogation, exhaustive subdomain brute force, authenticated crawling, JavaScript execution, and browser automation. Reports contain observed public relationships, not contracts, employee counts, private architecture, or hidden origin servers.
 
-No embedding model, vector index, distributed message broker, graph database, or Kubernetes requirement. A complete copy of every public CT log and a raw BGP collector are not prerequisites for the supported local CT and ASN paths.
+No hosted embedding or enrichment service, distributed message broker, graph database, or Kubernetes requirement. Optional local embeddings and vector indexing require separately provisioned model artifacts and a compatible database extension. A complete copy of every public CT log and a raw BGP collector are not prerequisites for the supported local CT and ASN paths.
 
 ## 2. Architecture and engineering choices
 

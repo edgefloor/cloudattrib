@@ -1,12 +1,14 @@
 api:
-  listen_address: 127.0.0.1:8080
-  authentication_enabled: false
+  listen_address: 0.0.0.0:8080
+  authentication_enabled: true
+  authentication_mode: bearer
+  credentials_file: /run/secrets/api-credentials
 resolver:
-  address: 127.0.0.1:53
+  address: unbound:53
   network: udp
 data:
-  bundle_directory: ./data/bundles
-  source_directory: ./data/sources
+  bundle_directory: /var/lib/cloudattrib/bundles
+  source_directory: /var/lib/cloudattrib/sources
 limits:
   target:
     target_deadline: 1m
@@ -30,19 +32,13 @@ limits:
   maximum_request_bytes: 1048576
   maximum_batch_targets: 1000
   maximum_backlog_targets: 10000
-  maximum_resident_generations: 4
-  synchronous_waiters: 32
-  synchronous_admission_timeout: 5s
-  response_write_grace: 10s
 ct:
   enabled: false
   maximum_seed_names: 20
 storage:
-  postgres_dsn_file: ./secrets/postgres-dsn
+  postgres_dsn_file: /run/secrets/postgres-dsn
   lease_duration: 30s
   maximum_attempts: 3
-  report_retention: 720h
 embedding:
-  enabled: false
-  # When enabled, point to an absolute 0700 directory with generation sockets.
-  # socket_directory: /run/cloudattrib/embedding
+  enabled: true
+  socket_directory: /run/cloudattrib/embedding

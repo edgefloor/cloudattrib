@@ -1,0 +1,402 @@
+{
+  "corpus_version": "3",
+  "document_count": 54,
+  "lexical": {
+    "mean_ndcg10": 0.47288960032297195,
+    "mean_recall20": 0.4708333333333333
+  },
+  "lexical_mode": "any",
+  "models": {
+    "BAAI/bge-small-en-v1.5": {
+      "dimensions": 384,
+      "document_seconds": 0.10436487500555813,
+      "hybrid_mean_ndcg10": 0.851285806629432,
+      "hybrid_mean_recall20": 0.9166666666666666,
+      "load_seconds": 0.03895270801149309,
+      "mean_ndcg10": 0.8494235993743917,
+      "mean_recall20": 0.9010416666666666,
+      "model_file_bytes": 66465124,
+      "model_file_sha256": "51f1bd0addd6e859e42c2c8021a5e5461385bb676a649f4b269aa445449f2431",
+      "per_query": [
+        {
+          "ndcg10": 0.8662406555609836,
+          "query": "employee single sign on gateway",
+          "top5": [
+            "id05",
+            "id01",
+            "id02",
+            "id04",
+            "mail06"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "customer authentication portal",
+          "top5": [
+            "id05",
+            "id02",
+            "id01",
+            "id04",
+            "id03"
+          ]
+        },
+        {
+          "ndcg10": 0.7678329270936477,
+          "query": "dashboards for infrastructure metrics",
+          "top5": [
+            "misc02",
+            "mon03",
+            "mon05",
+            "mon01",
+            "mon02"
+          ]
+        },
+        {
+          "ndcg10": 0.9783978399515039,
+          "query": "service health monitoring",
+          "top5": [
+            "mon03",
+            "mon05",
+            "mon04",
+            "mon01",
+            "misc02"
+          ]
+        },
+        {
+          "ndcg10": 0.8090791338210653,
+          "query": "nonproduction preview deployments",
+          "top5": [
+            "dev06",
+            "misc04",
+            "dev02",
+            "dev04",
+            "dev01"
+          ]
+        },
+        {
+          "ndcg10": 0.7370432381894335,
+          "query": "test environment before release",
+          "top5": [
+            "dev06",
+            "misc05",
+            "mail06",
+            "dev03",
+            "misc04"
+          ]
+        },
+        {
+          "ndcg10": 0.8490359129129414,
+          "query": "outbound mail delivery hosts",
+          "top5": [
+            "mail03",
+            "pay03",
+            "mail04",
+            "pay01",
+            "mail05"
+          ]
+        },
+        {
+          "ndcg10": 0.0,
+          "query": "content delivery edge cache",
+          "top5": [
+            "store03",
+            "store02",
+            "store04",
+            "store05",
+            "pay01"
+          ]
+        },
+        {
+          "ndcg10": 0.8318724637288826,
+          "query": "public API backend endpoints",
+          "top5": [
+            "api02",
+            "api04",
+            "api03",
+            "mon05",
+            "id05"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "developer API reference documentation",
+          "top5": [
+            "api05",
+            "api06",
+            "api02",
+            "api04",
+            "api03"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "object and file storage",
+          "top5": [
+            "store03",
+            "store02",
+            "store04",
+            "store05",
+            "store06"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "payment checkout processing",
+          "top5": [
+            "pay03",
+            "pay01",
+            "pay04",
+            "pay02",
+            "pay05"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "remote access VPN service",
+          "top5": [
+            "misc01",
+            "mon05",
+            "id02",
+            "store04",
+            "pay04"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "analytics tracking service",
+          "top5": [
+            "misc02",
+            "mon05",
+            "mon03",
+            "mon01",
+            "mon04"
+          ]
+        },
+        {
+          "ndcg10": 0.8315546295836225,
+          "query": "retired or unreachable address",
+          "top5": [
+            "misc04",
+            "misc05",
+            "id02",
+            "mail03",
+            "mail06"
+          ]
+        },
+        {
+          "ndcg10": 0.9197207891481876,
+          "query": "DNS ownership verification token",
+          "top5": [
+            "mail06",
+            "id01",
+            "misc05",
+            "id02",
+            "id05"
+          ]
+        }
+      ],
+      "query_seconds": 0.015014040982350707,
+      "source_revision": "aa8f8b060edb00e03bfdd08813a2949946c8ba55"
+    },
+    "sentence-transformers/all-MiniLM-L6-v2": {
+      "dimensions": 384,
+      "document_seconds": 0.03568854200420901,
+      "hybrid_mean_ndcg10": 0.8192395474608465,
+      "hybrid_mean_recall20": 0.95625,
+      "load_seconds": 0.03691599998273887,
+      "mean_ndcg10": 0.8347026908468956,
+      "mean_recall20": 0.95625,
+      "model_file_bytes": 90387630,
+      "model_file_sha256": "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+      "per_query": [
+        {
+          "ndcg10": 0.8058467414416309,
+          "query": "employee single sign on gateway",
+          "top5": [
+            "id05",
+            "id01",
+            "dev02",
+            "api02",
+            "id04"
+          ]
+        },
+        {
+          "ndcg10": 0.7751482523375256,
+          "query": "customer authentication portal",
+          "top5": [
+            "id05",
+            "id02",
+            "id04",
+            "id01",
+            "pay05"
+          ]
+        },
+        {
+          "ndcg10": 0.7634994216714083,
+          "query": "dashboards for infrastructure metrics",
+          "top5": [
+            "misc02",
+            "mon03",
+            "mon02",
+            "mon01",
+            "api01"
+          ]
+        },
+        {
+          "ndcg10": 0.9930783166417602,
+          "query": "service health monitoring",
+          "top5": [
+            "mon03",
+            "mon04",
+            "mon05",
+            "mon01",
+            "mon02"
+          ]
+        },
+        {
+          "ndcg10": 0.8922108454754891,
+          "query": "nonproduction preview deployments",
+          "top5": [
+            "dev04",
+            "dev01",
+            "dev02",
+            "dev05",
+            "dev06"
+          ]
+        },
+        {
+          "ndcg10": 0.8829374068620365,
+          "query": "test environment before release",
+          "top5": [
+            "dev06",
+            "dev03",
+            "dev01",
+            "dev04",
+            "mon04"
+          ]
+        },
+        {
+          "ndcg10": 0.975788054854922,
+          "query": "outbound mail delivery hosts",
+          "top5": [
+            "mail03",
+            "mail04",
+            "mail02",
+            "mail01",
+            "misc04"
+          ]
+        },
+        {
+          "ndcg10": 0.13120507751234178,
+          "query": "content delivery edge cache",
+          "top5": [
+            "api01",
+            "store03",
+            "store02",
+            "store05",
+            "cdn01"
+          ]
+        },
+        {
+          "ndcg10": 0.7486761295186739,
+          "query": "public API backend endpoints",
+          "top5": [
+            "api06",
+            "api03",
+            "api02",
+            "api01",
+            "mon02"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "developer API reference documentation",
+          "top5": [
+            "api06",
+            "api05",
+            "api03",
+            "api02",
+            "api01"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "object and file storage",
+          "top5": [
+            "store02",
+            "store03",
+            "store04",
+            "store05",
+            "store01"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "payment checkout processing",
+          "top5": [
+            "pay03",
+            "pay01",
+            "pay05",
+            "pay04",
+            "pay02"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "remote access VPN service",
+          "top5": [
+            "misc01",
+            "api01",
+            "mon01",
+            "id01",
+            "id04"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "analytics tracking service",
+          "top5": [
+            "misc02",
+            "mon02",
+            "mon03",
+            "mon05",
+            "mon01"
+          ]
+        },
+        {
+          "ndcg10": 0.38685280723454163,
+          "query": "retired or unreachable address",
+          "top5": [
+            "api02",
+            "misc04",
+            "id05",
+            "id04",
+            "mon06"
+          ]
+        },
+        {
+          "ndcg10": 1.0,
+          "query": "DNS ownership verification token",
+          "top5": [
+            "misc05",
+            "mail06",
+            "id02",
+            "id06",
+            "id03"
+          ]
+        }
+      ],
+      "query_seconds": 0.0044581669790204614,
+      "source_revision": "d13954661f83248295ba75c1ed411eef3b7b936e"
+    }
+  },
+  "query_count": 16,
+  "runtime": {
+    "fastembed": "0.8.1",
+    "machine": "arm64",
+    "peak_maxrss": 517177344,
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "python": "3.13.14"
+  },
+  "vector_precision": "half"
+}

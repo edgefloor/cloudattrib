@@ -19,7 +19,7 @@ services:
     secrets:
       - postgres_password
     volumes:
-      - postgres:/var/lib/postgresql/data
+      - postgres:/var/lib/postgresql
     networks:
       - backend
     healthcheck:
