@@ -359,15 +359,23 @@ func TestServiceMetricsAddsProcessResidencyToDurableSnapshot(t *testing.T) {
 	t.Parallel()
 
 	factory := newFixtureBundleAnalyzerFactory(2, "active", 123, nil)
+	published := time.Now().Add(-48 * time.Hour)
+	factory.mu.Lock()
+	factory.activeLookup.sources = sourceSummary{unavailable: 1, oldestPublishedAt: &published}
+	factory.mu.Unlock()
 	provider := serviceMetricsProvider{
-		durable:   fixtureOperationalMetrics{snapshot: observability.Snapshot{BundlePins: 7}},
+		durable: fixtureOperationalMetrics{snapshot: observability.Snapshot{BundlePins: 7, Generations: observability.GenerationStatus{
+			Desired: &observability.Generation{BundleID: "desired", Number: 2},
+		}}},
 		analyzers: factory,
 	}
 	snapshot, err := provider.OperationalMetrics(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.BundlePins != 7 || snapshot.ResidentGenerations != 1 || snapshot.EstimatedRetainedBytes != 123 {
+	if snapshot.BundlePins != 7 || snapshot.ResidentGenerations != 1 || snapshot.EstimatedRetainedBytes != 123 ||
+		snapshot.Generations.Desired.BundleID != "desired" || snapshot.Generations.Loaded.BundleID != "active" ||
+		snapshot.LoadedUnavailableSources != 1 || snapshot.LoadedOldestSourceAgeSeconds < 48*3600-5 {
 		t.Fatalf("OperationalMetrics() = %#v", snapshot)
 	}
 }
@@ -675,9 +683,24 @@ func TestBundleAnalyzerFactoryFailedLoadKeepsLastKnownGood(t *testing.T) {
 	if factory.activeBundleID != previous.BundleID || factory.loaded.OperationID != previous.OperationID {
 		t.Fatalf("last-known-good changed to bundle=%q activation=%#v", factory.activeBundleID, factory.loaded)
 	}
+	diverged := factory.generationStatus(activationGeneration(desired))
+	if diverged.Desired.Number != desired.Generation || diverged.Loaded.BundleID != previous.BundleID || !diverged.Reload.Failed || diverged.Reload.LastAttemptAt == nil || diverged.Reload.LastSuccessAt == nil {
+		t.Fatalf("failed reload diagnostics = %#v", diverged)
+	}
+	lastSuccess := *diverged.Reload.LastSuccessAt
 	status, err := repository.Status()
 	if err != nil || len(status.Loads) != 1 || status.Loads[0].Status != "failed" || status.Loads[0].Generation != desired.Generation {
 		t.Fatalf("Status() = %#v, %v", status, err)
+	}
+	factory.load = func(_ context.Context, bundleID string) (app.Analyzer, lookupAvailability, int64, error) {
+		return runtimeFixtureAnalyzer{bundleID: bundleID}, lookupAvailability{}, 0, nil
+	}
+	if err := factory.reloadDesired(t.Context()); err != nil {
+		t.Fatalf("repaired reload: %v", err)
+	}
+	repaired := factory.generationStatus(activationGeneration(desired))
+	if repaired.Loaded.BundleID != desired.BundleID || repaired.Loaded.Number != desired.Generation || repaired.Reload.Failed || repaired.Reload.LastSuccessAt == nil || repaired.Reload.LastSuccessAt.Before(lastSuccess) {
+		t.Fatalf("repaired reload diagnostics = %#v", repaired)
 	}
 }
 
@@ -1240,5 +1263,23 @@ func TestServiceReadinessRecalculatesLoadedSourceAge(t *testing.T) {
 	second := readAge()
 	if first != 24*time.Hour || second != 72*time.Hour || lookup.data[0].SourceAge != nil {
 		t.Fatalf("readiness ages = %v then %v, loaded state = %#v", first, second, lookup.data[0])
+	}
+}
+
+func TestGenerationStatusSeparatesProcessLoadedStateAndStartupFallback(t *testing.T) {
+	t.Parallel()
+	loaded := datasets.Activation{OperationID: "a", Generation: 1, BundleID: "bundle-a", Action: "activate"}
+	desired := datasets.Activation{OperationID: "b", Generation: 2, BundleID: "bundle-b", Action: "rollback"}
+	first := newBundleAnalyzerFactory(2, runtimeFixtureAnalyzer{bundleID: "bundle-a"}, "bundle-a", lookupAvailability{}, loaded, 0)
+	first.recordStartupDesired(&desired)
+	second := newBundleAnalyzerFactory(2, runtimeFixtureAnalyzer{bundleID: "bundle-b"}, "bundle-b", lookupAvailability{}, desired, 0)
+	second.recordStartupDesired(&desired)
+	firstStatus := first.generationStatus(activationGeneration(desired))
+	secondStatus := second.generationStatus(activationGeneration(desired))
+	if !firstStatus.Reload.Failed || firstStatus.Loaded.BundleID != "bundle-a" || firstStatus.Desired.Action != "rollback" {
+		t.Fatalf("fallback process diagnostics = %#v", firstStatus)
+	}
+	if secondStatus.Reload.Failed || secondStatus.Loaded.BundleID != "bundle-b" || secondStatus.Reload.LastAttemptAt != nil {
+		t.Fatalf("up-to-date process diagnostics = %#v", secondStatus)
 	}
 }

@@ -1008,7 +1008,8 @@ func TestPostgresAdmissionClaimCompletionAndPinLifecycle(t *testing.T) {
 		t.Fatalf("Submit() error = %v (cause: %v)", err, errors.Unwrap(err))
 	}
 	metrics, err := store.OperationalMetrics(ctx)
-	if err != nil || metrics.ReservedTargets != 1 || metrics.QueuedTargets != 1 || metrics.BundlePins != 1 || metrics.CTCheckpoints != 1 || metrics.ActiveBundleID != "fixture-bundle" {
+	if err != nil || metrics.ReservedTargets != 1 || metrics.QueuedTargets != 1 || metrics.BundlePins != 1 || metrics.CTCheckpoints != 1 || metrics.ActiveBundleID != "fixture-bundle" ||
+		metrics.Generations.Desired == nil || metrics.Generations.Desired.BundleID != "fixture-bundle" || metrics.Generations.Desired.Number == 0 {
 		t.Fatalf("OperationalMetrics() = %#v, %v", metrics, err)
 	}
 	pinned, err := store.BundlePinned(ctx, "fixture-bundle")

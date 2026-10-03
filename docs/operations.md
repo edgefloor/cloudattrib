@@ -196,6 +196,10 @@ Reports and retained observations currently have no automatic age-based deletion
 
 If a process stops after the database commit but before filesystem publication, startup reconciles the pointer from the committed generation. If loading fails, inspect `datasets status`. Correct the candidate or commit a rollback generation, then restart or wait for the reload loop.
 
+`/readyz` reports `generations.desired` from the committed database activation and `generations.loaded` from this process's analyzer. The reload section gives the last attempt time, last successful load time, and whether the latest attempt failed. A failed reload leaves usable last-known-good operations available. Each process reports its own loaded generation; a rollback creates a new generation number even when it selects older bundle data. In-flight and pinned reports keep the bundle captured for their attempt.
+
+`/metrics` exposes `cloudattrib_bundle_desired_generation`, `cloudattrib_bundle_loaded_generation`, separate desired and loaded bundle info gauges, and reload failure and timestamp gauges. `cloudattrib_loaded_dataset_unavailable_sources` and `cloudattrib_loaded_dataset_oldest_source_age_seconds` describe sources in the loaded analyzer at scrape time. The existing `cloudattrib_dataset_*` gauges describe the committed desired bundle. Bundle IDs appear only on the single desired and loaded info series per process; targets and reports are never metric labels. Filesystem `datasets status` records desired publication and process load events; it does not replace the database's committed desired activation.
+
 ## Resource tuning
 
 Start with the limits in [config/example.yaml](../config/example.yaml). The service applies one process-level permit pool to synchronous API requests and durable workers. Loaded bundle generations share the same pool.

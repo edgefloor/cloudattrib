@@ -246,12 +246,20 @@ func TestMetricsExposeBoundedOperationalStateAndAdmissionRejections(t *testing.T
 	t.Parallel()
 
 	store := jobs.NewMemoryStore(1)
+	lastAttempt := time.Unix(100, 0)
+	lastSuccess := time.Unix(50, 0)
 	handler := mustHandler(t, Config{
 		Jobs: store,
 		Metrics: fixtureMetricsProvider{snapshot: observability.Snapshot{
 			ReservedTargets: 1, MaximumTargets: 10, QueuedTargets: 1, RunningTargets: 2,
 			BundlePins: 3, ResidentGenerations: 4, EstimatedRetainedBytes: 12345,
 			CTCheckpoints: 4, CTIngestionLagSeconds: 5.25, UnavailableSources: 2, OldestSourceAgeSeconds: 86400, ActiveBundleID: "bundle-fixture",
+			LoadedUnavailableSources: 1, LoadedOldestSourceAgeSeconds: 172800,
+			Generations: observability.GenerationStatus{
+				Desired: &observability.Generation{BundleID: "bundle-new", Number: 3},
+				Loaded:  &observability.Generation{BundleID: "bundle-old", Number: 2},
+				Reload:  observability.ReloadStatus{Failed: true, LastAttemptAt: &lastAttempt, LastSuccessAt: &lastSuccess},
+			},
 		}},
 	})
 	first := serve(handler, http.MethodPost, "/v1/jobs", `{"idempotency_key":"first","targets":[{"target":"example.com","kind":"domain"}]}`, "127.0.0.1:1000", nil)
@@ -276,6 +284,15 @@ func TestMetricsExposeBoundedOperationalStateAndAdmissionRejections(t *testing.T
 		"cloudattrib_ct_ingestion_lag_seconds 5.250",
 		"cloudattrib_dataset_unavailable_sources 2",
 		"cloudattrib_dataset_oldest_source_age_seconds 86400.000",
+		"cloudattrib_loaded_dataset_unavailable_sources 1",
+		"cloudattrib_loaded_dataset_oldest_source_age_seconds 172800.000",
+		"cloudattrib_bundle_reload_failed 1",
+		"cloudattrib_bundle_reload_last_attempt_timestamp_seconds 100",
+		"cloudattrib_bundle_reload_last_success_timestamp_seconds 50",
+		"cloudattrib_bundle_desired_generation 3",
+		`cloudattrib_bundle_desired_info{bundle_id="bundle-new"} 1`,
+		"cloudattrib_bundle_loaded_generation 2",
+		`cloudattrib_bundle_loaded_info{bundle_id="bundle-old"} 1`,
 		`cloudattrib_bundle_info{bundle_id="bundle-fixture"} 1`,
 	} {
 		if !strings.Contains(metrics.Body.String(), expected) {
@@ -532,7 +549,11 @@ func TestHealthUsesOperationReadiness(t *testing.T) {
 			name: "degraded is live",
 			snapshot: ReadinessSnapshot{State: ReadinessDegraded, Operations: []OperationReadiness{{
 				Name: "lookup_ip", State: ReadinessReady,
-			}}},
+			}}, Generations: &observability.GenerationStatus{
+				Desired: &observability.Generation{BundleID: "desired", Number: 2},
+				Loaded:  &observability.Generation{BundleID: "loaded", Number: 1},
+				Reload:  observability.ReloadStatus{Failed: true},
+			}},
 			wantStatus: http.StatusOK,
 		},
 		{
@@ -559,6 +580,9 @@ func TestHealthUsesOperationReadiness(t *testing.T) {
 			}
 			if snapshot.State != test.snapshot.State {
 				t.Fatalf("readiness state = %q, want %q", snapshot.State, test.snapshot.State)
+			}
+			if test.snapshot.Generations != nil && (snapshot.Generations == nil || snapshot.Generations.Desired.BundleID != "desired" || snapshot.Generations.Loaded.BundleID != "loaded" || !snapshot.Generations.Reload.Failed) {
+				t.Fatalf("generation diagnostics = %#v", snapshot.Generations)
 			}
 		})
 	}

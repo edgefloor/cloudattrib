@@ -85,6 +85,9 @@ func (s *Store) Ping(ctx context.Context) error {
 // OperationalMetrics reads bounded queue, pin, bundle, and CT gauges.
 func (s *Store) OperationalMetrics(ctx context.Context) (observability.Snapshot, error) {
 	var snapshot observability.Snapshot
+	var desiredNumber int64
+	var desiredAction string
+	var desiredAt time.Time
 	err := s.pool.QueryRow(ctx, `WITH active AS (
 		SELECT manifest FROM dataset_bundles WHERE bundle_id=(SELECT bundle_id FROM bundle_activation_generations ORDER BY generation DESC LIMIT 1)
 	) SELECT
@@ -97,7 +100,10 @@ func (s *Store) OperationalMetrics(ctx context.Context) (observability.Snapshot,
 		COALESCE((SELECT GREATEST(EXTRACT(EPOCH FROM clock_timestamp()-max(tree_timestamp)),0) FROM ct_checkpoints WHERE tree_timestamp IS NOT NULL),0),
 		COALESCE((SELECT count(*) FROM active, jsonb_array_elements(COALESCE(manifest->'sources','[]'::jsonb)) source WHERE source->>'status'<>'complete'),0),
 		COALESCE((SELECT GREATEST(EXTRACT(EPOCH FROM clock_timestamp()-min((source->>'published_at')::timestamptz)),0) FROM active, jsonb_array_elements(COALESCE(manifest->'sources','[]'::jsonb)) source WHERE source ? 'published_at'),0),
-		COALESCE((SELECT bundle_id FROM bundle_activation_generations ORDER BY generation DESC LIMIT 1),'')
+		COALESCE((SELECT bundle_id FROM bundle_activation_generations ORDER BY generation DESC LIMIT 1),''),
+		COALESCE((SELECT generation FROM bundle_activation_generations ORDER BY generation DESC LIMIT 1),0),
+		COALESCE((SELECT action FROM bundle_activation_generations ORDER BY generation DESC LIMIT 1),''),
+		COALESCE((SELECT activated_at FROM bundle_activation_generations ORDER BY generation DESC LIMIT 1),'epoch'::timestamptz)
 	FROM queue_capacity WHERE singleton=true`).Scan(
 		&snapshot.ReservedTargets,
 		&snapshot.MaximumTargets,
@@ -109,9 +115,15 @@ func (s *Store) OperationalMetrics(ctx context.Context) (observability.Snapshot,
 		&snapshot.UnavailableSources,
 		&snapshot.OldestSourceAgeSeconds,
 		&snapshot.ActiveBundleID,
+		&desiredNumber,
+		&desiredAction,
+		&desiredAt,
 	)
 	if err != nil {
 		return observability.Snapshot{}, persistence("read operational metrics", err)
+	}
+	if snapshot.ActiveBundleID != "" {
+		snapshot.Generations.Desired = &observability.Generation{BundleID: snapshot.ActiveBundleID, Number: desiredNumber, Action: desiredAction, ActivatedAt: desiredAt}
 	}
 	return snapshot, nil
 }

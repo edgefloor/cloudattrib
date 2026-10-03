@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"cloudattrib/internal/app"
 	collectdns "cloudattrib/internal/collect/dns"
@@ -59,9 +60,29 @@ func newAnalyzer(ctx context.Context, configuration config.Config, store app.Res
 }
 
 type lookupAvailability struct {
-	prefix bool
-	asn    bool
-	data   []model.CapabilityState
+	prefix  bool
+	asn     bool
+	data    []model.CapabilityState
+	sources sourceSummary
+}
+
+type sourceSummary struct {
+	unavailable       int64
+	oldestPublishedAt *time.Time
+}
+
+func summarizeSources(sources []datasets.Source) sourceSummary {
+	var summary sourceSummary
+	for _, source := range sources {
+		if source.Status != model.CoverageComplete {
+			summary.unavailable++
+		}
+		if source.PublishedAt != nil && (summary.oldestPublishedAt == nil || source.PublishedAt.Before(*summary.oldestPublishedAt)) {
+			publishedAt := *source.PublishedAt
+			summary.oldestPublishedAt = &publishedAt
+		}
+	}
+	return summary
 }
 
 func (a lookupAvailability) usable() bool { return a.prefix || a.asn }
@@ -138,6 +159,7 @@ func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.C
 	}
 	var prefixReader app.PrefixReader
 	var asnReader app.ASNReader
+	var sources sourceSummary
 	var suffixDetector app.Detector = cdnsuffix.New(nil)
 	sourceDirectory := configuration.Data.SourceDirectory
 	repository, err := datasets.NewRepository(configuration.Data.BundleDirectory, detectorBuildID)
@@ -170,6 +192,7 @@ func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.C
 			return nil, "", nil, lookupAvailability{}, fmt.Errorf("encode local bundle manifest: %w", err)
 		}
 		capabilities = append(capabilities[:4], loaded.Candidate.View.Capabilities()...)
+		sources = summarizeSources(loaded.Candidate.Manifest.Sources)
 		if activation != nil {
 			if err := repository.RecordLoad(*activation, "loaded", ""); err != nil {
 				return nil, "", nil, lookupAvailability{}, fmt.Errorf("record active bundle load: %w", err)
@@ -209,7 +232,7 @@ func newAnalyzerDetailsWithResources(ctx context.Context, configuration config.C
 		TargetTimeout:     configuration.Limits.Target.TargetDeadline,
 		Controller:        controller,
 		Limits:            configuration.Limits.Target,
-	}), bundleID, manifest, lookupAvailability{prefix: prefixReader != nil, asn: asnReader != nil, data: slices.Clone(capabilities[4:])}, nil
+	}), bundleID, manifest, lookupAvailability{prefix: prefixReader != nil, asn: asnReader != nil, data: slices.Clone(capabilities[4:]), sources: sources}, nil
 }
 
 func newRedirectResolver(query collectdns.QueryFunc) collecthttp.ResolveFunc {

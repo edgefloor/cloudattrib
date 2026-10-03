@@ -187,6 +187,7 @@ func Serve(ctx context.Context, configuration config.Config) error {
 		configuration.Limits.MaximumResidentGenerations,
 		analyzer, activeBundleID, lookup, loaded, retainedBytes,
 	)
+	analyzerFactory.recordStartupDesired(desired)
 	analyzerFactory.configuration = configuration
 	analyzerFactory.store = store
 	analyzerFactory.authority = store
@@ -303,6 +304,9 @@ type bundleAnalyzerFactory struct {
 	activeBundleID    string
 	activeLookup      lookupAvailability
 	loaded            datasets.Activation
+	reloadAttemptAt   time.Time
+	reloadSuccessAt   time.Time
+	reloadFailed      bool
 	mu                sync.Mutex
 	maximumResident   int
 	residents         map[string]*residentAnalyzer
@@ -364,10 +368,49 @@ func newBundleAnalyzerFactory(maximumResident int, active app.Analyzer, activeBu
 		loads:           make(map[string]*bundleLoad),
 		changed:         make(chan struct{}),
 	}
+	if active != nil {
+		factory.reloadSuccessAt = time.Now()
+	}
 	if active != nil && activeBundleID != "" {
 		factory.residents[activeBundleID] = &residentAnalyzer{analyzer: active, lookup: lookup, estimatedBytes: estimatedBytes}
 	}
 	return factory
+}
+
+func (f *bundleAnalyzerFactory) recordStartupDesired(desired *datasets.Activation) {
+	if desired == nil {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if desired.OperationID != f.loaded.OperationID || desired.Generation != f.loaded.Generation {
+		f.reloadAttemptAt = time.Now()
+		f.reloadFailed = true
+	}
+}
+
+func activationGeneration(activation datasets.Activation) *observability.Generation {
+	if activation.BundleID == "" {
+		return nil
+	}
+	return &observability.Generation{BundleID: activation.BundleID, Number: activation.Generation, Action: activation.Action, ActivatedAt: activation.At}
+}
+
+func (f *bundleAnalyzerFactory) generationStatus(desired *observability.Generation) observability.GenerationStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return observability.GenerationStatus{
+		Desired: desired,
+		Loaded:  activationGeneration(f.loaded),
+		Reload:  observability.ReloadStatus{LastAttemptAt: nonzeroTime(f.reloadAttemptAt), LastSuccessAt: nonzeroTime(f.reloadSuccessAt), Failed: f.reloadFailed},
+	}
+}
+
+func nonzeroTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	return &value
 }
 
 func (f *bundleAnalyzerFactory) ensureStateLocked() {
@@ -672,18 +715,40 @@ func (f *bundleAnalyzerFactory) reloadLoop(ctx context.Context, interval time.Du
 	}
 }
 
-func (f *bundleAnalyzerFactory) reloadDesired(ctx context.Context) error {
+func (f *bundleAnalyzerFactory) reloadDesired(ctx context.Context) (reloadErr error) {
 	authority := f.authority
 	if authority == nil {
 		var ok bool
 		authority, ok = f.store.(bundleActivationAuthority)
 		if !ok {
+			f.recordReloadFailure()
 			return model.NewError(model.CodePersistenceUnavailable, "committed bundle activation authority is unavailable", nil)
 		}
 	}
 	activation, err := authority.DesiredBundle(ctx)
-	if err != nil || activation == nil {
+	if err != nil {
+		if ctx.Err() == nil {
+			f.recordReloadFailure()
+		}
 		return err
+	}
+	if activation == nil {
+		return nil
+	}
+	f.mu.Lock()
+	needsLoad := activation.OperationID != f.loaded.OperationID || activation.Generation != f.loaded.Generation
+	if needsLoad {
+		f.reloadAttemptAt = time.Now()
+	}
+	f.mu.Unlock()
+	if needsLoad {
+		defer func() {
+			f.mu.Lock()
+			if ctx.Err() == nil {
+				f.reloadFailed = reloadErr != nil && (f.loaded.OperationID != activation.OperationID || f.loaded.Generation != activation.Generation)
+			}
+			f.mu.Unlock()
+		}()
 	}
 	repository := f.repository
 	if repository == nil {
@@ -730,10 +795,19 @@ func (f *bundleAnalyzerFactory) reloadDesired(ctx context.Context) error {
 	f.activeBundleID = activation.BundleID
 	f.activeLookup = captured.lookup
 	f.loaded = *activation
+	f.reloadSuccessAt = time.Now()
+	f.reloadFailed = false
 	f.notifyLocked()
 	f.mu.Unlock()
 	captured.Release()
 	return repository.RecordLoad(*activation, "loaded", "")
+}
+
+func (f *bundleAnalyzerFactory) recordReloadFailure() {
+	f.mu.Lock()
+	f.reloadAttemptAt = time.Now()
+	f.reloadFailed = true
+	f.mu.Unlock()
 }
 
 func sameActivation(left, right *datasets.Activation) bool {
@@ -763,8 +837,20 @@ func (p serviceMetricsProvider) OperationalMetrics(ctx context.Context) (observa
 	}
 	if p.analyzers != nil {
 		snapshot.ResidentGenerations, snapshot.EstimatedRetainedBytes = p.analyzers.residencySnapshot()
+		snapshot.Generations = p.analyzers.generationStatus(snapshot.Generations.Desired)
+		snapshot.LoadedUnavailableSources, snapshot.LoadedOldestSourceAgeSeconds = p.analyzers.loadedSourceMetrics(time.Now())
 	}
 	return snapshot, nil
+}
+
+func (f *bundleAnalyzerFactory) loadedSourceMetrics(now time.Time) (int64, float64) {
+	f.mu.Lock()
+	sources := f.activeLookup.sources
+	f.mu.Unlock()
+	if sources.oldestPublishedAt == nil {
+		return sources.unavailable, 0
+	}
+	return sources.unavailable, max(0, now.Sub(*sources.oldestPublishedAt).Seconds())
 }
 
 type serviceReadiness struct {
@@ -783,7 +869,18 @@ func (r serviceReadiness) Readiness(ctx context.Context) api.ReadinessSnapshot {
 	if r.now != nil {
 		now = r.now
 	}
-	return serviceReadinessSnapshotAt(persistenceReady, lookup, now())
+	snapshot := serviceReadinessSnapshotAt(persistenceReady, lookup, now())
+	if r.analyzers != nil {
+		var desired *observability.Generation
+		if r.store != nil {
+			if activation, err := r.store.DesiredBundle(ctx); err == nil && activation != nil {
+				desired = activationGeneration(*activation)
+			}
+		}
+		generations := r.analyzers.generationStatus(desired)
+		snapshot.Generations = &generations
+	}
+	return snapshot
 }
 
 func serviceReadinessSnapshot(persistenceReady bool, lookup lookupAvailability) api.ReadinessSnapshot {
