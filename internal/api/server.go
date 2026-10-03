@@ -36,6 +36,8 @@ type Config struct {
 	Results                     app.ResultStore
 	Observations                app.ObservationPageReader
 	Findings                    app.FindingStore
+	Inventory                   InventoryService
+	InventoryValidator          InventoryValidator
 	Readiness                   ReadinessProvider
 	Metrics                     observability.Provider
 	Authentication              Authentication
@@ -115,6 +117,8 @@ func NewHandler(config Config) (http.Handler, error) {
 		results:              config.Results,
 		observations:         observationReader,
 		findings:             config.Findings,
+		inventory:            config.Inventory,
+		inventoryValidator:   config.InventoryValidator,
 		readiness:            config.Readiness,
 		metrics:              config.Metrics,
 		authenticate:         authenticator,
@@ -131,6 +135,8 @@ type server struct {
 	results                        app.ResultStore
 	observations                   app.ObservationPageReader
 	findings                       app.FindingStore
+	inventory                      InventoryService
+	inventoryValidator             InventoryValidator
 	readiness                      ReadinessProvider
 	metrics                        observability.Provider
 	authenticate                   func(*http.Request) (string, bool)
@@ -168,6 +174,8 @@ func (s *server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 		s.listProducts(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/v1/findings":
 		s.listFindings(writer, request)
+	case strings.HasPrefix(request.URL.Path, "/v1/inventory"):
+		s.inventoryRoute(writer, request)
 	case request.Method == http.MethodGet && request.URL.Path == "/livez":
 		writeJSON(writer, http.StatusOK, map[string]string{"status": "live"})
 	case request.Method == http.MethodGet && request.URL.Path == "/readyz":
@@ -733,6 +741,7 @@ func (s *server) defaultReadiness(_ context.Context) ReadinessSnapshot {
 		operationReadiness("jobs", s.jobs != nil, "durable job storage is unavailable"),
 		operationReadiness("results", s.results != nil, "durable result storage is unavailable"),
 		operationReadiness("findings", s.findings != nil, "finding storage is unavailable"),
+		operationReadiness("inventory", s.inventory != nil, "hostname inventory storage is unavailable"),
 		{Name: "catalog", State: ReadinessReady},
 	}
 	ready, unavailable := 0, 0

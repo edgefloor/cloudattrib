@@ -22,6 +22,7 @@ import (
 	"cloudattrib/internal/config"
 	"cloudattrib/internal/datasets"
 	"cloudattrib/internal/detect/webtech"
+	"cloudattrib/internal/inventory"
 	"cloudattrib/internal/jobs"
 	"cloudattrib/internal/model"
 	"cloudattrib/internal/observability"
@@ -200,6 +201,7 @@ func Serve(ctx context.Context, configuration config.Config) error {
 	}
 	handler, err := api.NewHandler(api.Config{
 		Analyzer: analyzerFactory, Jobs: store, Results: store, Findings: store, Authentication: authentication,
+		Inventory: inventory.NewService(store), InventoryValidator: inventory.NewValidator(inventory.NewService(store), store, store),
 		Readiness:                   serviceReadiness{store: store, analyzers: analyzerFactory},
 		Metrics:                     serviceMetricsProvider{durable: store, analyzers: analyzerFactory},
 		MaximumRequestBytes:         configuration.Limits.MaximumRequestBytes,
@@ -911,6 +913,7 @@ func serviceReadinessSnapshotAt(persistenceReady bool, lookup lookupAvailability
 		runtimeOperationReadiness("jobs", persistenceReady, "durable job storage is unavailable"),
 		runtimeOperationReadiness("results", persistenceReady, "durable result storage is unavailable"),
 		runtimeOperationReadiness("findings", persistenceReady, "finding storage is unavailable"),
+		runtimeOperationReadiness("inventory", persistenceReady, "hostname inventory storage is unavailable"),
 		{Name: "catalog", State: api.ReadinessReady},
 	}
 	state := api.ReadinessDegraded
