@@ -37,6 +37,7 @@ type Validator struct {
 	jobs      JobSubmitter
 }
 
+// NewValidator binds the inventory selection and durable job admission seams.
 func NewValidator(inventory *Service, assets ValidationStore, jobs JobSubmitter) *Validator {
 	return &Validator{inventory: inventory, assets: assets, jobs: jobs}
 }

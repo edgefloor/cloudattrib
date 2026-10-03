@@ -15,6 +15,7 @@ import (
 	"cloudattrib/internal/target"
 )
 
+// MaximumImportEntries bounds one retryable import chunk.
 const MaximumImportEntries = 1000
 
 // AssetID is stable for one canonical concrete hostname across sources.
@@ -112,6 +113,7 @@ type Service struct {
 	store Store
 }
 
+// NewService builds the inventory application service.
 func NewService(store Store) *Service { return &Service{store: store} }
 
 // Search reads only known inventory records and never performs discovery.

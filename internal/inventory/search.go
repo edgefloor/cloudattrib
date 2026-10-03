@@ -15,6 +15,7 @@ import (
 // SearchMode selects one indexed hostname lookup.
 type SearchMode string
 
+// Search modes distinguish bounded hostname lookup strategies.
 const (
 	SearchBrowse     SearchMode = "browse"
 	SearchExact      SearchMode = "exact"
